@@ -1,0 +1,14 @@
+# Rust
+target/
+
+# Python
+__pycache__/
+*.pyc
+*.so
+.venv/
+dist/
+*.egg-info/
+
+# Node
+node_modules/
+*.node

@@ -1,0 +1,23 @@
+[package]
+name = "warpllm-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "_warpllm"
+# rlib alongside cdylib keeps `cargo test --workspace` able to link this crate
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+warpllm.workspace = true
+pyo3 = { version = "0.29", features = ["abi3-py310"] }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
+tokio.workspace = true
+
+[features]
+# Only maturin enables this (see pyproject.toml); enabling it unconditionally
+# breaks `cargo test`/`cargo clippy` linking outside a Python build.
+extension-module = ["pyo3/extension-module"]

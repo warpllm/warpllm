@@ -1,0 +1,36 @@
+{
+  "name": "warpllm",
+  "version": "0.1.0",
+  "description": "A warp-speed, robust AI gateway",
+  "license": "Apache-2.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "engines": {
+    "node": ">= 20"
+  },
+  "napi": {
+    "binaryName": "warpllm",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "wasm32-wasip1-threads"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.7",
+    "@types/node": "25.9.4",
+    "typescript": "^5",
+    "vitest": "^3"
+  }
+}

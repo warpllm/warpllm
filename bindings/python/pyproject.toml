@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.14,<2"]
+build-backend = "maturin"
+
+[project]
+name = "warpllm"
+description = "A warp-speed, robust AI gateway"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.25"]
+
+[tool.maturin]
+module-name = "warpllm._warpllm"
+python-source = "python"
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

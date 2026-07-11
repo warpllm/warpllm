@@ -4,8 +4,10 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
-    "noEmit": true,
-    "allowJs": true
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "src-ts",
+    "allowJs": false
   },
-  "include": ["__test__/**/*.ts", "src-ts/**/*.ts", "index.d.ts"]
+  "include": ["src-ts/**/*.ts"]
 }

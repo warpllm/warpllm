@@ -15,7 +15,12 @@ classifiers = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.25"]
+dev = [
+    "openai>=1.60",
+    "pytest>=8",
+    "pytest-asyncio>=0.25",
+    "pytest-httpserver>=1.1",
+]
 
 [tool.maturin]
 module-name = "warpllm._warpllm"

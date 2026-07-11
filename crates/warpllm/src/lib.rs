@@ -1,8 +1,22 @@
 //! Core engine for warpllm, a warp-speed, robust AI gateway.
 
+mod client;
+mod config;
 mod error;
+mod http;
+mod model;
+mod providers;
 
+pub use client::Client;
+pub use config::ClientConfig;
+// The explicit re-export shadows the glob one, so `warpllm::Error` is the
+// crate error; the moderation `types::Error` stays reachable via its module.
 pub use error::{Error, Result};
+pub use types::*;
+
+pub mod types {
+    pub use crate::providers::openai::types::*;
+}
 
 /// Returns the warpllm version.
 ///

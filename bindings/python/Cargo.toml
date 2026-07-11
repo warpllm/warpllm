@@ -16,6 +16,7 @@ warpllm.workspace = true
 pyo3 = { version = "0.29", features = ["abi3-py310"] }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 tokio.workspace = true
+serde_json.workspace = true
 
 [features]
 # Only maturin enables this (see pyproject.toml); enabling it unconditionally

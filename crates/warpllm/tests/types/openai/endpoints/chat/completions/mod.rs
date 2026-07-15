@@ -1,4 +1,4 @@
-//! Every fixture in tests/providers/openai/fixtures must survive a deserialize →
+//! Every fixture in this directory's fixtures/ must survive a deserialize →
 //! reserialize round trip byte-for-byte (as JSON values). Any field the
 //! upstream API sends that we drop, rename, or mistype fails the diff.
 //!
@@ -10,7 +10,7 @@ use warpllm::ChatCompletion;
 fn fixtures_round_trip_losslessly() {
     let dir = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/providers/openai/fixtures"
+        "/tests/types/openai/endpoints/chat/completions/fixtures"
     );
     let mut checked = 0;
     for entry in std::fs::read_dir(dir).unwrap() {

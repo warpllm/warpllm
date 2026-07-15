@@ -6,7 +6,7 @@ use crate::config::{ClientConfig, DEFAULT_TIMEOUT_SECS};
 use crate::error::{Error, Result};
 use crate::model::{ProviderKind, parse_model};
 use crate::providers;
-use crate::types::{ChatCompletion, ChatCompletionRequest};
+use crate::types::openai::endpoints::chat::completions::{ChatCompletion, ChatCompletionRequest};
 
 pub struct Client {
     http: reqwest::Client,
@@ -48,7 +48,10 @@ impl Client {
                     .base_url
                     .as_deref()
                     .ok_or_else(|| Error::InvalidInput("missing base_url".into()))?;
-                providers::openai::chat_completion(&self.http, base, api_key, model, &request).await
+                providers::openai::endpoints::chat::completions::post(
+                    &self.http, base, api_key, model, &request,
+                )
+                .await
             }
         }
     }

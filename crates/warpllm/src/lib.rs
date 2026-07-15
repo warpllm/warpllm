@@ -7,16 +7,14 @@ mod http;
 mod model;
 mod providers;
 
+pub mod types;
+
 pub use client::Client;
 pub use config::ClientConfig;
 // The explicit re-export shadows the glob one, so `warpllm::Error` is the
-// crate error; the moderation `types::Error` stays reachable via its module.
+// crate error; the moderation `Error` stays reachable via its types module.
 pub use error::{Error, Result};
-pub use types::*;
-
-pub mod types {
-    pub use crate::providers::openai::types::*;
-}
+pub use types::openai::endpoints::chat::completions::*;
 
 /// Returns the warpllm version.
 ///

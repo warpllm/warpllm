@@ -2,6 +2,16 @@
 
 A warp-speed, robust AI gateway written for rust, node, and python applications - built for planet scale by a former Googler
 
+## Community
+
+> [!IMPORTANT]
+> **warpllm is community-led.**
+>
+> The roadmap, examples, integrations, and rough edges should be shaped in the open by the people building with it. Bring ideas, questions, provider requests, bug reports, benchmarks, and experiments.
+>
+> [![Join Discord](https://img.shields.io/badge/Discord-Join%20the%20warpllm%20community-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/tSSQTxFnsC)
+> [![Reddit](https://img.shields.io/badge/Reddit-r%2Fwarpllm-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/r/warpllm/)
+
 ## Features
 
 1.  Provider-agnostic API - switch between different providers and models without having to learn a new integration.

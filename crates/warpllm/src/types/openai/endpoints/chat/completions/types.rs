@@ -237,7 +237,8 @@ pub struct ModerationResult {
 }
 
 /// Moderation error. Exact upstream name; shadowed at the crate root by the
-/// crate error type, so reach it as `warpllm::types::Error`.
+/// crate error type, so reach it as
+/// `warpllm::types::openai::endpoints::chat::completions::Error`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Error {
     pub code: String,

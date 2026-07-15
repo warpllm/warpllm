@@ -13,7 +13,7 @@ from warpllm import ChatCompletion
 FIXTURES = sorted(
     (
         Path(__file__).resolve().parents[3]
-        / "crates/warpllm/tests/providers/openai/fixtures"
+        / "crates/warpllm/tests/types/openai/endpoints/chat/completions/fixtures"
     ).glob("*.json")
 )
 

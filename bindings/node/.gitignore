@@ -1,0 +1,6 @@
+# Generated at pack/publish time (prepack copies from repo root; napi
+# create-npm-dirs regenerates the platform packages in CI).
+/README.md
+/LICENSE
+/npm/
+*.node

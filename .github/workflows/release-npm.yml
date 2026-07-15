@@ -1,0 +1,256 @@
+# Prebuild matrix + npm publish for bindings/node.
+# Started from napi-rs/package-template's CI.yml, adapted for the workspace:
+# same version-lockstep gate and tag-driven flow as release-python.yml.
+#
+# Tags (vX.Y.Z) build, test, and publish; workflow_dispatch runs everything
+# except the publish step. The publish loop is idempotent: each of the 8
+# warpllm-<platform> packages and the main package is skipped if its version
+# already exists, so a partially failed release converges on re-run.
+name: Release (npm)
+
+env:
+  APP_NAME: warpllm
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Assert tag, workspace Cargo.toml, and package.json agree
+        run: |
+          WS=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p')
+          PKG=$(jq -r .version bindings/node/package.json)
+          echo "workspace=$WS package.json=$PKG ref=$GITHUB_REF_NAME"
+          test -n "$WS"
+          test "$PKG" = "$WS"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            test "${GITHUB_REF_NAME#v}" = "$WS"
+          fi
+
+  build:
+    needs: check-version
+    name: build ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-15-intel
+            target: x86_64-apple-darwin
+          - host: macos-latest
+            target: aarch64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+          - host: windows-latest
+            target: aarch64-pc-windows-msvc
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build-args: --use-napi-cross
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            build-args: --use-napi-cross
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            build-args: -x
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            build-args: -x
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.settings.target }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        if: contains(matrix.settings.target, 'musl')
+        with:
+          version: 0.14.1
+          use-cache: false
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+        if: contains(matrix.settings.target, 'musl')
+        with:
+          tool: cargo-zigbuild
+      - name: Install dependencies
+        run: npm ci
+        working-directory: bindings/node
+      - name: Build
+        run: ./node_modules/.bin/napi build --platform --release --target ${{ matrix.settings.target }} ${{ matrix.settings.build-args }}
+        working-directory: bindings/node
+        shell: bash
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: bindings/node/${{ env.APP_NAME }}.*.node
+          if-no-files-found: error
+
+  # Full vitest suite on hosts that run the binary natively.
+  test-native:
+    needs: build
+    name: test ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: aarch64-apple-darwin
+          - host: macos-15-intel
+            target: x86_64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+          - host: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Install dependencies
+        run: npm ci
+        working-directory: bindings/node
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: bindings/node
+      - name: Test
+        run: npm test
+        working-directory: bindings/node
+
+  # Cross-compiled linux binaries: load the addon and call version() inside a
+  # matching container. The generated index.js loader is dependency-free, so
+  # no node_modules are needed in the container.
+  test-linux-cross:
+    needs: build
+    name: smoke ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            image: node:22-alpine
+          - host: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            image: node:22-slim
+          - host: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            image: node:22-alpine
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: bindings/node
+      - name: Load addon and call version()
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work/bindings/node ${{ matrix.settings.image }} \
+            node -e "const { version } = require('./index.js'); const v = version(); console.log('native ok:', v); if (!/^\d+\.\d+\.\d+$/.test(v)) process.exit(1)"
+
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [test-native, test-linux-cross]
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/warpllm
+    permissions:
+      id-token: write   # npm trusted publishing + provenance
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Assert npm supports trusted publishing
+        run: |
+          npm --version
+          node <<'NODE'
+          const version = require('child_process')
+            .execSync('npm --version', { encoding: 'utf8' })
+            .trim()
+            .split('.')
+            .map(Number)
+          const [major, minor, patch] = version
+          if (major < 11 || (major === 11 && minor < 5) || (major === 11 && minor === 5 && patch < 1)) {
+            throw new Error('npm 11.5.1+ is required for trusted publishing')
+          }
+          NODE
+      - name: Install dependencies
+        run: npm ci
+        working-directory: bindings/node
+      - name: Build TypeScript wrapper
+        run: npm run build:ts
+        working-directory: bindings/node
+      - name: Create platform package dirs
+        run: ./node_modules/.bin/napi create-npm-dirs
+        working-directory: bindings/node
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          path: bindings/node/artifacts
+      - name: Move artifacts into platform packages
+        run: ./node_modules/.bin/napi artifacts
+        working-directory: bindings/node
+      - name: List platform packages
+        run: ls -R npm
+        working-directory: bindings/node
+      # npm trusted publishing (OIDC) cannot create packages that don't exist
+      # yet, so the first release of each package needs the NPM_TOKEN secret;
+      # once all packages exist and have trusted publishers configured, delete
+      # the secret and this falls back to OIDC automatically.
+      #
+      # Platform packages publish first, the main package last: a visible
+      # main package then always implies complete platform coverage. Each
+      # publish is skipped if that version already exists, so re-runs after a
+      # partial failure converge instead of dying on E403.
+      - name: Publish (idempotent)
+        working-directory: bindings/node
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
+            echo "auth: token"
+          else
+            echo "auth: OIDC trusted publishing"
+          fi
+          VERSION=$(jq -r .version package.json)
+          for dir in npm/*/ .; do
+            name=$(jq -r .name "$dir/package.json")
+            if [ -n "$(npm view "$name@$VERSION" version 2>/dev/null || true)" ]; then
+              echo "skip $name@$VERSION (already published)"
+            else
+              npm publish "$dir" --provenance --access public
+            fi
+          done

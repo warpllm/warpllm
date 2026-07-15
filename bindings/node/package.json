@@ -3,8 +3,22 @@
   "version": "0.1.0",
   "description": "A warp-speed, robust AI gateway",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lee12jin/warpllm.git",
+    "directory": "bindings/node"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "index.js",
+    "index.d.ts"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "engines": {
     "node": ">= 20"
   },
@@ -22,9 +36,12 @@
     ]
   },
   "scripts": {
+    "artifacts": "napi artifacts",
     "build": "napi build --platform --release && npm run build:ts",
     "build:debug": "napi build --platform && npm run build:ts",
     "build:ts": "tsc -p tsconfig.build.json",
+    "create-npm-dirs": "napi create-npm-dirs",
+    "prepack": "node -e \"fs.copyFileSync('../../README.md','README.md');fs.copyFileSync('../../LICENSE','LICENSE')\"",
     "typecheck": "tsc -p tsconfig.json",
     "test": "npm run build:ts && npm run typecheck && vitest run"
   },

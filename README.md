@@ -28,7 +28,7 @@ A warp-speed, robust AI gateway written for rust, node, and python applications 
 
 ## Roadmap
 
-Next up: streaming, more providers and endpoints, and pip/npm packages — then failover, load balancing, caching, and metrics. See the full [ROADMAP.md](ROADMAP.md).
+Next up: streaming, more providers and endpoints, and pip/npm packages — then failover, load balancing, caching, and metrics. See the full [ROADMAP.md](https://github.com/lee12jin/warpllm/blob/main/ROADMAP.md).
 
 ## Quickstart
 
@@ -36,4 +36,4 @@ In progress.
 
 ## License
 
-The warpllm core is open source under the [Apache License 2.0](LICENSE).
+The warpllm core is open source under the [Apache License 2.0](https://github.com/lee12jin/warpllm/blob/main/LICENSE).

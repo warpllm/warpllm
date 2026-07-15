@@ -98,6 +98,12 @@ jobs:
         run: ./node_modules/.bin/napi build --platform --release --target ${{ matrix.settings.target }} ${{ matrix.settings.build-args }}
         working-directory: bindings/node
         shell: bash
+        # The napi-cross GCC predates __ARM_ARCH being predefined, which
+        # ring's assembly requires (briansmith/ring#1728) — same fix as
+        # release-python.yml. Target-scoped, so inert for every other matrix
+        # entry (the musl aarch64 build uses zig/clang and doesn't need it).
+        env:
+          CFLAGS_aarch64_unknown_linux_gnu: -D__ARM_ARCH=8
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: bindings-${{ matrix.settings.target }}

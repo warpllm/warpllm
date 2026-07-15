@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-publish = false
+description = "Warp-speed, self-hosted AI gateway: one OpenAI-compatible API across providers"
+repository = "https://github.com/lee12jin/warpllm"
+readme = "../../README.md"
+keywords = ["llm", "openai", "ai", "gateway", "anthropic"]
+categories = ["api-bindings", "web-programming"]
 
 [dependencies]
 tokio.workspace = true

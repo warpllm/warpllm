@@ -60,6 +60,11 @@ jobs:
           args: --release --out dist
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
+        # The manylinux2014 cross-GCC predates __ARM_ARCH being predefined,
+        # which ring's assembly requires (briansmith/ring#1728). Target-scoped,
+        # so inert for the x86_64 matrix entry.
+        env:
+          CFLAGS_aarch64_unknown_linux_gnu: -D__ARM_ARCH=8
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: wheels-linux-${{ matrix.target }}

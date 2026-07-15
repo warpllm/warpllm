@@ -2,7 +2,7 @@
 //! so endpoint impls only strip the `openai/` model prefix and map errors.
 //! The error envelope below is provider-wide and shared by every endpoint.
 
-pub(crate) mod endpoints;
+pub(crate) mod chat;
 
 use serde_json::Value;
 

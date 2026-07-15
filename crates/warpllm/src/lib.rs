@@ -14,7 +14,7 @@ pub use config::ClientConfig;
 // The explicit re-export shadows the glob one, so `warpllm::Error` is the
 // crate error; the moderation `Error` stays reachable via its types module.
 pub use error::{Error, Result};
-pub use types::openai::endpoints::chat::completions::*;
+pub use types::openai::chat::completions::*;
 
 /// Returns the warpllm version.
 ///

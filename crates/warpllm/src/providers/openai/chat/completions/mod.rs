@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::error::{Error, Result};
 use crate::http::{network_error, read_body};
 use crate::providers::openai::{PROVIDER, error_from_body};
-use crate::types::openai::endpoints::chat::completions::{ChatCompletion, ChatCompletionRequest};
+use crate::types::openai::chat::completions::{ChatCompletion, ChatCompletionRequest};
 
 pub(crate) async fn post(
     http: &reqwest::Client,

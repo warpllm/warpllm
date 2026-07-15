@@ -10,7 +10,7 @@ use warpllm::ChatCompletion;
 fn fixtures_round_trip_losslessly() {
     let dir = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/types/openai/endpoints/chat/completions/fixtures"
+        "/tests/types/openai/chat/completions/fixtures"
     );
     let mut checked = 0;
     for entry in std::fs::read_dir(dir).unwrap() {

@@ -67,7 +67,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          if curl -fsSL -H "User-Agent: warpllm-release (github-actions; lee12jin/warpllm)" \
+          if curl -fsSL -H "User-Agent: warpllm-release (github-actions; warpllm/warpllm)" \
               "https://crates.io/api/v1/crates/warpllm/$VERSION" >/dev/null 2>&1; then
             echo "crates.io already has warpllm@$VERSION — skipping publish"
             echo "exists=true" >> "$GITHUB_OUTPUT"

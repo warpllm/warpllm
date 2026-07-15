@@ -1,6 +1,6 @@
 # Roadmap
 
-warpllm broke ground on **July 9, 2026** (initial commit [`cd10f76`](https://github.com/lee12jin/warpllm/commit/cd10f76a4928c631d588a166bff0749fef4b73e6)), so this roadmap is young and deliberately coarse — quarters, not dates. It is a statement of direction, not a delivery contract, and it is meant to be shaped in the open: if an item below matters to you (or is missing), say so on [Discord](https://discord.gg/tSSQTxFnsC) or open an issue.
+warpllm broke ground on **July 9, 2026** (initial commit [`cd10f76`](https://github.com/warpllm/warpllm/commit/cd10f76a4928c631d588a166bff0749fef4b73e6)), so this roadmap is young and deliberately coarse — quarters, not dates. It is a statement of direction, not a delivery contract, and it is meant to be shaped in the open: if an item below matters to you (or is missing), say so on [Discord](https://discord.gg/tSSQTxFnsC) or open an issue.
 
 The destination: a self-hosted, Rust-fast gateway you can put in front of every LLM provider you use — one OpenAI-compatible surface with the reliability features (failover, load balancing, caching, metrics) that production traffic demands.
 

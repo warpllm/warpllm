@@ -1,11 +1,11 @@
 {
   "name": "warpllm",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A warp-speed, robust AI gateway",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lee12jin/warpllm.git",
+    "url": "git+https://github.com/warpllm/warpllm.git",
     "directory": "bindings/node"
   },
   "main": "dist/index.js",

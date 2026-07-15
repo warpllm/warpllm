@@ -1,0 +1,84 @@
+# crates.io publish for crates/warpllm.
+# Same version-lockstep gate and tag-driven flow as release-python.yml and
+# release-npm.yml: one vX.Y.Z tag releases all three registries.
+#
+# Tags (vX.Y.Z) test and publish; workflow_dispatch runs the tests and a
+# `cargo publish --dry-run` without releasing. Auth is crates.io trusted
+# publishing (OIDC) — no long-lived token.
+name: Release (crates.io)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-crate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Assert tag, workspace Cargo.toml, and package.json agree
+        run: |
+          WS=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p')
+          PKG=$(jq -r .version bindings/node/package.json)
+          echo "workspace=$WS package.json=$PKG ref=$GITHUB_REF_NAME"
+          test -n "$WS"
+          test "$PKG" = "$WS"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            test "${GITHUB_REF_NAME#v}" = "$WS"
+          fi
+
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: check-version
+    # Must match the environment name in the crates.io trusted-publisher config.
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/warpllm
+    permissions:
+      id-token: write   # crates.io trusted publishing
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Test
+        run: cargo test -p warpllm
+      - name: Dry run (non-tag builds stop here)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: cargo publish -p warpllm --dry-run
+      # Idempotent: crates.io rejects re-publishing an existing version, so a
+      # re-run after a partial multi-registry release must skip, not die.
+      - name: Check whether this version is already published
+        id: published
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          if curl -fsSL -H "User-Agent: warpllm-release (github-actions; lee12jin/warpllm)" \
+              "https://crates.io/api/v1/crates/warpllm/$VERSION" >/dev/null 2>&1; then
+            echo "crates.io already has warpllm@$VERSION — skipping publish"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1
+        id: auth
+        if: startsWith(github.ref, 'refs/tags/') && steps.published.outputs.exists == 'false'
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/') && steps.published.outputs.exists == 'false'
+        run: cargo publish -p warpllm
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

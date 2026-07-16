@@ -4,8 +4,8 @@
 #
 # Tags (vX.Y.Z) build, test, and publish; workflow_dispatch runs everything
 # except the publish step. The publish loop is idempotent: each of the 8
-# warpllm-<platform> packages and the main package is skipped if its version
-# already exists, so a partially failed release converges on re-run.
+# @warpllm/warpllm-<platform> packages and the main package is skipped if its
+# version already exists, so a partially failed release converges on re-run.
 name: Release (npm)
 
 env:
@@ -41,6 +41,9 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             test "${GITHUB_REF_NAME#v}" = "$WS"
           fi
+          # optionalDependencies is injected at publish time; the source
+          # manifest carrying it (usually with stale versions) is a bug.
+          test "$(jq -r '.optionalDependencies // empty' bindings/node/package.json)" = ""
 
   build:
     needs: check-version
@@ -188,7 +191,7 @@ jobs:
     needs: [test-native, test-linux-cross]
     environment:
       name: npm
-      url: https://www.npmjs.com/package/warpllm
+      url: https://www.npmjs.com/package/@warpllm/warpllm
     permissions:
       id-token: write   # npm trusted publishing + provenance
     steps:
@@ -231,10 +234,13 @@ jobs:
       - name: List platform packages
         run: ls -R npm
         working-directory: bindings/node
-      # npm trusted publishing (OIDC) cannot create packages that don't exist
-      # yet, so the first release of each package needs the NPM_TOKEN secret;
-      # once all packages exist and have trusted publishers configured, delete
-      # the secret and this falls back to OIDC automatically.
+      # Auth is npm trusted publishing (OIDC): every @warpllm/* package's
+      # trusted publisher must name this repo, this workflow file, and the
+      # `npm` environment. Provenance is generated automatically under OIDC.
+      # NOTE: OIDC cannot CREATE a package — if a future napi target adds a
+      # new @warpllm/warpllm-<platform> name, its first version must be
+      # published manually with an interactive npm session, then given a
+      # trusted publisher like the others.
       #
       # Platform packages publish first, the main package last: a visible
       # main package then always implies complete platform coverage. Each
@@ -242,21 +248,22 @@ jobs:
       # partial failure converge instead of dying on E403.
       - name: Publish (idempotent)
         working-directory: bindings/node
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [ -n "$NPM_TOKEN" ]; then
-            echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
-            echo "auth: token"
-          else
-            echo "auth: OIDC trusted publishing"
-          fi
           VERSION=$(jq -r .version package.json)
+          # Inject the platform packages as optionalDependencies into the
+          # manifest that ships (napi prepublish used to do this; the source
+          # package.json must NOT carry them or pre-publish `npm ci` would
+          # demand versions that don't exist yet). os/cpu fields on each
+          # platform package make npm install exactly one of them.
+          DEPS=$(for d in npm/*/; do jq -r .name "$d/package.json"; done \
+            | jq -Rn --arg v "$VERSION" '[inputs | {(.): $v}] | add')
+          jq --argjson deps "$DEPS" '.optionalDependencies = $deps' package.json > package.json.tmp
+          mv package.json.tmp package.json
           for dir in npm/*/ .; do
             name=$(jq -r .name "$dir/package.json")
             if [ -n "$(npm view "$name@$VERSION" version 2>/dev/null || true)" ]; then
               echo "skip $name@$VERSION (already published)"
             else
-              npm publish "$dir" --provenance --access public
+              npm publish "$dir" --access public
             fi
           done

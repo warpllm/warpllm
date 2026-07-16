@@ -26,7 +26,7 @@ fn echo(py: Python<'_>, msg: String) -> PyResult<Bound<'_, PyAny>> {
 }
 
 async fn run_chat(client: Arc<warpllm::Client>, request_json: String) -> Result<String, String> {
-    let request: warpllm::ChatCompletionRequest = serde_json::from_str(&request_json)
+    let request: warpllm::CreateChatCompletionRequest = serde_json::from_str(&request_json)
         .map_err(|e| warpllm::Error::InvalidInput(e.to_string()).to_wire_json())?;
     let completion = client
         .chat_completion(request)

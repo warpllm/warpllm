@@ -40,7 +40,7 @@ impl Client {
     #[napi]
     pub async fn chat_completion(&self, request_json: String) -> napi::Result<String> {
         let client = self.inner.clone();
-        let request: warpllm::ChatCompletionRequest = serde_json::from_str(&request_json)
+        let request: warpllm::CreateChatCompletionRequest = serde_json::from_str(&request_json)
             .map_err(|e| wire_err(warpllm::Error::InvalidInput(e.to_string())))?;
         let completion = client.chat_completion(request).await.map_err(wire_err)?;
         serde_json::to_string(&completion)

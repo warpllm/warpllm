@@ -6,7 +6,9 @@ use crate::config::{ClientConfig, DEFAULT_TIMEOUT_SECS};
 use crate::error::{Error, Result};
 use crate::model::{ProviderKind, parse_model};
 use crate::providers;
-use crate::types::openai::chat::completions::{ChatCompletion, ChatCompletionRequest};
+use crate::types::openai::chat::completions::{
+    CreateChatCompletionRequest, CreateChatCompletionResponse,
+};
 
 pub struct Client {
     http: reqwest::Client,
@@ -28,7 +30,10 @@ impl Client {
         Ok(Self { http, config })
     }
 
-    pub async fn chat_completion(&self, request: ChatCompletionRequest) -> Result<ChatCompletion> {
+    pub async fn chat_completion(
+        &self,
+        request: CreateChatCompletionRequest,
+    ) -> Result<CreateChatCompletionResponse> {
         if request.stream == Some(true) {
             return Err(Error::NotImplemented("streaming coming in a later release"));
         }

@@ -5,10 +5,26 @@
 //! object, keeping upstream object names and field order:
 //! - Response object: <https://developers.openai.com/api/reference/resources/chat>
 //! - Request parameters: <https://platform.openai.com/docs/api-reference/chat/create>
+//!
+//! Naming: types matching a named schema in the official OpenAPI spec
+//! (<https://github.com/openai/openai-openapi>) use that exact name; types the
+//! spec leaves anonymous/inline keep a local descriptive name.
+//!
+//! Every struct captures fields it doesn't model in an `unknown_fields`
+//! catch-all; see [`UnknownFields`].
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+
+/// Catch-all for fields OpenAI introduces that this crate does not model yet.
+///
+/// Every request and response struct carries a `#[serde(flatten)]`
+/// `unknown_fields` of this type, so a field added upstream still reaches
+/// clients (and an unmodeled request parameter still reaches the provider)
+/// instead of being silently dropped — clients can adopt new API fields
+/// before this crate ships explicit support for them.
+pub type UnknownFields = serde_json::Map<String, serde_json::Value>;
 
 // ---------------------------------------------------------------------------
 // Response — the `chat.completion` object
@@ -16,7 +32,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatCompletion {
+pub struct CreateChatCompletionResponse {
     pub id: String,
     pub choices: Vec<Choice>,
     pub created: u64,
@@ -25,7 +41,7 @@ pub struct ChatCompletion {
     /// Always `"chat.completion"`.
     pub object: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub moderation: Option<Moderation>,
+    pub moderation: Option<ChatCompletionModeration>,
     /// `"auto"`, `"default"`, `"flex"`, `"scale"`, or `"priority"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
@@ -34,6 +50,8 @@ pub struct ChatCompletion {
     pub system_fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<CompletionUsage>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,7 +64,9 @@ pub struct Choice {
     /// `"logprobs": null` some OpenAI-compatible backends emit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<ChoiceLogprobs>,
-    pub message: ChatCompletionMessage,
+    pub message: ChatCompletionResponseMessage,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 /// Both arrays are required and non-nullable when `logprobs` is present.
@@ -54,6 +74,8 @@ pub struct Choice {
 pub struct ChoiceLogprobs {
     pub content: Vec<ChatCompletionTokenLogprob>,
     pub refusal: Vec<ChatCompletionTokenLogprob>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +84,8 @@ pub struct ChatCompletionTokenLogprob {
     pub bytes: Option<Vec<u8>>,
     pub logprob: f64,
     pub top_logprobs: Vec<TopLogprob>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,10 +93,12 @@ pub struct TopLogprob {
     pub token: String,
     pub bytes: Option<Vec<u8>>,
     pub logprob: f64,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatCompletionMessage {
+pub struct ChatCompletionResponseMessage {
     pub content: Option<String>,
     pub refusal: Option<String>,
     /// Always `"assistant"`.
@@ -85,7 +111,9 @@ pub struct ChatCompletionMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_call: Option<FunctionCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ChatCompletionMessageToolCall>>,
+    pub tool_calls: Option<Vec<ChatCompletionMessageToolCallUnion>>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +122,8 @@ pub struct Annotation {
     #[serde(rename = "type")]
     pub r#type: String,
     pub url_citation: AnnotationURLCitation,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 // Exact upstream name; OpenAI-shape fidelity outranks Rust acronym casing.
@@ -104,6 +134,8 @@ pub struct AnnotationURLCitation {
     pub start_index: u32,
     pub title: String,
     pub url: String,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 /// Deprecated upstream in favor of tool calls.
@@ -112,20 +144,30 @@ pub struct FunctionCall {
     /// JSON-encoded arguments; model-generated, so may be invalid JSON.
     pub arguments: String,
     pub name: String,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
-/// Union discriminated by `type` (`"function"` or `"custom"`).
+/// Union discriminated by `type` (`"function"` or `"custom"`). Untagged so
+/// the structs own the `type` field (an internal serde tag would be captured
+/// by their flattened `unknown_fields` and emitted twice); each variant's
+/// required `function`/`custom` field keeps dispatch unambiguous.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChatCompletionMessageToolCall {
-    Function(ChatCompletionMessageFunctionToolCall),
+#[serde(untagged)]
+pub enum ChatCompletionMessageToolCallUnion {
+    Function(ChatCompletionMessageToolCall),
     Custom(ChatCompletionMessageCustomToolCall),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatCompletionMessageFunctionToolCall {
+pub struct ChatCompletionMessageToolCall {
     pub id: String,
+    /// Always `"function"`.
+    #[serde(rename = "type")]
+    pub r#type: String,
     pub function: Function,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,18 +175,27 @@ pub struct Function {
     /// JSON-encoded arguments; model-generated, so may be invalid JSON.
     pub arguments: String,
     pub name: String,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionMessageCustomToolCall {
     pub id: String,
+    /// Always `"custom"`.
+    #[serde(rename = "type")]
+    pub r#type: String,
     pub custom: Custom,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Custom {
     pub input: String,
     pub name: String,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +205,8 @@ pub struct ChatCompletionAudio {
     pub data: String,
     pub expires_at: u64,
     pub transcript: String,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +218,8 @@ pub struct CompletionUsage {
     pub completion_tokens_details: Option<CompletionTokensDetails>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +232,8 @@ pub struct CompletionTokensDetails {
     pub reasoning_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected_prediction_tokens: Option<u32>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,43 +245,49 @@ pub struct PromptTokensDetails {
     pub cache_write_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u32>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 /// Moderation results for the request input and the generated output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Moderation {
+pub struct ChatCompletionModeration {
     pub input: ModerationOutcome,
     pub output: ModerationOutcome,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 // The docs define one shared ModerationResults/Error pair used by both
 // `input` and `output`.
 
-/// Union of [`ModerationResults`] or [`Error`], each carrying its literal
-/// `type` discriminator (`"moderation_results"` / `"error"`). Untagged so the
+/// Union of [`ChatCompletionModerationResults`] or
+/// [`ChatCompletionModerationError`], each carrying its literal `type`
+/// discriminator (`"moderation_results"` / `"error"`). Untagged so the
 /// structs own the `type` field exactly as documented; their required fields
-/// are disjoint, so dispatch is unambiguous. The docs leave this union
+/// are disjoint, so dispatch is unambiguous. The spec leaves this union
 /// unnamed; only this enum's name is Rust-side.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ModerationOutcome {
-    ModerationResults(ModerationResults),
-    Error(Error),
+    ModerationResults(ChatCompletionModerationResults),
+    Error(ChatCompletionModerationError),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModerationResults {
+pub struct ChatCompletionModerationResults {
     pub model: String,
-    pub results: Vec<ModerationResult>,
+    pub results: Vec<ModerationResultBody>,
     /// Always `"moderation_results"`.
     #[serde(rename = "type")]
     pub r#type: String,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
-/// One verdict in `ModerationResults.results`. The docs leave this element
-/// object unnamed; named here after its `type` string.
+/// One verdict in `ChatCompletionModerationResults.results`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModerationResult {
+pub struct ModerationResultBody {
     pub categories: HashMap<String, bool>,
     /// Values are input types, e.g. `"text"` or `"image"`.
     pub category_applied_input_types: HashMap<String, Vec<String>>,
@@ -234,18 +297,20 @@ pub struct ModerationResult {
     /// Always `"moderation_result"`.
     #[serde(rename = "type")]
     pub r#type: String,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
-/// Moderation error. Exact upstream name; shadowed at the crate root by the
-/// crate error type, so reach it as
-/// `warpllm::types::openai::chat::completions::Error`.
+/// Moderation error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Error {
+pub struct ChatCompletionModerationError {
     pub code: String,
     pub message: String,
     /// Always `"error"`.
     #[serde(rename = "type")]
     pub r#type: String,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 // ---------------------------------------------------------------------------
@@ -253,11 +318,11 @@ pub struct Error {
 // <https://platform.openai.com/docs/api-reference/chat/create>
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatCompletionRequest {
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateChatCompletionRequest {
     /// Model string in `provider/model` form, e.g. `"openai/gpt-4o"`.
     pub model: String,
-    pub messages: Vec<ChatMessage>,
+    pub messages: Vec<ChatCompletionRequestMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -269,13 +334,17 @@ pub struct ChatCompletionRequest {
     // Not implemented.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChatCompletionRequestMessage {
     /// `"system"`, `"user"`, or `"assistant"`.
     pub role: String,
     pub content: String,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
 }
 
 #[cfg(test)]
@@ -286,7 +355,7 @@ mod tests {
     /// every one of them must deserialize as absent, not error.
     #[test]
     fn minimal_response_body_deserializes() {
-        let completion: ChatCompletion = serde_json::from_str(
+        let completion: CreateChatCompletionResponse = serde_json::from_str(
             r#"{
                 "id": "chatcmpl-123",
                 "choices": [{
@@ -312,6 +381,54 @@ mod tests {
         assert!(wire.get("moderation").is_none());
         assert!(wire["choices"][0].get("logprobs").is_none());
         assert!(wire["choices"][0]["message"].get("tool_calls").is_none());
+    }
+
+    /// Fields we don't model must be captured into `unknown_fields` — at
+    /// every nesting level — and re-emitted verbatim, not dropped.
+    #[test]
+    fn unknown_fields_round_trip() {
+        let body = serde_json::json!({
+            "id": "chatcmpl-123",
+            "choices": [{
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                    "content": "hi",
+                    "refusal": null,
+                    "role": "assistant",
+                    "reasoning_content": "step by step"
+                },
+                "new_choice_field": true
+            }],
+            "created": 1700000000,
+            "model": "gpt-4o",
+            "object": "chat.completion",
+            "usage": {
+                "completion_tokens": 1,
+                "prompt_tokens": 2,
+                "total_tokens": 3,
+                "new_usage_field": 7
+            },
+            "new_top_level_field": "surprise"
+        });
+
+        let completion: CreateChatCompletionResponse =
+            serde_json::from_value(body.clone()).unwrap();
+
+        assert_eq!(completion.unknown_fields["new_top_level_field"], "surprise");
+        assert_eq!(
+            completion.choices[0].unknown_fields["new_choice_field"],
+            true
+        );
+        assert_eq!(
+            completion.choices[0].message.unknown_fields["reasoning_content"],
+            "step by step"
+        );
+        assert_eq!(
+            completion.usage.as_ref().unwrap().unknown_fields["new_usage_field"],
+            7
+        );
+        assert_eq!(serde_json::to_value(&completion).unwrap(), body);
     }
 
     /// A body with every documented field must round-trip byte-for-byte
@@ -408,17 +525,18 @@ mod tests {
             }
         });
 
-        let completion: ChatCompletion = serde_json::from_value(body.clone()).unwrap();
+        let completion: CreateChatCompletionResponse =
+            serde_json::from_value(body.clone()).unwrap();
 
         let message = &completion.choices[0].message;
         let tool_calls = message.tool_calls.as_ref().unwrap();
         assert!(matches!(
             &tool_calls[0],
-            ChatCompletionMessageToolCall::Function(f) if f.function.name == "search"
+            ChatCompletionMessageToolCallUnion::Function(f) if f.function.name == "search"
         ));
         assert!(matches!(
             &tool_calls[1],
-            ChatCompletionMessageToolCall::Custom(c) if c.custom.input == "raw text"
+            ChatCompletionMessageToolCallUnion::Custom(c) if c.custom.input == "raw text"
         ));
         let moderation = completion.moderation.as_ref().unwrap();
         assert!(matches!(

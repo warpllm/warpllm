@@ -4,7 +4,7 @@
 //!
 //! `doc-full-response.json` is hand-built from the API reference.
 
-use warpllm::ChatCompletion;
+use warpllm::CreateChatCompletionResponse;
 
 #[test]
 fn fixtures_round_trip_losslessly() {
@@ -20,7 +20,7 @@ fn fixtures_round_trip_losslessly() {
         }
         let raw = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let completion: ChatCompletion = serde_json::from_value(value.clone())
+        let completion: CreateChatCompletionResponse = serde_json::from_value(value.clone())
             .unwrap_or_else(|e| panic!("{} failed to deserialize: {e}", path.display()));
         assert_eq!(
             serde_json::to_value(&completion).unwrap(),

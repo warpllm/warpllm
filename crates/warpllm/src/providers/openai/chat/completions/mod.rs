@@ -5,15 +5,17 @@ use serde_json::Value;
 use crate::error::{Error, Result};
 use crate::http::{network_error, read_body};
 use crate::providers::openai::{PROVIDER, error_from_body};
-use crate::types::openai::chat::completions::{ChatCompletion, ChatCompletionRequest};
+use crate::types::openai::chat::completions::{
+    CreateChatCompletionRequest, CreateChatCompletionResponse,
+};
 
 pub(crate) async fn post(
     http: &reqwest::Client,
     base_url: &str,
     api_key: &str,
     model: &str,
-    request: &ChatCompletionRequest,
-) -> Result<ChatCompletion> {
+    request: &CreateChatCompletionRequest,
+) -> Result<CreateChatCompletionResponse> {
     let mut body = serde_json::to_value(request).map_err(|e| Error::InvalidInput(e.to_string()))?;
     body["model"] = Value::String(model.to_string());
 
@@ -33,7 +35,7 @@ pub(crate) async fn post(
         return Err(error_from_body(status, &text));
     }
 
-    let mut completion: ChatCompletion =
+    let mut completion: CreateChatCompletionResponse =
         serde_json::from_str(&text).map_err(|e| Error::Decode {
             provider: PROVIDER,
             message: e.to_string(),

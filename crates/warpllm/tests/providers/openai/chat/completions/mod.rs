@@ -57,6 +57,29 @@ async fn openai_happy_path() {
 }
 
 #[tokio::test]
+async fn unknown_request_fields_are_forwarded() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_completion_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut req = request("openai/gpt-4o");
+    req.unknown_fields.insert("top_k".into(), json!(40));
+    req.messages[0]
+        .unknown_fields
+        .insert("name".into(), json!("alice"));
+    client_for(&server).chat_completion(req).await.unwrap();
+
+    let sent: serde_json::Value =
+        serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+    assert_eq!(sent["top_k"], 40);
+    assert_eq!(sent["messages"][0]["name"], "alice");
+}
+
+#[tokio::test]
 async fn openai_error_statuses_map_to_provider_error() {
     for (status, error_type, message) in [
         (401, "invalid_request_error", "Incorrect API key provided"),

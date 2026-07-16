@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use serde_json::{Value, json};
-use warpllm::{ChatCompletionRequest, ChatMessage, Client, ClientConfig};
+use warpllm::{ChatCompletionRequestMessage, Client, ClientConfig, CreateChatCompletionRequest};
 use wiremock::MockServer;
 
 /// Client with the base URL pointed at the mock server and a dummy key,
@@ -16,18 +16,15 @@ pub fn client_for(server: &MockServer) -> Client {
     .unwrap()
 }
 
-pub fn request(model: &str) -> ChatCompletionRequest {
-    ChatCompletionRequest {
+pub fn request(model: &str) -> CreateChatCompletionRequest {
+    CreateChatCompletionRequest {
         model: model.into(),
-        messages: vec![ChatMessage {
+        messages: vec![ChatCompletionRequestMessage {
             role: "user".into(),
             content: "hi".into(),
+            ..Default::default()
         }],
-        temperature: None,
-        max_tokens: None,
-        top_p: None,
-        stop: None,
-        stream: None,
+        ..Default::default()
     }
 }
 

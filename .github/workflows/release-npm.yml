@@ -44,6 +44,13 @@ jobs:
           # optionalDependencies is injected at publish time; the source
           # manifest carrying it (usually with stale versions) is a bug.
           test "$(jq -r '.optionalDependencies // empty' bindings/node/package.json)" = ""
+      - name: Assert napi.targets matches this workflow's build matrix
+        # package.json napi.targets drives create-npm-dirs (which platform
+        # packages exist); the matrix below drives which binaries get built.
+        # Drift would publish a platform package with no binary inside.
+        run: |
+          diff <(jq -r '.napi.targets[]' bindings/node/package.json | sort) \
+               <(yq '.jobs.build.strategy.matrix.settings[].target' .github/workflows/release-npm.yml | sort)
 
   build:
     needs: check-version
@@ -234,6 +241,14 @@ jobs:
       - name: List platform packages
         run: ls -R npm
         working-directory: bindings/node
+      - name: Assert every platform package contains a binary
+        # Belt-and-suspenders with the check-version matrix guard: a platform
+        # package published without its .node file would install as a no-op.
+        working-directory: bindings/node
+        run: |
+          for d in npm/*/; do
+            ls "$d"*.node >/dev/null 2>&1 || { echo "::error::$d has no .node binary — build matrix missing this target?"; exit 1; }
+          done
       # Auth is npm trusted publishing (OIDC): every @warpllm/* package's
       # trusted publisher must name this repo, this workflow file, and the
       # `npm` environment. Provenance is generated automatically under OIDC.

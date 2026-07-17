@@ -80,6 +80,24 @@ async fn unknown_request_fields_are_forwarded() {
 }
 
 #[tokio::test]
+async fn with_api_key_overrides_the_clients_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("authorization", "Bearer sk-override"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_completion_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // client_for holds "sk-test-openai"; the override must win.
+    client_for(&server)
+        .with_api_key("sk-override")
+        .chat_completion(request("openai/gpt-4o"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn openai_error_statuses_map_to_provider_error() {
     for (status, error_type, message) in [
         (401, "invalid_request_error", "Incorrect API key provided"),
@@ -176,7 +194,10 @@ async fn stream_true_is_rejected_before_any_request() {
     req.stream = Some(true);
 
     let err = client_for(&server).chat_completion(req).await.unwrap_err();
-    assert!(matches!(err, Error::NotImplemented(_)), "{err:?}");
+    assert!(
+        matches!(&err, Error::NotImplemented("streaming")),
+        "{err:?}"
+    );
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 

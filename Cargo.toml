@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/warpllm", "bindings/python", "bindings/node"]
+members = [
+    "crates/warpllm",
+    "crates/warpllm-server",
+    "bindings/python",
+    "bindings/node",
+]
 
 [workspace.package]
 version = "0.1.4"
@@ -10,11 +15,17 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 warpllm = { path = "crates/warpllm" }
+warpllm-server = { path = "crates/warpllm-server" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]
 lto = "thin"

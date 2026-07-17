@@ -10,8 +10,12 @@
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "warpllm": "cli.js"
+  },
   "files": [
     "dist",
+    "cli.js",
     "index.js",
     "index.d.ts"
   ],

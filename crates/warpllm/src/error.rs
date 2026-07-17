@@ -6,7 +6,7 @@ pub enum Error {
     InvalidInput(String),
     #[error("invalid model string '{given}': not a supported provider")]
     InvalidModel { given: String },
-    #[error("missing API key for {provider}: set {env_var} or pass it to the client constructor")]
+    #[error("missing API key for {provider}: set the {env_var} environment variable")]
     MissingApiKey {
         provider: &'static str,
         env_var: &'static str,

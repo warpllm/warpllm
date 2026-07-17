@@ -1,4 +1,4 @@
-export { version, echo } from '../index.js'
+export { version, echo, serve } from '../index.js'
 export { WarpLLM } from './client.js'
 export {
   APIConnectionError,

@@ -589,4 +589,5 @@ if (!nativeBinding) {
 module.exports = nativeBinding
 module.exports.Client = nativeBinding.Client
 module.exports.echo = nativeBinding.echo
+module.exports.serve = nativeBinding.serve
 module.exports.version = nativeBinding.version

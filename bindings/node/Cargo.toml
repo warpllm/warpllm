@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 warpllm.workspace = true
+warpllm-server.workspace = true
 napi = { version = "3", default-features = false, features = ["napi8", "async"] }
 napi-derive = "3"
 tokio.workspace = true

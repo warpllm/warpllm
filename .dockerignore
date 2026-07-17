@@ -1,0 +1,7 @@
+target/
+.git/
+bindings/node/node_modules/
+bindings/node/*.node
+bindings/python/.venv/
+examples/
+Dockerfile

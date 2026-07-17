@@ -1,0 +1,23 @@
+# Distributed as a Docker image; not published to crates.io (keeps
+# release-crate.yml's single-crate publish untouched).
+[package]
+name = "warpllm-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+warpllm.workspace = true
+axum.workspace = true
+clap.workspace = true
+tower-http.workspace = true
+tokio = { workspace = true, features = ["signal", "net"] }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+wiremock = "0.6"

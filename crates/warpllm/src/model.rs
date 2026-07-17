@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 /// while adding a provider is one line of data. Do not add per-provider
 /// enum variants beyond the point where their behavior is identical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProviderKind {
+pub(crate) enum Provider {
     OpenAi,
 }
 
@@ -20,7 +20,7 @@ pub(crate) enum ProviderKind {
 /// Bare model names (no `/`) are rejected rather than defaulting to a
 /// provider: silently assuming OpenAI becomes a footgun once many providers
 /// exist. `split_once` keeps any `/` inside the model name intact.
-pub(crate) fn parse_model(model: &str) -> Result<(ProviderKind, &str)> {
+pub(crate) fn parse_model(model: &str) -> Result<(Provider, &str)> {
     let invalid = || Error::InvalidModel {
         given: model.to_string(),
     };
@@ -28,7 +28,7 @@ pub(crate) fn parse_model(model: &str) -> Result<(ProviderKind, &str)> {
         return Err(invalid());
     };
     let kind = match provider {
-        "openai" => ProviderKind::OpenAi,
+        "openai" => Provider::OpenAi,
         _ => return Err(invalid()),
     };
     if name.is_empty() {
@@ -45,7 +45,7 @@ mod tests {
     fn parses_openai() {
         assert_eq!(
             parse_model("openai/gpt-4o").unwrap(),
-            (ProviderKind::OpenAi, "gpt-4o")
+            (Provider::OpenAi, "gpt-4o")
         );
     }
 
@@ -53,7 +53,7 @@ mod tests {
     fn keeps_slashes_in_model_name() {
         assert_eq!(
             parse_model("openai/org/custom-model").unwrap(),
-            (ProviderKind::OpenAi, "org/custom-model")
+            (Provider::OpenAi, "org/custom-model")
         );
     }
 

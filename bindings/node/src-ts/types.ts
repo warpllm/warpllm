@@ -1,6 +1,4 @@
 export interface WarpLLMOptions {
-  /** Falls back to the OPENAI_API_KEY environment variable. */
-  openaiApiKey?: string
   baseUrl?: string
   /** Request timeout in seconds (default 600, matching the OpenAI SDK). */
   timeout?: number

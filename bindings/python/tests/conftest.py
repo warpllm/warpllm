@@ -9,21 +9,18 @@ def base_url(httpserver: HTTPServer) -> str:
 
 
 @pytest.fixture
-def client(base_url: str) -> WarpLLM:
-    return WarpLLM(
-        openai_api_key="sk-test-openai",
-        base_url=base_url,
-        timeout=5,
-    )
+def client(base_url: str, monkeypatch: pytest.MonkeyPatch) -> WarpLLM:
+    # The native client reads OPENAI_API_KEY at construction, so set it first.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
+    return WarpLLM(base_url=base_url, timeout=5)
 
 
 @pytest.fixture
-def async_client(base_url: str) -> AsyncWarpLLM:
-    return AsyncWarpLLM(
-        openai_api_key="sk-test-openai",
-        base_url=base_url,
-        timeout=5,
-    )
+def async_client(
+    base_url: str, monkeypatch: pytest.MonkeyPatch
+) -> AsyncWarpLLM:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
+    return AsyncWarpLLM(base_url=base_url, timeout=5)
 
 
 @pytest.fixture

@@ -7,4 +7,14 @@ export declare class Client {
 
 export declare function echo(msg: string): Promise<string>
 
+/**
+ * Runs the OpenAI-compatible gateway. `args` are CLI flags passed verbatim
+ * to the shared Rust parser (`--host`, `--port`, `--timeout-secs`; see
+ * `--help`), so every language wrapper exposes identical flags without its
+ * own parsing. `--help` prints usage and resolves; otherwise the promise
+ * never resolves on success — the server runs until the Node process exits
+ * (Ctrl+C included; signal handling stays with Node, not tokio).
+ */
+export declare function serve(args: Array<string>): Promise<void>
+
 export declare function version(): string

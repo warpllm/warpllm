@@ -10,6 +10,8 @@ use crate::error::Error;
 
 pub(crate) const PROVIDER: &str = "openai";
 
+pub(crate) const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+
 /// OpenAI error bodies look like `{"error": {"message": ..., "type": ...}}`.
 /// Unparseable bodies fall back to the raw text.
 pub(crate) fn error_from_body(status: u16, body: &str) -> Error {

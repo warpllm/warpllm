@@ -91,18 +91,6 @@ def test_bare_model_rejected(client: WarpLLM):
         client.chat.completions.create(model="gpt-4o", messages=MESSAGES)
 
 
-def test_missing_base_url_rejected_without_provider_request(
-    httpserver: HTTPServer,
-):
-    client = WarpLLM(openai_api_key="sk-test-openai")
-
-    with pytest.raises(InvalidRequestError, match="missing base_url"):
-        client.chat.completions.create(
-            model="openai/gpt-4o", messages=MESSAGES
-        )
-    assert len(httpserver.log) == 0
-
-
 def test_missing_key_names_env_var(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     client = WarpLLM()

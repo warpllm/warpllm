@@ -6,12 +6,10 @@
 
 use warpllm::CreateChatCompletionResponse;
 
-#[test]
-fn fixtures_round_trip_losslessly() {
-    let dir = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/types/openai/chat/completions/fixtures"
-    );
+fn assert_fixtures_round_trip<T>(dir: &str)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
     let mut checked = 0;
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -20,10 +18,10 @@ fn fixtures_round_trip_losslessly() {
         }
         let raw = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let completion: CreateChatCompletionResponse = serde_json::from_value(value.clone())
+        let parsed: T = serde_json::from_value(value.clone())
             .unwrap_or_else(|e| panic!("{} failed to deserialize: {e}", path.display()));
         assert_eq!(
-            serde_json::to_value(&completion).unwrap(),
+            serde_json::to_value(&parsed).unwrap(),
             value,
             "lossy round trip for {}",
             path.display()
@@ -31,4 +29,12 @@ fn fixtures_round_trip_losslessly() {
         checked += 1;
     }
     assert!(checked > 0, "no fixtures found in {dir}");
+}
+
+#[test]
+fn fixtures_round_trip_losslessly() {
+    assert_fixtures_round_trip::<CreateChatCompletionResponse>(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/types/openai/chat/completions/fixtures"
+    ));
 }

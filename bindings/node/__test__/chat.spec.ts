@@ -43,11 +43,9 @@ let client: WarpLLM
 
 beforeEach(async () => {
   server = await MockServer.start()
-  client = new WarpLLM({
-    openaiApiKey: 'sk-test-openai',
-    baseUrl: server.url,
-    timeout: 5,
-  })
+  // The native client reads OPENAI_API_KEY at construction, so set it first.
+  process.env.OPENAI_API_KEY = 'sk-test-openai'
+  client = new WarpLLM({ baseUrl: server.url, timeout: 5 })
 })
 
 afterEach(async () => {
@@ -110,18 +108,6 @@ test('bare model name is rejected', async () => {
 
   expect(err).toBeInstanceOf(InvalidRequestError)
   expect((err as InvalidRequestError).message).toContain('not a supported provider')
-})
-
-test('missing baseUrl rejects without a provider request', async () => {
-  client = new WarpLLM({ openaiApiKey: 'sk-test-openai' })
-
-  const err = await client.chat.completions
-    .create({ model: 'openai/gpt-4o', messages: MESSAGES })
-    .catch((e: unknown) => e)
-
-  expect(err).toBeInstanceOf(InvalidRequestError)
-  expect((err as InvalidRequestError).message).toContain('missing base_url')
-  expect(server.requests).toHaveLength(0)
 })
 
 test('stream: true rejects as not implemented', async () => {

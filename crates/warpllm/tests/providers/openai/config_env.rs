@@ -3,15 +3,15 @@ use warpllm::{Client, ClientConfig, Error};
 use wiremock::matchers::{header, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Env mutation is process-global, so these three scenarios run inside one
-/// test body (temp-env serializes the unsafe set/unset around the closure).
+/// Env mutation is process-global, so these scenarios run inside one test
+/// body (temp-env serializes the unsafe set/unset around the closure).
 #[test]
-fn env_fallback_explicit_override_and_missing_key() {
+fn env_key_with_api_key_override_and_missing_key() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
     temp_env::with_var("OPENAI_API_KEY", Some("sk-from-env"), || {
         runtime.block_on(async {
-            // 1. Env key is picked up.
+            // 1. The env key is read at construction and used as bearer.
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(header("authorization", "Bearer sk-from-env"))
@@ -29,7 +29,7 @@ fn env_fallback_explicit_override_and_missing_key() {
                 .await
                 .unwrap();
 
-            // 2. Explicit constructor key wins over env.
+            // 2. with_api_key wins over the env key.
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(header("authorization", "Bearer sk-explicit"))
@@ -38,11 +38,11 @@ fn env_fallback_explicit_override_and_missing_key() {
                 .mount(&server)
                 .await;
             let client = Client::new(ClientConfig {
-                openai_api_key: Some("sk-explicit".into()),
                 base_url: Some(server.uri()),
                 ..Default::default()
             })
-            .unwrap();
+            .unwrap()
+            .with_api_key("sk-explicit");
             client
                 .chat_completion(request("openai/gpt-4o"))
                 .await
@@ -67,23 +67,4 @@ fn env_fallback_explicit_override_and_missing_key() {
             }
         });
     });
-}
-
-#[tokio::test]
-async fn missing_base_url_errors_without_calling_openai() {
-    let client = Client::new(ClientConfig {
-        openai_api_key: Some("sk-test-openai".into()),
-        ..Default::default()
-    })
-    .unwrap();
-
-    let err = client
-        .chat_completion(request("openai/gpt-4o"))
-        .await
-        .unwrap_err();
-
-    match err {
-        Error::InvalidInput(message) => assert_eq!(message, "missing base_url"),
-        other => panic!("expected InvalidInput, got {other:?}"),
-    }
 }

@@ -5,15 +5,15 @@ use serde_json::{Value, json};
 use warpllm::{ChatCompletionRequestMessage, Client, ClientConfig, CreateChatCompletionRequest};
 use wiremock::MockServer;
 
-/// Client with the base URL pointed at the mock server and a dummy key,
-/// so no test depends on real env vars.
+/// Client with the base URL pointed at the mock server and a dummy key
+/// (via `with_api_key`), so no test depends on real env vars.
 pub fn client_for(server: &MockServer) -> Client {
     Client::new(ClientConfig {
-        openai_api_key: Some("sk-test-openai".into()),
         base_url: Some(server.uri()),
         timeout_secs: Some(5),
     })
     .unwrap()
+    .with_api_key("sk-test-openai")
 }
 
 pub fn request(model: &str) -> CreateChatCompletionRequest {

@@ -11,12 +11,10 @@ from ._models import ChatCompletion
 
 
 def _build_config(
-    openai_api_key: str | None,
     base_url: str | None,
     timeout: int | None,
 ) -> str:
     config = {
-        "openai_api_key": openai_api_key,
         "base_url": base_url,
         "timeout_secs": timeout,
     }
@@ -45,14 +43,11 @@ def _build_request(
 
 
 def _native_client(
-    openai_api_key: str | None,
     base_url: str | None,
     timeout: int | None,
 ) -> _NativeClient:
     try:
-        return _NativeClient(
-            _build_config(openai_api_key, base_url, timeout)
-        )
+        return _NativeClient(_build_config(base_url, timeout))
     except WarpLLMNativeError as e:
         raise_from_wire(str(e))
 
@@ -119,20 +114,18 @@ class _AsyncChat:
 
 class WarpLLM:
     """Synchronous client. Model strings are `provider/model`, e.g.
-    `"openai/gpt-4o"`. API keys fall back to `OPENAI_API_KEY`; a provider's
-    key is only required when a request targets that provider.
+    `"openai/gpt-4o"`. API keys come from the environment (`OPENAI_API_KEY`),
+    exactly like the OpenAI SDK; a provider's key is only required when a
+    request targets that provider.
     """
 
     def __init__(
         self,
         *,
-        openai_api_key: str | None = None,
         base_url: str | None = None,
         timeout: int | None = None,
     ) -> None:
-        self.chat = _Chat(
-            _native_client(openai_api_key, base_url, timeout)
-        )
+        self.chat = _Chat(_native_client(base_url, timeout))
 
 
 class AsyncWarpLLM:
@@ -141,10 +134,7 @@ class AsyncWarpLLM:
     def __init__(
         self,
         *,
-        openai_api_key: str | None = None,
         base_url: str | None = None,
         timeout: int | None = None,
     ) -> None:
-        self.chat = _AsyncChat(
-            _native_client(openai_api_key, base_url, timeout)
-        )
+        self.chat = _AsyncChat(_native_client(base_url, timeout))

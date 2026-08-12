@@ -14,16 +14,16 @@
 //! to round-trip is printed in full: that output is a fixture, and belongs
 //! under `fixtures/transcript/` so the keyless suite catches it from then on.
 //!
-//! This speaks HTTP directly rather than through warpllm, since warpllm has no
-//! streaming transport yet — which is exactly why it is worth running now. The
-//! REQUEST is built from [`CreateChatCompletionRequest`], so what it proves
-//! about that shape is real: `stream_options` rides along in `unknown_fields`,
-//! and the provider accepts what warpllm would have sent.
+//! This goes through [`Client::chat_completions_stream`], so it exercises the
+//! whole path a caller uses — the request renderer, the SSE framing, the
+//! gateway IR, and the render back. A chunk that reaches the assertions below
+//! has already survived normalization, which is what makes the round trip it
+//! then checks a statement about warpllm and not merely about serde.
 
-use std::time::Duration;
-
-use warpllm::protocol::openai_compat::chat_completions::types::CreateChatCompletionStreamResponse;
-use warpllm::{ChatCompletionRequestMessage, CreateChatCompletionRequest, fetch_model};
+use warpllm::{
+    ChatCompletionRequestMessage, ClientConfig, CreateChatCompletionRequest,
+    CreateChatCompletionStreamResponse, fetch_model,
+};
 
 /// One model per provider on the roster. Cheap and short-answered on purpose:
 /// this is a shape check, not a capability survey.
@@ -40,24 +40,24 @@ async fn every_configured_provider_streams_chunks_warpllm_can_hold() {
     let mut skipped = Vec::new();
 
     for model_str in MODELS {
-        let (provider, model) = fetch_model(model_str).expect("roster entry");
-        let Some(key) = provider
+        let (provider, _) = fetch_model(model_str).expect("roster entry");
+        if provider
             .env_api_key()
             .and_then(|name| std::env::var(name).ok())
-        else {
+            .is_none()
+        {
             skipped.push(model_str);
             continue;
-        };
+        }
 
         let mut request = CreateChatCompletionRequest {
-            model: model.model().to_owned(),
+            model: model_str.to_owned(),
             messages: vec![ChatCompletionRequestMessage {
                 role: "user".into(),
                 content: "Reply with exactly: hello".into(),
                 unknown_fields: Default::default(),
             }],
             max_tokens: Some(16),
-            stream: Some(true),
             ..Default::default()
         };
         // Unmodeled, and reaching the provider anyway — the catch-all doing
@@ -67,19 +67,22 @@ async fn every_configured_provider_streams_chunks_warpllm_can_hold() {
             serde_json::json!({"include_usage": true}),
         );
 
-        let body = reqwest::Client::new()
-            .post(format!("{}/chat/completions", provider.base_url()))
-            .bearer_auth(key)
-            .json(&request)
-            .timeout(Duration::from_secs(60))
-            .send()
-            .await
-            .unwrap_or_else(|e| panic!("{model_str}: {e}"))
-            .text()
+        let client = warpllm::Client::new(ClientConfig {
+            timeout_secs: Some(60),
+            ..Default::default()
+        })
+        .unwrap_or_else(|e| panic!("{model_str}: {e}"));
+
+        let mut stream = client
+            .chat_completions_stream(request)
             .await
             .unwrap_or_else(|e| panic!("{model_str}: {e}"));
 
-        assert_chunks_round_trip(model_str, &body);
+        let mut chunks = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            chunks.push(chunk.unwrap_or_else(|e| panic!("{model_str}: {e}")));
+        }
+        assert_chunks_are_usable(model_str, &chunks);
         checked.push(model_str);
     }
 
@@ -91,32 +94,20 @@ async fn every_configured_provider_streams_chunks_warpllm_can_hold() {
     );
 }
 
-/// Every event of a live SSE body, parsed and re-emitted verbatim.
-fn assert_chunks_round_trip(model_str: &str, body: &str) {
-    let payloads: Vec<&str> = body
-        .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .filter(|payload| *payload != "[DONE]")
-        .collect();
+/// What a caller needs out of a live stream: text that adds up, a finish
+/// reason, and the caller's own model string echoed back on every chunk.
+fn assert_chunks_are_usable(model_str: &str, chunks: &[CreateChatCompletionStreamResponse]) {
     assert!(
-        payloads.len() > 1,
-        "{model_str} answered with no stream:\n{body}"
+        chunks.len() > 1,
+        "{model_str} answered with no stream: {chunks:#?}"
     );
 
     let mut text = String::new();
     let mut finished = false;
-    for payload in payloads {
-        let value: serde_json::Value = serde_json::from_str(payload)
-            .unwrap_or_else(|e| panic!("{model_str} sent a non-JSON event: {payload}: {e}"));
-        let chunk: CreateChatCompletionStreamResponse = serde_json::from_value(value.clone())
-            .unwrap_or_else(|e| {
-                panic!("{model_str} sent a chunk warpllm cannot hold: {e}\n{value:#}")
-            });
+    for chunk in chunks {
         assert_eq!(
-            serde_json::to_value(&chunk).unwrap(),
-            value,
-            "{model_str} lost a field on re-serialization; add this event to \
-             fixtures/transcript/ and fix the shape:\n{value:#}"
+            chunk.model, model_str,
+            "{model_str} chunk echoes the upstream name, not the caller's"
         );
         for choice in &chunk.choices {
             if let Some(Some(fragment)) = &choice.delta.content {

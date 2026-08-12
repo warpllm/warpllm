@@ -28,7 +28,17 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, body: Bytes)
         stream = request.stream.unwrap_or(false),
         "chat completion request"
     );
-    // `stream: true` is rejected inside the client as NotImplemented → 501.
+    // The library streams; this surface does not yet, and the refusal is now
+    // its own to state. `Client::chat_completions` refuses `stream: true` by
+    // naming the Rust entrypoint that serves it — advice with nothing behind
+    // it over HTTP, where there is no second endpoint to be sent to. So an
+    // unimplemented SURFACE is what a caller is told, which is the truth here
+    // and answers 501 rather than 400.
+    if request.stream == Some(true) {
+        return error_response(&warpllm::Error::NotImplemented(
+            "streaming over the HTTP gateway",
+        ));
+    }
     match state.client.chat_completions(request).await {
         Ok(completion) => Json(completion).into_response(),
         Err(e) => error_response(&e),

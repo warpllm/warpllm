@@ -84,8 +84,13 @@ fn ingest_message(message: ChatCompletionRequestMessage) -> types::Message {
 /// provider is the authority on its own parameters and rejects what it
 /// doesn't accept. Same-protocol round trips are lossless modulo three
 /// documented transformations: the provider prefix is stripped from
-/// `model`, `stream` is dropped, and an empty `stop` list is omitted, each
-/// of them exactly reversible or resolved before ingest.
+/// `model`, `stream: false` is dropped, and an empty `stop` list is omitted,
+/// each of them exactly reversible or resolved before ingest.
+///
+/// `stream` is emitted only when it is true. The wire field is optional and
+/// defaults to false, so an absent key and an explicit `false` ask the
+/// provider for the same thing — and ingest already reads them as the same
+/// thing, which is what keeps dropping it lossless.
 pub(crate) fn render_request(
     request: &types::ChatRequest,
     provider: &'static str,
@@ -104,7 +109,7 @@ pub(crate) fn render_request(
         max_tokens: params.max_tokens,
         top_p: params.top_p,
         stop: (!params.stop.is_empty()).then(|| params.stop.clone()),
-        stream: None,
+        stream: request.stream.then_some(true),
         unknown_fields,
     })
 }

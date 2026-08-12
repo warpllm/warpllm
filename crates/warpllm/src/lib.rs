@@ -12,7 +12,7 @@ mod registry;
 pub mod protocol;
 pub mod types;
 
-pub use client::Client;
+pub use client::{ChatCompletionStream, Client};
 pub use config::ClientConfig;
 pub use error::{Error, Origin, Result};
 /// The gateway's canonical form for an upstream failure — the error-side
@@ -37,6 +37,7 @@ pub use json_client::JsonClient;
 /// every time that module gained a type.
 pub use protocol::openai_compat::chat_completions::types::{
     ChatCompletionRequestMessage, CreateChatCompletionRequest, CreateChatCompletionResponse,
+    CreateChatCompletionStreamResponse,
 };
 /// A failure rendered the way an OpenAI-compatible surface reports it, and
 /// the only error shape warpllm shows anyone who is not writing Rust.

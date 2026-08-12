@@ -14,6 +14,43 @@ Everything under "Changed" is breaking, so this releases as `0.3.0`.
 
 ### Added
 
+- **Streaming chat completions.** `Client::chat_completions_stream` returns a
+  `ChatCompletionStream` of `CreateChatCompletionStreamResponse` chunks, read
+  off the wire as they arrive:
+
+  ```rust
+  let mut stream = client.chat_completions_stream(request).await?;
+  while let Some(chunk) = stream.next().await {
+      for choice in &chunk?.choices {
+          if let Some(Some(text)) = &choice.delta.content {
+              print!("{text}");
+          }
+      }
+  }
+  ```
+
+  The chunk shape already shipped; what is new is everything that produces one.
+  Server-sent events are framed in the protocol layer — partial lines and
+  multi-byte characters split across reads are rejoined, `:` keepalive comments
+  are ignored, and `[DONE]` ends the stream rather than arriving as a chunk.
+  Each event is then normalized through a gateway representation and rendered
+  back, losslessly: an explicit `null` returns as a `null`, an absent key stays
+  absent, an opening `"content": ""` survives as itself, and per-chunk fields no
+  specification names — OpenAI's `obfuscation` among them — reach the caller
+  verbatim. Both recorded transcripts are checked event by event through that
+  round trip.
+
+  Every model on the roster now declares `openai_compat_chat_completions_stream`
+  alongside its whole-reply surface, each provider's `stream` parameter cited in
+  `specs.yaml`. Streaming remains its own surface, so a future model that serves
+  one without the other still says so.
+
+  `Client::chat_completions` refuses `stream: true` rather than serving the
+  wrong shape, naming the entrypoint that serves it. That advice is Rust's
+  alone: the HTTP gateway and the Node and Python bindings have no second
+  entrypoint to point a caller at, so each reports an unimplemented SURFACE and
+  answers `stream: true` with 501 exactly as before.
+
 - **Kimi, and the rest of OpenAI's chat-completion roster.** A new `kimi`
   provider, reached at `api.moonshot.ai` with `MOONSHOT_API_KEY`, serving
   `kimi/kimi-k3`, `kimi/kimi-k2.6`, and the two `kimi-k2.7-code` variants —

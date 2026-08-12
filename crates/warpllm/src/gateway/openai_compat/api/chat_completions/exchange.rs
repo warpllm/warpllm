@@ -3,9 +3,11 @@
 use crate::error::Result;
 use crate::gateway::openai_compat::error::error_from_body;
 use crate::gateway::types;
-use crate::protocol::openai_compat::chat_completions::transport::{self, Outcome};
+use crate::protocol::openai_compat::chat_completions::transport::{
+    self, ChunkStream, Outcome, StreamOutcome,
+};
 
-use super::{ingest_response, render_request};
+use super::{ingest_chunk, ingest_response, render_request};
 
 /// Renders the gateway request for this protocol, posts it, and ingests the
 /// reply — the one place this protocol's order is stated.
@@ -43,5 +45,53 @@ pub(crate) async fn exchange(
             retry_after,
             request_id,
         )),
+    }
+}
+
+/// [`exchange`] for a streamed reply: gateway types on both ends, the same
+/// order stated once, and the same error mapping.
+///
+/// The failure it can report is only the one that happens BEFORE any chunk —
+/// a refused request, a rate limit, an unreachable host. Once the stream is
+/// open, a failure has no status left to map and surfaces on the stream itself.
+pub(crate) async fn exchange_stream(
+    request: &types::ChatRequest,
+    http: &reqwest::Client,
+    provider: &'static str,
+    base_url: &str,
+    api_key: &str,
+) -> Result<ChatChunkStream> {
+    let wire = render_request(request, provider)?;
+    match transport::post_stream(http, provider, base_url, api_key, &wire).await? {
+        StreamOutcome::Ok(chunks) => Ok(ChatChunkStream { chunks }),
+        StreamOutcome::Status {
+            status,
+            body,
+            retry_after,
+            request_id,
+        } => Err(error_from_body(
+            provider,
+            status,
+            &body,
+            retry_after,
+            request_id,
+        )),
+    }
+}
+
+/// The gateway's view of a stream: wire chunks in, [`types::ChatResponseChunk`]
+/// out, one for one.
+///
+/// Thin on purpose. Ingest is infallible, so this adds nothing to the transport
+/// but the conversion — which is exactly the seam a second protocol needs, and
+/// the reason this is not just [`ChunkStream`] handed to the client.
+#[derive(Debug)]
+pub(crate) struct ChatChunkStream {
+    chunks: ChunkStream,
+}
+
+impl ChatChunkStream {
+    pub(crate) async fn next(&mut self) -> Option<Result<types::ChatResponseChunk>> {
+        Some(self.chunks.next().await?.map(ingest_chunk))
     }
 }

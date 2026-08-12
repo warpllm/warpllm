@@ -74,8 +74,17 @@
 #
 #   openai_compat_chat_completions         One request, one whole reply.
 #                                          IMPLEMENTED.
-#   openai_compat_chat_completions_stream  The same, streamed. Not implemented
-#                                          yet.
+#   openai_compat_chat_completions_stream  The same, streamed as server-sent
+#                                          events. IMPLEMENTED. Every provider
+#                                          on the roster documents `stream` on
+#                                          the endpoint rather than per model,
+#                                          so it is listed for every model that
+#                                          serves chat completions at all:
+#                                          <https://developers.openai.com/api/reference/resources/chat>,
+#                                          <https://api-docs.deepseek.com/api/create-chat-completion>,
+#                                          <https://platform.kimi.ai/docs/api/chat>,
+#                                          <https://openrouter.ai/docs/api-reference/streaming>
+#                                          (all checked 2026-08-12).
 #   openai_compat_responses                OpenAI's Responses API. Not
 #                                          implemented yet.
 #
@@ -111,6 +120,7 @@ providers:
       deepseek/deepseek-v4-flash:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 1000000
           max_output_tokens: 384000
@@ -118,6 +128,7 @@ providers:
       deepseek/deepseek-v4-pro:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 1000000
           max_output_tokens: 384000
@@ -158,12 +169,14 @@ providers:
       kimi/kimi-k2.6:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 262144
       # <https://platform.kimi.ai/docs/pricing/chat-k27-code>
       kimi/kimi-k2.7-code:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 262144
       # The same limits as kimi-k2.7-code; the two differ in throughput.
@@ -171,12 +184,14 @@ providers:
       kimi/kimi-k2.7-code-highspeed:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 262144
       # <https://platform.kimi.ai/docs/pricing/chat-k3>
       kimi/kimi-k3:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 1048576
 
@@ -229,6 +244,7 @@ providers:
       openai/gpt-4.1:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 1047576
           max_output_tokens: 32768
@@ -236,6 +252,7 @@ providers:
       openai/gpt-4.1-mini:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 1047576
           max_output_tokens: 32768
@@ -243,6 +260,7 @@ providers:
       openai/gpt-4o:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 128000
           max_output_tokens: 16384
@@ -250,6 +268,7 @@ providers:
       openai/gpt-4o-mini:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 128000
           max_output_tokens: 16384
@@ -259,6 +278,7 @@ providers:
       openai/gpt-5:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 400000
           max_output_tokens: 128000
@@ -266,6 +286,7 @@ providers:
       openai/gpt-5-mini:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 400000
           max_output_tokens: 128000
@@ -273,6 +294,7 @@ providers:
       openai/gpt-5-nano:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 400000
           max_output_tokens: 128000
@@ -280,6 +302,7 @@ providers:
       openai/gpt-5.1:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 400000
           max_output_tokens: 128000
@@ -287,6 +310,7 @@ providers:
       openai/gpt-5.2:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 400000
           max_output_tokens: 128000
@@ -295,6 +319,7 @@ providers:
       openai/gpt-5.4:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 1050000
           max_output_tokens: 128000
@@ -302,6 +327,7 @@ providers:
       openai/gpt-5.4-mini:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 400000
           max_output_tokens: 128000
@@ -309,6 +335,7 @@ providers:
       openai/gpt-5.4-nano:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 400000
           max_output_tokens: 128000
@@ -316,6 +343,7 @@ providers:
       openai/gpt-5.5:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 1050000
           max_output_tokens: 128000
@@ -326,6 +354,7 @@ providers:
       openai/gpt-5.6:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 1050000
           max_output_tokens: 128000
@@ -333,6 +362,7 @@ providers:
       openai/gpt-5.6-luna:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 1050000
           max_output_tokens: 128000
@@ -340,6 +370,7 @@ providers:
       openai/gpt-5.6-sol:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 1050000
           max_output_tokens: 128000
@@ -347,6 +378,7 @@ providers:
       openai/gpt-5.6-terra:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 1050000
           max_output_tokens: 128000
@@ -356,6 +388,7 @@ providers:
       openai/o3:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 200000
           max_output_tokens: 100000
@@ -387,6 +420,7 @@ providers:
       openrouter/anthropic/claude-opus-4:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         model: anthropic/claude-opus-4
         capabilities:
           max_input_tokens: 200000
@@ -399,6 +433,7 @@ providers:
       openrouter/anthropic/claude-sonnet-4:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         model: anthropic/claude-sonnet-4
         capabilities:
           max_input_tokens: 200000
@@ -409,11 +444,13 @@ providers:
       openrouter/auto:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
       # Checked 2026-08-07: 1M context, 65,536 max output.
       # <https://openrouter.ai/google/gemini-2.5-pro>
       openrouter/google/gemini-2.5-pro:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         model: google/gemini-2.5-pro
         capabilities:
           max_input_tokens: 1048576
@@ -430,6 +467,7 @@ providers:
       openrouter/moonshotai/kimi-k2.6:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         model: moonshotai/kimi-k2.6
         capabilities:
           max_input_tokens: 256000
@@ -440,6 +478,7 @@ providers:
       openrouter/moonshotai/kimi-k2.7-code:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         model: moonshotai/kimi-k2.7-code
         capabilities:
           max_input_tokens: 256000
@@ -452,6 +491,7 @@ providers:
       openrouter/moonshotai/kimi-k3:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         model: moonshotai/kimi-k3
         capabilities:
           max_input_tokens: 974842
@@ -461,6 +501,7 @@ providers:
       openrouter/openai/gpt-5.6:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         model: openai/gpt-5.6
         capabilities:
           max_input_tokens: 1050000
@@ -474,6 +515,7 @@ providers:
       openrouter/~deepseek/deepseek-v4-flash-latest:
         supported_apis:
           - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
         model: ~deepseek/deepseek-v4-flash-latest
         capabilities:
           max_input_tokens: 1048576

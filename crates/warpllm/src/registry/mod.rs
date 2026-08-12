@@ -338,20 +338,31 @@ mod tests {
     /// capability nothing can act on. This is what catches it being added
     /// early.
     ///
+    /// Both implemented surfaces are listed for every model because every
+    /// provider on the roster documents `stream` on the chat-completions
+    /// endpoint rather than per model — `specs.yaml` cites each one. A provider
+    /// whose models genuinely differ belongs in an exclusion here, the same way
+    /// a non-chat model would.
+    ///
     /// It also means the shipped roster can no longer show two models of one
     /// provider differing. That is proved over fixtures instead, by
     /// `load::tests::two_models_of_one_provider_serve_different_surfaces`.
     #[test]
-    fn every_shipped_model_serves_exactly_chat_completions() {
+    fn every_shipped_model_serves_exactly_the_implemented_surfaces() {
         assert!(!REGISTRY.models.is_empty(), "the registry is empty");
         for (model_str, spec) in &REGISTRY.models {
             assert_eq!(
                 spec.supported_apis(),
-                [SupportedApi {
-                    api: Api::OpenAiCompatChatCompletions
-                }],
+                [
+                    SupportedApi {
+                        api: Api::OpenAiCompatChatCompletions
+                    },
+                    SupportedApi {
+                        api: Api::OpenAiCompatChatCompletionsStream
+                    }
+                ],
                 "`{model_str}` lists a surface warpllm does not implement, or \
-                 omits the one it does"
+                 omits one it does"
             );
         }
     }

@@ -4,6 +4,7 @@ pub(crate) mod error;
 pub(crate) mod message;
 pub(crate) mod request;
 pub(crate) mod response;
+pub(crate) mod stream;
 
 /// `pub`, not `pub(crate)` like its siblings, so `lib.rs` can re-export these
 /// three. It leaks nothing on its own — `crate::gateway` is a private module,
@@ -13,6 +14,7 @@ pub use error::*;
 pub(crate) use message::*;
 pub(crate) use request::*;
 pub(crate) use response::*;
+pub(crate) use stream::*;
 
 use std::collections::BTreeMap;
 

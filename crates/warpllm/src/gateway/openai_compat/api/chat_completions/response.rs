@@ -198,7 +198,7 @@ fn ingest_tool_call(call: ChatCompletionMessageToolCallUnion) -> ContentBlock {
     }
 }
 
-fn ingest_usage(usage: CompletionUsage) -> types::Usage {
+pub(super) fn ingest_usage(usage: CompletionUsage) -> types::Usage {
     let CompletionUsage {
         completion_tokens,
         prompt_tokens,
@@ -341,7 +341,7 @@ fn render_message(message: &types::Message, provider: &str) -> ChatCompletionRes
     }
 }
 
-fn render_usage(usage: &types::Usage, provider: &str) -> CompletionUsage {
+pub(super) fn render_usage(usage: &types::Usage, provider: &str) -> CompletionUsage {
     let mut unknown_fields = merged_ext(&usage.ext, provider);
     let prompt_details = render_details(
         unknown_fields.remove("prompt_tokens_details"),
@@ -387,7 +387,7 @@ fn render_details<T: DeserializeOwned>(
     serde_json::from_value(Value::Object(fields)).ok()
 }
 
-fn take_string(fields: &mut UnknownFields, key: &str) -> Option<String> {
+pub(super) fn take_string(fields: &mut UnknownFields, key: &str) -> Option<String> {
     match fields.remove(key) {
         Some(Value::String(value)) => Some(value),
         _ => None,
@@ -398,7 +398,10 @@ fn take_string(fields: &mut UnknownFields, key: &str) -> Option<String> {
 /// absent comes back absent, and an explicit `null` comes back as one. The
 /// typed fields get this for free — `take_typed::<Option<T>>` reads a stashed
 /// `null` as `Some(None)` — and only a bare string needs it spelled out.
-fn take_nullable_string(fields: &mut UnknownFields, key: &str) -> Option<Option<String>> {
+pub(super) fn take_nullable_string(
+    fields: &mut UnknownFields,
+    key: &str,
+) -> Option<Option<String>> {
     match fields.remove(key) {
         Some(Value::String(value)) => Some(Some(value)),
         Some(Value::Null) => Some(None),
@@ -407,14 +410,14 @@ fn take_nullable_string(fields: &mut UnknownFields, key: &str) -> Option<Option<
     }
 }
 
-fn take_typed<T: DeserializeOwned>(fields: &mut UnknownFields, key: &str) -> Option<T> {
+pub(super) fn take_typed<T: DeserializeOwned>(fields: &mut UnknownFields, key: &str) -> Option<T> {
     fields
         .remove(key)
         .and_then(|value| serde_json::from_value(value).ok())
 }
 
 /// Wire structs are plain serde data; serialization cannot fail.
-fn plain<T: serde::Serialize>(value: &T) -> Value {
+pub(super) fn plain<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).expect("wire data serializes")
 }
 

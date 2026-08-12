@@ -7,7 +7,7 @@ use crate::credentials::Credentials;
 use crate::error::{Error, Result};
 use crate::gateway::openai_compat;
 use crate::protocol::openai_compat::chat_completions::types::{
-    CreateChatCompletionRequest, CreateChatCompletionResponse,
+    CreateChatCompletionRequest, CreateChatCompletionResponse, CreateChatCompletionStreamResponse,
 };
 use crate::registry::{ModelSpec, ProviderSpec, fetch_model};
 use crate::types::Api;
@@ -52,7 +52,12 @@ impl Client {
         request: CreateChatCompletionRequest,
     ) -> Result<CreateChatCompletionResponse> {
         if request.stream == Some(true) {
-            return Err(Error::NotImplemented("streaming"));
+            // Not "unimplemented": it IS implemented, on a method whose return
+            // type can carry chunks. A whole reply cannot, so this entrypoint
+            // says where to go rather than quietly serving the wrong shape.
+            return Err(Error::InvalidInput(
+                "stream: true asks for chunks; call chat_completions_stream".into(),
+            ));
         }
         let requested_model = request.model.clone();
         // Half one: the roster. Closed, so an unregistered name stops here.
@@ -90,6 +95,50 @@ impl Client {
         // Echo the caller's provider-prefixed string, not the upstream echo.
         completion.model = requested_model;
         Ok(completion)
+    }
+
+    /// Serves one OpenAI-compatible chat completion as a stream of chunks.
+    ///
+    /// The same two admission halves as [`Client::chat_completions`], in the
+    /// same order, against a DIFFERENT surface: streaming is its own entry in
+    /// the roster, so a model that serves whole replies says nothing about
+    /// whether it serves streamed ones.
+    ///
+    /// `stream` is set on the caller's behalf rather than required: the method
+    /// name already states the intent, and a request that contradicts it would
+    /// have nothing useful to mean.
+    ///
+    /// The [`Result`] covers only what can fail before the first chunk. Once
+    /// the stream is open, failures arrive as items on it.
+    pub async fn chat_completions_stream(
+        &self,
+        mut request: CreateChatCompletionRequest,
+    ) -> Result<ChatCompletionStream> {
+        request.stream = Some(true);
+        let requested_model = request.model.clone();
+        let (provider, model) = fetch_model(&requested_model)?;
+        Self::validate_api(
+            model,
+            Api::OpenAiCompatChatCompletionsStream,
+            provider,
+            &requested_model,
+        )?;
+        let api_key = self.api_key(provider)?;
+
+        let normalized =
+            openai_compat::api::chat_completions::ingest_request(request, model.model());
+        Ok(ChatCompletionStream {
+            chunks: openai_compat::api::chat_completions::exchange_stream(
+                &normalized,
+                &self.http,
+                provider.name(),
+                self.base_url(provider),
+                api_key,
+            )
+            .await?,
+            provider: provider.name(),
+            model: requested_model,
+        })
     }
 
     /// The routed provider's key, from the snapshot this client took of the
@@ -151,6 +200,54 @@ impl Client {
             .base_url
             .as_deref()
             .unwrap_or(provider.base_url())
+    }
+}
+
+/// The chunks of one streamed reply, in the shape the caller asked in.
+///
+/// Returned by [`Client::chat_completions_stream`]. Iterate it to exhaustion:
+///
+/// ```no_run
+/// # async fn demo(client: &warpllm::Client, request: warpllm::CreateChatCompletionRequest)
+/// # -> warpllm::Result<()> {
+/// let mut stream = client.chat_completions_stream(request).await?;
+/// while let Some(chunk) = stream.next().await {
+///     for choice in &chunk?.choices {
+///         if let Some(Some(text)) = &choice.delta.content {
+///             print!("{text}");
+///         }
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// An inherent `next` rather than a [`Stream`](std::iter::Iterator)
+/// implementation: a `while let` loop needs no combinators, and the bindings
+/// that wrap this iterate it the same way.
+#[derive(Debug)]
+pub struct ChatCompletionStream {
+    chunks: openai_compat::api::chat_completions::ChatChunkStream,
+    provider: &'static str,
+    /// The caller's provider-prefixed string, echoed onto every chunk in place
+    /// of the upstream's own — the streaming counterpart of the one
+    /// [`Client::chat_completions`] performs on a whole reply.
+    model: String,
+}
+
+impl ChatCompletionStream {
+    /// The next chunk, or `None` once the stream ends.
+    ///
+    /// An error item is terminal: whatever produced it also ended the stream,
+    /// so the next call returns `None`.
+    pub async fn next(&mut self) -> Option<Result<CreateChatCompletionStreamResponse>> {
+        let chunk = self.chunks.next().await?;
+        Some(chunk.map(|chunk| {
+            let mut rendered =
+                openai_compat::api::chat_completions::render_chunk(&chunk, self.provider);
+            rendered.model = self.model.clone();
+            rendered
+        }))
     }
 }
 

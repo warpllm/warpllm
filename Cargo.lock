@@ -2073,6 +2073,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "tokio",
  "warpllm",
 ]
 
@@ -2082,6 +2083,7 @@ version = "0.2.0"
 dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
+ "tokio",
  "warpllm",
 ]
 
@@ -2091,6 +2093,7 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
+ "futures-util",
  "reqwest",
  "serde_json",
  "temp-env",

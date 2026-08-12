@@ -56,6 +56,31 @@ pub enum Error {
         provider: &'static str,
         message: String,
     },
+    /// The provider's stream ended before the sentinel that says it finished.
+    ///
+    /// A stream has two ways to stop and only one of them means the answer is
+    /// whole. Without this, they are the same `None` — and a caller told a
+    /// truncated reply was complete has no way left to find out otherwise.
+    ///
+    /// Nothing is attached because nothing was said: the socket closed. That
+    /// makes it warpllm's report of an upstream's silence rather than an
+    /// upstream's own failure, which is why it sits here beside
+    /// [`Network`](Self::Network) and [`Decode`](Self::Decode).
+    #[error("{provider} ended the stream before it was complete")]
+    StreamTruncated { provider: &'static str },
+    /// The provider's stream went quiet for longer than
+    /// [`ClientConfig::stream_read_timeout_secs`](crate::ClientConfig::stream_read_timeout_secs),
+    /// so warpllm stopped waiting.
+    ///
+    /// Separate from [`StreamTruncated`](Self::StreamTruncated) because the
+    /// socket never closed and the remedy is different: an upstream really is
+    /// wedged, or the limit is tighter than the model's slowest pause. Only
+    /// the caller knows which, and only if told which one happened.
+    #[error("{provider} sent nothing for {}s", timeout.as_secs())]
+    StreamStalled {
+        provider: &'static str,
+        timeout: std::time::Duration,
+    },
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
     /// warpllm could not set itself up — building the HTTP client failed, for
@@ -184,6 +209,8 @@ impl Error {
             // upstream reported.
             | Error::Network { .. }
             | Error::Decode { .. }
+            | Error::StreamTruncated { .. }
+            | Error::StreamStalled { .. }
             | Error::NotImplemented(_)
             | Error::Internal(_) => Origin::Gateway,
             Error::RateLimited(_)
@@ -237,6 +264,8 @@ impl Error {
             Error::MissingApiKey { .. } => "missing_api_key",
             Error::Network { .. } => "connection_error",
             Error::Decode { .. } => "decode_error",
+            Error::StreamTruncated { .. } => "stream_truncated",
+            Error::StreamStalled { .. } => "stream_stalled",
             Error::NotImplemented(_) => "not_implemented",
             Error::Internal(_) => "internal_error",
             Error::RateLimited(_) => "rate_limited",
@@ -436,6 +465,31 @@ mod tests {
         }
     }
 
+    /// The two ways a stream dies badly, told apart on the wire.
+    ///
+    /// Both are 5xx and neither is the provider's reported failure, so the
+    /// temptation is one code for "the stream broke". They earn separate ones
+    /// because the remedies diverge: a truncation is an upstream that hung up,
+    /// while a stall may be nothing worse than `stream_read_timeout_secs` set
+    /// tighter than the model's slowest pause — and the message has to name
+    /// the limit for that to be actionable.
+    #[test]
+    fn a_dead_stream_and_a_quiet_one_are_distinguishable() {
+        let truncated = wire(&Error::StreamTruncated { provider: "openai" });
+        let stalled = wire(&Error::StreamStalled {
+            provider: "openai",
+            timeout: Duration::from_secs(45),
+        });
+
+        assert_eq!(truncated["status"], 502, "the upstream answered badly");
+        assert_eq!(stalled["status"], 504, "the upstream stopped answering");
+        assert_ne!(truncated["error"]["code"], stalled["error"]["code"]);
+        assert!(
+            stalled["error"]["message"].as_str().unwrap().contains("45"),
+            "the limit that fired is the whole remedy: {stalled}"
+        );
+    }
+
     /// A body did arrive — it was just unreadable — so this is a bad
     /// gateway, not a connection that never happened.
     #[test]
@@ -469,6 +523,11 @@ mod tests {
             Error::Decode {
                 provider: "openai",
                 message: "x".into(),
+            },
+            Error::StreamTruncated { provider: "openai" },
+            Error::StreamStalled {
+                provider: "openai",
+                timeout: Duration::from_secs(60),
             },
             Error::NotImplemented("x"),
             Error::Internal("x".into()),
@@ -522,6 +581,12 @@ mod tests {
             Error::Decode {
                 provider: "openai",
                 message: "x".into(),
+            }
+            .code(),
+            Error::StreamTruncated { provider: "openai" }.code(),
+            Error::StreamStalled {
+                provider: "openai",
+                timeout: Duration::from_secs(60),
             }
             .code(),
             Error::NotImplemented("x").code(),

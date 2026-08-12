@@ -134,6 +134,9 @@ impl Client {
                 provider.name(),
                 self.base_url(provider),
                 api_key,
+                self.config
+                    .stream_read_timeout_secs
+                    .map(Duration::from_secs),
             )
             .await?,
             provider: provider.name(),
@@ -237,6 +240,11 @@ pub struct ChatCompletionStream {
 
 impl ChatCompletionStream {
     /// The next chunk, or `None` once the stream ends.
+    ///
+    /// `None` means the reply is COMPLETE. An upstream that stopped early ends
+    /// with [`Error::StreamTruncated`](crate::Error::StreamTruncated) instead,
+    /// after every chunk that did arrive — so a caller never has to wonder
+    /// whether the answer it collected is the whole one.
     ///
     /// An error item is terminal: whatever produced it also ended the stream,
     /// so the next call returns `None`.

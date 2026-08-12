@@ -14,6 +14,69 @@ Everything under "Changed" is breaking, so this releases as `0.3.0`.
 
 ### Added
 
+- **Streaming from every surface: the SDKs and the HTTP gateway.** The Rust core
+  streamed; nothing else could reach it. Now all of them do.
+
+  TypeScript and Python get it on the method they already call, the way the
+  official OpenAI packages do it:
+
+  ```ts
+  for await (const chunk of await client.chatCompletions({ ...req, stream: true })) {
+    process.stdout.write(chunk.choices[0]?.delta.content ?? '')
+  }
+  ```
+
+  ```python
+  for chunk in client.chat_completions({**req, "stream": True}):
+      print(chunk["choices"][0]["delta"].get("content", ""), end="")
+  # ...and `async for` on AsyncWarpLLM.
+  ```
+
+  Python's static typing is the one asymmetry, and it is a consequence of taking
+  one mapping rather than `**kwargs` so unmodeled fields cross untouched: an
+  overload has to match the mapping's type, and a dict carrying extra keys
+  matches no `TypedDict`. The runtime behaviour is exact either way, and
+  `chat_completions_stream` is there for callers who need a checker to agree.
+  TypeScript needs no such hatch.
+
+  `warpllm-server` serves `stream: true` as Server-Sent Events, so an OpenAI SDK
+  pointed at the gateway now gets a stream instead of something it cannot parse.
+  A refusal before the first chunk keeps its real status, `Retry-After` and all;
+  once the 200 is committed there is no status left, so a failure arrives as a
+  final `data: {"error": …}` event with **no** `[DONE]` after it — a caller has
+  to be able to tell a truncated answer from a complete one.
+
+  Underneath, `JsonClient` gained `chat_completions_stream` and `JsonChatStream`.
+  It stays free of any iterator trait: Rust has several and the languages on the
+  far side have their own, so an inherent `next` is what each binding builds
+  `Symbol.asyncIterator` or `__anext__` on.
+
+- **`stream_read_timeout_secs`**, bounding how long a stream may go without a
+  single byte (`streamReadTimeout` in Node, `stream_read_timeout` in Python).
+  Absent means never, which is the default and today's behaviour.
+
+  `timeout_secs` is a TOTAL deadline: it cannot tell a stream that is alive and
+  slow from one that is wedged, so it bounds a stall only by outliving it — and
+  it cuts off a healthy long generation at the same mark. This bounds the GAP
+  between reads instead and resets on every byte, which is the shape that fits a
+  response whose length nobody knows in advance. A stream that goes quiet past
+  the limit ends with `Error::StreamStalled`, a 504 naming the limit that fired.
+
+  Opt-in because no single value is right for everyone, and a wrong one fails in
+  the worst direction: the wait before the FIRST chunk is a gap like any other,
+  and a reasoning model can think for minutes before it emits a token. Set it
+  above the slowest time-to-first-token you expect, not merely above the gap
+  between chunks.
+
+  It is applied per-stream rather than through reqwest's own `read_timeout`,
+  which is builder-scoped and would either bind every non-streamed request or
+  cost a second connection pool to avoid that.
+
+- **`scripts/test-all.sh`**, running the Rust, Node and Python suites in one
+  command. `cargo test --workspace` covers one of the three, and both bindings
+  are rebuilt rather than assumed current — `uv sync --locked` audits without
+  recompiling, so pytest will pass against a stale extension module.
+
 - **Streaming chat completions.** `Client::chat_completions_stream` returns a
   `ChatCompletionStream` of `CreateChatCompletionStreamResponse` chunks, read
   off the wire as they arrive:
@@ -33,6 +96,11 @@ Everything under "Changed" is breaking, so this releases as `0.3.0`.
   Server-sent events are framed in the protocol layer — partial lines and
   multi-byte characters split across reads are rejoined, `:` keepalive comments
   are ignored, and `[DONE]` ends the stream rather than arriving as a chunk.
+  An upstream that stops WITHOUT sending `[DONE]` is a truncated answer, not a
+  finished one, and ends the stream with `Error::StreamTruncated` — everything
+  that did arrive first. A stream has two ways to stop and only one of them
+  means the reply is whole; collapsing them would hand a caller half an answer
+  with nothing to say so.
   Each event is then normalized through a gateway representation and rendered
   back, losslessly: an explicit `null` returns as a `null`, an absent key stays
   absent, an opening `"content": ""` survives as itself, and per-chunk fields no
@@ -46,10 +114,8 @@ Everything under "Changed" is breaking, so this releases as `0.3.0`.
   one without the other still says so.
 
   `Client::chat_completions` refuses `stream: true` rather than serving the
-  wrong shape, naming the entrypoint that serves it. That advice is Rust's
-  alone: the HTTP gateway and the Node and Python bindings have no second
-  entrypoint to point a caller at, so each reports an unimplemented SURFACE and
-  answers `stream: true` with 501 exactly as before.
+  wrong shape, naming the entrypoint that serves it. `JsonClient` does the same,
+  since a whole reply is the only thing its `String` can carry.
 
 - **Kimi, and the rest of OpenAI's chat-completion roster.** A new `kimi`
   provider, reached at `api.moonshot.ai` with `MOONSHOT_API_KEY`, serving

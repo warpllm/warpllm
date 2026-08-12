@@ -9,12 +9,11 @@ reason these read backwards.
 
 from __future__ import annotations
 
-from warpllm import CreateChatCompletionRequest, WarpLLM
-
-# Imported from the generated package rather than from `warpllm`: no method
-# returns a chunk yet, so the public facade does not name one. This is the
-# probe that says whether it would be usable when one does.
-from warpllm._generated import CreateChatCompletionStreamResponse
+from warpllm import (
+    CreateChatCompletionRequest,
+    CreateChatCompletionStreamResponse,
+    WarpLLM,
+)
 
 
 def a_plain_dict_is_a_request(client: WarpLLM) -> None:
@@ -123,3 +122,48 @@ def a_nullable_field_stays_nullable(client: WarpLLM) -> None:
     assert content is not None
     first = content[0]["top_logprobs"][0]["bytes"]
     len(first)  # type: ignore[arg-type]
+
+
+def the_streaming_overload_yields_a_stream(client: WarpLLM) -> None:
+    """A dict literal whose keys the TypedDict declares selects streaming.
+
+    No runtime test can prove this: a `chat_completions` that always returned
+    the response type would still pass every assertion in `test_chat.py`,
+    because the stream it actually returns is iterated dynamically.
+    """
+    for chunk in client.chat_completions({"stream": True}):
+        chunk["choices"][0]["delta"]
+
+
+def the_default_overload_yields_a_whole_reply(client: WarpLLM) -> None:
+    """...and its absence selects the whole reply.
+
+    The discriminator is `message` vs `delta`: a finished choice has the first
+    and a chunk's has the second, so asking a whole reply for `delta` is the
+    error that says the overloads did not collapse into one.
+    """
+    completion = client.chat_completions({"model": "m", "messages": []})
+    completion["choices"][0]["message"]
+    completion["choices"][0]["delta"]  # type: ignore[typeddict-item]
+
+
+def extra_keys_fall_back_to_the_reply_overload(client: WarpLLM) -> None:
+    """The documented limitation, pinned rather than left to be discovered.
+
+    `stream: True` alongside keys the TypedDict does not declare matches no
+    TypedDict, so a checker picks the non-streaming overload even though the
+    RUNTIME returns a stream. `chat_completions_stream` is the way out, and the
+    next probe is what says it works.
+    """
+    completion = client.chat_completions(
+        {"model": "m", "messages": [], "stream": True}
+    )
+    completion["choices"][0]["message"]
+
+
+def the_explicit_stream_entrypoint_is_precisely_typed(client: WarpLLM) -> None:
+    """No such ambiguity here: the return type does not depend on a value."""
+    for chunk in client.chat_completions_stream(
+        {"model": "m", "messages": []}
+    ):
+        chunk["choices"][0]["delta"]

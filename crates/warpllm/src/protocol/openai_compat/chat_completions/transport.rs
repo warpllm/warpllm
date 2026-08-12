@@ -106,12 +106,20 @@ pub(crate) enum StreamOutcome {
 ///
 /// A non-2xx body is read to the end here, exactly as [`post`] does: an error
 /// reply is small, complete, and worth nothing streamed.
+///
+/// `read_timeout` bounds the GAP between reads once the stream is open. It is
+/// applied here rather than on the [`reqwest::Client`] because reqwest's own
+/// `read_timeout` is builder-scoped: setting it there would bind every
+/// non-streamed request too, or cost a second connection pool to avoid that.
+/// The gap is one `await` in [`ChunkStream::next`], so bounding it needs
+/// neither.
 pub(crate) async fn post_stream(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
     api_key: &str,
     body: &CreateChatCompletionRequest,
+    read_timeout: Option<Duration>,
 ) -> Result<StreamOutcome> {
     let response = http
         .post(format!(
@@ -139,6 +147,8 @@ pub(crate) async fn post_stream(
         provider,
         frames: Frames::default(),
         ended: false,
+        truncated: false,
+        read_timeout,
     }))
 }
 
@@ -245,18 +255,43 @@ pub(crate) struct ChunkStream {
     /// The socket is spent — closed, or failed. Distinct from
     /// [`Frames::done`], which means the sentinel arrived.
     ended: bool,
+    /// The socket closed with no sentinel, so the reply is incomplete and the
+    /// caller is owed one error saying so.
+    ///
+    /// Not reported the instant it is noticed: an event may still be sitting
+    /// in [`Frames`] unflushed, and that event is the caller's before the bad
+    /// news is.
+    truncated: bool,
+    /// The longest gap between reads this stream will sit through. `None`
+    /// waits forever, bounded only by the client's total deadline.
+    read_timeout: Option<Duration>,
 }
 
 impl ChunkStream {
     /// The next chunk, or `None` once the stream ends.
     ///
-    /// `None` is terminal: after `[DONE]`, a closed socket, or any error, this
-    /// keeps returning `None` rather than reading a socket with nothing left
-    /// to say.
+    /// `None` means the reply is WHOLE: the sentinel arrived, or an error item
+    /// already said why it will not. A socket that closed early is neither, and
+    /// comes back as [`Error::StreamTruncated`] rather than as the same `None`
+    /// a finished stream gives — otherwise a truncated answer is identical to
+    /// a complete one at every surface above this.
+    ///
+    /// `None` is terminal either way: after `[DONE]`, a spent socket, or any
+    /// error, this keeps returning `None` rather than reading a socket with
+    /// nothing left to say.
     pub(crate) async fn next(&mut self) -> Option<Result<CreateChatCompletionStreamResponse>> {
         loop {
             if self.ended || self.frames.done {
                 return None;
+            }
+            // Checked AFTER `frames.done`: a body whose last line is the
+            // sentinel without its blank line ends cleanly, and the flush
+            // below is what discovers that.
+            if self.truncated {
+                self.ended = true;
+                return Some(Err(Error::StreamTruncated {
+                    provider: self.provider,
+                }));
             }
             // Everything already buffered first; only read when it runs dry.
             match self.frames.next_payload() {
@@ -282,17 +317,55 @@ impl ChunkStream {
                     return Some(Err(self.decode_error(&e.to_string())));
                 }
             }
-            match self.response.chunk().await {
-                Ok(Some(bytes)) => self.frames.push(&bytes),
-                Ok(None) => {
-                    self.ended = true;
-                    return self.frames.flush().map(|payload| self.decode(&payload));
+            match self.buffer_more().await {
+                Ok(true) => {}
+                // The socket closed without a sentinel. One event may still be
+                // accumulated — a body that omits its final blank line — and
+                // it is handed over first; the truncation is reported on the
+                // next call, from the flag above.
+                Ok(false) => {
+                    self.truncated = true;
+                    if let Some(payload) = self.frames.flush() {
+                        let decoded = self.decode(&payload);
+                        if decoded.is_err() {
+                            self.ended = true;
+                        }
+                        return Some(decoded);
+                    }
                 }
                 Err(e) => {
                     self.ended = true;
-                    return Some(Err(network_error(self.provider, e)));
+                    return Some(Err(e));
                 }
             }
+        }
+    }
+
+    /// Reads the next bytes off the socket into [`Frames`], answering whether
+    /// the socket is still open — `false` is EOF, and the only thing the
+    /// caller does differently with it.
+    ///
+    /// Owns the read timeout because this is the single `await` a stream can
+    /// hang on. A stall and a broken socket stay DISTINCT failures: one means
+    /// the provider went quiet on a connection that is still up, the other
+    /// that the connection went away, and only the first is answered by
+    /// raising a limit.
+    async fn buffer_more(&mut self) -> Result<bool> {
+        let read = match self.read_timeout {
+            Some(limit) => tokio::time::timeout(limit, self.response.chunk())
+                .await
+                .map_err(|_| Error::StreamStalled {
+                    provider: self.provider,
+                    timeout: limit,
+                })?,
+            None => self.response.chunk().await,
+        };
+        match read.map_err(|e| network_error(self.provider, e))? {
+            Some(bytes) => {
+                self.frames.push(&bytes);
+                Ok(true)
+            }
+            None => Ok(false),
         }
     }
 
@@ -519,6 +592,10 @@ mod tests {
             &server.uri(),
             "sk-demo",
             &CreateChatCompletionRequest::default(),
+            // Unbounded, which is the default and what every test but the
+            // stall one below wants: a mock answers instantly, so a limit
+            // here could only ever fire spuriously.
+            None,
         )
         .await
     }
@@ -636,6 +713,63 @@ mod tests {
         );
     }
 
+    /// A stream that stops without its sentinel is TRUNCATED, and says so.
+    ///
+    /// The bug this pins is a silent one: without the distinction, a connection
+    /// that dropped mid-answer ends in exactly the `None` a finished stream
+    /// ends in, so every surface above — the bindings, and the gateway's
+    /// `[DONE]` — reports a half-written reply as a complete one.
+    #[tokio::test]
+    async fn a_socket_that_closes_before_the_sentinel_is_an_error() {
+        let server = MockServer::start().await;
+        // The first chunk of SSE, and then nothing: no sentinel, no close
+        // frame, just a body that stops.
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(SSE.split(": keepalive").next().unwrap().to_string()),
+            )
+            .mount(&server)
+            .await;
+
+        let StreamOutcome::Ok(mut stream) = stream_from(&server).await.unwrap() else {
+            panic!("a 200 did not stream");
+        };
+        // Everything that DID arrive still reaches the caller first.
+        assert_eq!(stream.next().await.unwrap().unwrap().id, "chatcmpl-1");
+        assert!(
+            matches!(
+                stream.next().await,
+                Some(Err(Error::StreamTruncated { provider: "demo" }))
+            ),
+            "a stream that stopped early must not end like one that finished"
+        );
+        assert!(stream.next().await.is_none(), "the error is terminal");
+    }
+
+    /// ...but a body whose last line is the sentinel, missing only the blank
+    /// line that would dispatch it, FINISHED — the socket closing is what
+    /// dispatches it, so the flush has to be read before truncation is
+    /// declared. A body stopping mid-line is a different thing and stays
+    /// truncated: half a line is what a dead connection looks like.
+    #[tokio::test]
+    async fn a_sentinel_without_its_trailing_blank_line_still_ends_cleanly() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(SSE.strip_suffix('\n').unwrap().to_string()),
+            )
+            .mount(&server)
+            .await;
+
+        let StreamOutcome::Ok(mut stream) = stream_from(&server).await.unwrap() else {
+            panic!("a 200 did not stream");
+        };
+        assert_eq!(stream.next().await.unwrap().unwrap().id, "chatcmpl-1");
+        assert!(stream.next().await.is_none(), "the sentinel did arrive");
+    }
+
     /// An event queued behind the sentinel is not the caller's: `[DONE]` ends
     /// the stream where it sits, and nothing after it is read.
     #[tokio::test]
@@ -653,6 +787,76 @@ mod tests {
         };
         assert!(stream.next().await.is_none());
         assert!(stream.next().await.is_none());
+    }
+
+    /// A stream that goes QUIET — no bytes, and no close either — is ended by
+    /// `read_timeout` and nothing else.
+    ///
+    /// This is the failure the client's total deadline answers only by
+    /// outliving: the connection is up, the provider is simply not talking.
+    /// It needs a raw socket because a mock server cannot produce it —
+    /// wiremock's `set_delay` holds back the whole response, which stalls the
+    /// request before its headers and never reaches the read this bounds.
+    ///
+    /// The event sent first carries `"choices":[]`, which is a real chunk
+    /// OpenAI sends (the usage chunk) and not an ending — so this also pins
+    /// that emptiness is never what ends a stream.
+    #[tokio::test]
+    async fn a_stream_that_goes_quiet_is_ended_at_the_read_timeout() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const LIMIT: Duration = Duration::from_millis(100);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = [0u8; 2048];
+            assert!(socket.read(&mut head).await.unwrap() > 0, "no request");
+            let event = concat!(
+                "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",",
+                "\"created\":1700000000,\"model\":\"demo\",\"choices\":[]}\n\n"
+            );
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                         transfer-encoding: chunked\r\n\r\n{:x}\r\n{event}\r\n",
+                        event.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            // ...and then nothing at all, with the socket still open.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let StreamOutcome::Ok(mut stream) = post_stream(
+            &reqwest::Client::new(),
+            "demo",
+            &format!("http://{addr}"),
+            "sk-demo",
+            &CreateChatCompletionRequest::default(),
+            Some(LIMIT),
+        )
+        .await
+        .unwrap() else {
+            panic!("a 200 did not stream");
+        };
+
+        assert_eq!(stream.next().await.unwrap().unwrap().id, "chatcmpl-1");
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                Error::StreamStalled {
+                    provider: "demo",
+                    timeout,
+                } if *timeout == LIMIT
+            ),
+            "a quiet socket is a stall, not a truncation or a network error: {error:?}"
+        );
+        assert!(stream.next().await.is_none(), "the error is terminal");
     }
 
     /// A trailing slash on the base URL must not double up in the path.

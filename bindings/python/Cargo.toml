@@ -15,6 +15,10 @@ crate-type = ["cdylib", "rlib"]
 warpllm.workspace = true
 pyo3 = { version = "0.29", features = ["abi3-py310"] }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
+# `sync` for the Mutex guarding a stream handle. Named explicitly rather than
+# leaned on transitively: it is absent from the workspace feature set, so a
+# dependency dropping it would break this crate and nothing else.
+tokio = { workspace = true, features = ["sync"] }
 
 [features]
 # Only maturin enables this (see pyproject.toml); enabling it unconditionally

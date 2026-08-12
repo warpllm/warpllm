@@ -4,10 +4,12 @@ from ._generated import (
     ChatCompletionRequestMessage,
     CreateChatCompletionRequest,
     CreateChatCompletionResponse,
+    CreateChatCompletionStreamResponse,
 )
 
 __all__ = [
     "ChatCompletionRequestMessage",
     "CreateChatCompletionRequest",
     "CreateChatCompletionResponse",
+    "CreateChatCompletionStreamResponse",
 ]

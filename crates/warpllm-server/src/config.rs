@@ -19,6 +19,11 @@ pub struct ServerConfig {
     /// Upstream request timeout in seconds
     #[arg(long, default_value_t = 600)]
     pub timeout_secs: u64,
+    /// Seconds a stream may go without a byte before it is abandoned
+    /// (default: unbounded). Must exceed the slowest time-to-first-token you
+    /// expect, since the wait before the first chunk is a gap like any other.
+    #[arg(long)]
+    pub stream_read_timeout_secs: Option<u64>,
 }
 
 /// Outcome of CLI parsing: run with a config, or print `text` and exit 0
@@ -49,6 +54,7 @@ impl ServerConfig {
         ClientConfig {
             base_url: None,
             timeout_secs: Some(self.timeout_secs),
+            stream_read_timeout_secs: self.stream_read_timeout_secs,
         }
     }
 }
@@ -75,6 +81,19 @@ mod tests {
         assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.port, 8080);
         assert_eq!(config.timeout_secs, 600);
+        // Unbounded by default: no value is right for every deployment, and
+        // one set too tight cuts off a model that pauses to think.
+        assert_eq!(config.stream_read_timeout_secs, None);
+        assert_eq!(config.client_config().stream_read_timeout_secs, None);
+    }
+
+    /// The flag has to reach the CLIENT config, not just parse — it is the
+    /// only way a gateway operator can bound a wedged upstream at all.
+    #[test]
+    fn the_stream_read_timeout_reaches_the_client_config() {
+        let config = config(&["--stream-read-timeout-secs", "45"]);
+        assert_eq!(config.stream_read_timeout_secs, Some(45));
+        assert_eq!(config.client_config().stream_read_timeout_secs, Some(45));
     }
 
     #[test]
@@ -121,7 +140,14 @@ mod tests {
         let Ok(Cli::Print(text)) = parse(&["--help"]) else {
             panic!("expected Cli::Print");
         };
-        for expected in ["--host", "--port", "--timeout-secs", "8080", "600"] {
+        for expected in [
+            "--host",
+            "--port",
+            "--timeout-secs",
+            "--stream-read-timeout-secs",
+            "8080",
+            "600",
+        ] {
             assert!(text.contains(expected), "help missing {expected}: {text}");
         }
     }

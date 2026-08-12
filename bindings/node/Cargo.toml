@@ -13,6 +13,10 @@ crate-type = ["cdylib"]
 warpllm.workspace = true
 napi = { version = "3", default-features = false, features = ["napi8", "async"] }
 napi-derive = "3"
+# `sync` for the Mutex guarding a stream handle. Named explicitly rather than
+# leaned on transitively: it is absent from the workspace feature set, so a
+# dependency dropping it would break this crate and nothing else.
+tokio = { workspace = true, features = ["sync"] }
 
 [build-dependencies]
 napi-build = "2"

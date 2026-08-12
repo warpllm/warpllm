@@ -237,10 +237,98 @@ test('bare model name is rejected', async () => {
   expect((await failure(request('gpt-5.6'))).message).toContain('no registered model spec')
 })
 
-test('stream: true reports not implemented', async () => {
-  const err = await failure(request('openai/gpt-5.6', { stream: true }))
+// The chunks a provider sends for "Hello there!", mirroring
+// fixtures/transcript/openai-text.sse. Written out rather than read from the
+// shared corpus because these assert the WRAPPER, not the shapes — the corpus
+// is what stream-consumer.spec.ts checks.
+const ENVELOPE =
+  '"id":"chatcmpl-1","object":"chat.completion.chunk",' +
+  '"created":1700000000,"model":"gpt-5.6"'
 
-  expect(err).toBeInstanceOf(InternalServerError)
-  expect(err.code).toBe('not_implemented')
-  expect(server.requests).toHaveLength(0)
+const OPENAI_STREAM =
+  `data: {${ENVELOPE},"choices":[{"index":0,"delta":` +
+  '{"role":"assistant","content":"Hello"},"logprobs":null,' +
+  '"finish_reason":null}],"usage":null,"obfuscation":"KtQ3nZ8w"}\n\n' +
+  ': keepalive\n\n' +
+  `data: {${ENVELOPE},"choices":[{"index":0,"delta":` +
+  '{"content":" there!"},"logprobs":null,"finish_reason":"stop"}]}\n\n' +
+  'data: [DONE]\n\n'
+
+test('a stream is iterated with for await', async () => {
+  server.respondWithStream(OPENAI_STREAM)
+
+  // `stream: true` inline, so the overload resolves to the streaming
+  // signature; `request()` widens its extras to `unknown` and would not.
+  const stream = await client.chatCompletions({
+    model: 'openai/gpt-5.6',
+    messages: MESSAGES,
+    stream: true,
+  })
+
+  let text = ''
+  const chunks = []
+  for await (const chunk of stream) {
+    chunks.push(chunk)
+    // No cast and no non-null assertion: the generated types have to be
+    // pleasant to read, not merely correct.
+    text += chunk.choices[0]?.delta.content ?? ''
+  }
+
+  expect(text).toBe('Hello there!')
+  // The sentinel is the stream ending, never a chunk.
+  expect(chunks).toHaveLength(2)
+  // Every chunk echoes the caller's prefixed string, not the upstream name.
+  expect(chunks.every((c) => c.model === 'openai/gpt-5.6')).toBe(true)
+  expect(chunks[1]?.choices[0]?.finish_reason).toBe('stop')
+  // The request actually asked the provider to stream.
+  expect((server.requests[0]?.body as { stream?: unknown }).stream).toBe(true)
+})
+
+// The Rust config sets `deny_unknown_fields`, so a key misspelled on the way
+// across fails at CONSTRUCTION rather than being quietly ignored — which makes
+// this a real check that the option arrives, not just that it is accepted here.
+test('streamReadTimeout reaches the native config', async () => {
+  server.respondWithStream(OPENAI_STREAM)
+  const bounded = new WarpLLM({ baseUrl: server.url, timeout: 5, streamReadTimeout: 30 })
+
+  const chunks = []
+  for await (const chunk of await bounded.chatCompletions({
+    model: 'openai/gpt-5.6',
+    messages: MESSAGES,
+    stream: true,
+  })) {
+    chunks.push(chunk)
+  }
+
+  expect(chunks).toHaveLength(2)
+})
+
+test('a refusal before the stream opens raises the typed error', async () => {
+  server.respondWith(429, {
+    error: { message: 'Rate limit reached', type: 'rate_limit_exceeded' },
+  })
+
+  await expect(
+    client.chatCompletions({
+      model: 'openai/gpt-5.6',
+      messages: MESSAGES,
+      stream: true,
+    }),
+  ).rejects.toBeInstanceOf(RateLimitError)
+})
+
+test('an undecodable event ends the stream as a typed error', async () => {
+  server.respondWithStream('data: not json\n\n')
+
+  const stream = await client.chatCompletions({
+    model: 'openai/gpt-5.6',
+    messages: MESSAGES,
+    stream: true,
+  })
+
+  await expect(async () => {
+    for await (const _chunk of stream) {
+      // Reaching here at all would mean a malformed event became a chunk.
+    }
+  }).rejects.toBeInstanceOf(APIError)
 })

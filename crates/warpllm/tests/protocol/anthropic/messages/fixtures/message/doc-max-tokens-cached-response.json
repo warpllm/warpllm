@@ -1,0 +1,27 @@
+{
+  "id": "msg_01RtGqLpZxYw3nKvBc7Hd2Ms",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "The three principal causes of the decline were, first,"
+    }
+  ],
+  "model": "claude-sonnet-5",
+  "stop_reason": "max_tokens",
+  "stop_sequence": null,
+  "stop_details": null,
+  "container": null,
+  "usage": {
+    "input_tokens": 21,
+    "output_tokens": 16,
+    "cache_creation_input_tokens": 1024,
+    "cache_read_input_tokens": 8192,
+    "cache_creation": {
+      "ephemeral_5m_input_tokens": 1024,
+      "ephemeral_1h_input_tokens": 0
+    },
+    "service_tier": "standard"
+  }
+}

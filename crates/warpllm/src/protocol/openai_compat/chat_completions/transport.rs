@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::http::{network_error, read_response};
+use crate::http::{SseFrames, network_error, read_response};
 use crate::protocol::openai_compat::chat_completions::types::{
     CreateChatCompletionRequest, CreateChatCompletionResponse, CreateChatCompletionStreamResponse,
 };
@@ -45,6 +45,11 @@ pub(crate) enum Outcome {
     },
 }
 
+/// Sends a request and reads the whole reply.
+///
+/// REQUIRES a body that does not ask for a stream, and says so rather than
+/// quietly making it true — see [`post_stream`] for why the check is here at
+/// all, and why it refuses rather than corrects.
 pub(crate) async fn post(
     http: &reqwest::Client,
     provider: &'static str,
@@ -52,6 +57,11 @@ pub(crate) async fn post(
     api_key: &str,
     body: &CreateChatCompletionRequest,
 ) -> Result<Outcome> {
+    if body.stream == Some(true) {
+        return Err(Error::InvalidInput(
+            "stream: true asks for chunks; a whole reply cannot carry them".into(),
+        ));
+    }
     let response = http
         .post(format!(
             "{}/chat/completions",
@@ -101,8 +111,29 @@ pub(crate) enum StreamOutcome {
     },
 }
 
-/// Sends a `stream: true` request and hands back the events, undecoded until
+/// Sends a `stream: true` request and hands back the chunks, undecoded until
 /// asked for.
+///
+/// REQUIRES a body that already asks for a stream, and REFUSES one that does
+/// not rather than setting the flag on its behalf.
+///
+/// The check exists because getting it wrong fails silently: a body saying
+/// `stream: false` would come back as an ordinary JSON completion, which
+/// [`ChunkStream`] then reads as SSE — no `data:` line ever dispatches, the
+/// socket closes, and the caller is told the reply was TRUNCATED. A complete
+/// answer reported as a broken connection, with nothing pointing at the flag.
+///
+/// It refuses rather than corrects because a body that disagrees with the
+/// function called for it is not a flag to fix — it is a caller that took the
+/// wrong branch, and whose own gateway form still says non-streaming. Setting
+/// the flag here would send a request its caller does not think it sent, which
+/// is the same silent rewrite `ensure_renderable` exists to prevent one layer
+/// up. Every caller already decides this before arriving:
+/// [`Client::chat_completions`](crate::Client::chat_completions) and
+/// `JsonChatClient::chat_completions` refuse `stream: true` outright,
+/// [`chat_completions_stream`](crate::Client::chat_completions_stream) sets it
+/// before ingest, and `render_request` carries the gateway form's answer onto
+/// the wire. This is the assertion that they did.
 ///
 /// A non-2xx body is read to the end here, exactly as [`post`] does: an error
 /// reply is small, complete, and worth nothing streamed.
@@ -121,6 +152,11 @@ pub(crate) async fn post_stream(
     body: &CreateChatCompletionRequest,
     read_timeout: Option<Duration>,
 ) -> Result<StreamOutcome> {
+    if body.stream != Some(true) {
+        return Err(Error::InvalidInput(
+            "a streamed request must carry stream: true".into(),
+        ));
+    }
     let response = http
         .post(format!(
             "{}/chat/completions",
@@ -145,105 +181,16 @@ pub(crate) async fn post_stream(
     Ok(StreamOutcome::Ok(ChunkStream {
         response,
         provider,
-        frames: Frames::default(),
+        frames: SseFrames::new(Some(DONE)),
         ended: false,
         truncated: false,
         read_timeout,
     }))
 }
 
-/// Server-sent event framing, with no socket in it: bytes in, payloads out.
-///
-/// Separate from [`ChunkStream`] because this is the fiddly half and the half
-/// worth testing exhaustively — a read boundary falls wherever TCP puts it,
-/// which is routinely mid-line and can be mid-character. Keeping it free of
-/// I/O means every edge below is a plain function call in a test.
-///
-/// It reads the subset OpenAI-compatible providers actually send:
-///
-/// - `data:` lines accumulate into the current event, joined by newlines when
-///   a provider splits one across several (the specification allows it; none
-///   of them do it today);
-/// - a blank line dispatches the accumulated event;
-/// - `:` comment lines — the usual keepalive — and every other SSE field
-///   (`event:`, `id:`, `retry:`) are ignored;
-/// - the [`DONE`] payload ends the stream rather than becoming an event.
-#[derive(Debug, Default)]
-struct Frames {
-    /// Read but not yet consumed as complete lines.
-    buffer: Vec<u8>,
-    /// The `data:` payload of the event being accumulated.
-    event: String,
-    done: bool,
-}
-
-impl Frames {
-    fn push(&mut self, bytes: &[u8]) {
-        self.buffer.extend_from_slice(bytes);
-    }
-
-    /// The next dispatched payload, or `None` when the bytes so far do not
-    /// contain a complete event — which is the signal to go read more.
-    ///
-    /// Lines are decoded as UTF-8 only once complete, so a multi-byte
-    /// character split across two reads is rejoined rather than mangled.
-    // `std::result::Result` spelled out: the crate's own `Result` alias fixes
-    // the error type, and this one is a UTF-8 failure the caller labels.
-    fn next_payload(&mut self) -> std::result::Result<Option<String>, std::str::Utf8Error> {
-        while !self.done {
-            let Some(line) = self.take_line() else {
-                return Ok(None);
-            };
-            let line = std::str::from_utf8(&line)?;
-            let line = line.strip_suffix('\r').unwrap_or(line);
-            if line.is_empty() {
-                if let Some(payload) = self.dispatch() {
-                    return Ok(Some(payload));
-                }
-            } else if let Some(payload) = line.strip_prefix("data:") {
-                if !self.event.is_empty() {
-                    self.event.push('\n');
-                }
-                // One optional leading space belongs to the framing.
-                self.event
-                    .push_str(payload.strip_prefix(' ').unwrap_or(payload));
-            }
-        }
-        Ok(None)
-    }
-
-    /// The event accumulated so far, for a socket that closed without sending
-    /// its final blank line — providers do end streams that way.
-    fn flush(&mut self) -> Option<String> {
-        self.dispatch()
-    }
-
-    /// The next complete line, `\n` removed, or `None` when the buffer holds
-    /// only a partial one.
-    fn take_line(&mut self) -> Option<Vec<u8>> {
-        let end = self.buffer.iter().position(|byte| *byte == b'\n')?;
-        let mut line: Vec<u8> = self.buffer.drain(..=end).collect();
-        line.pop();
-        Some(line)
-    }
-
-    fn dispatch(&mut self) -> Option<String> {
-        let payload = std::mem::take(&mut self.event);
-        let payload = payload.trim();
-        if payload.is_empty() {
-            return None;
-        }
-        if payload == DONE {
-            self.done = true;
-            return None;
-        }
-        Some(payload.to_string())
-    }
-}
-
 /// The chunks of one streamed reply, read off the socket as they arrive.
 ///
-/// [`Frames`] does the framing; this adds the socket and the decode. An
+/// [`SseFrames`] does the framing; this adds the socket and the decode. An
 /// inherent `async fn next` rather than a [`futures::Stream`] implementation:
 /// every caller here is a loop, and a loop needs no combinators, no pinning,
 /// and no dependency.
@@ -251,9 +198,9 @@ impl Frames {
 pub(crate) struct ChunkStream {
     response: reqwest::Response,
     provider: &'static str,
-    frames: Frames,
+    frames: SseFrames,
     /// The socket is spent — closed, or failed. Distinct from
-    /// [`Frames::done`], which means the sentinel arrived.
+    /// [`SseFrames::done`], which means the sentinel arrived.
     ended: bool,
     /// The socket closed with no sentinel, so the reply is incomplete and the
     /// caller is owed one error saying so.
@@ -462,119 +409,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Framing
-    // -----------------------------------------------------------------------
-
-    /// Every payload the framing yields from one push of bytes.
-    fn payloads(chunks: &[&str]) -> Vec<String> {
-        let mut frames = Frames::default();
-        let mut out = Vec::new();
-        for bytes in chunks {
-            frames.push(bytes.as_bytes());
-            while let Some(payload) = frames.next_payload().unwrap() {
-                out.push(payload);
-            }
-        }
-        out.extend(frames.flush());
-        out
-    }
-
-    /// The ordinary case, one whole body at a time.
-    #[test]
-    fn data_lines_dispatch_on_a_blank_line_and_done_ends_the_stream() {
-        assert_eq!(
-            payloads(&["data: {\"a\":1}\n\ndata: {\"a\":2}\n\ndata: [DONE]\n\n"]),
-            ["{\"a\":1}", "{\"a\":2}"],
-            "the sentinel is the stream ending, never an event"
-        );
-    }
-
-    /// The case no fixture can produce: a read boundary lands mid-line, and
-    /// mid-character. Neither may lose or mangle a byte.
-    #[test]
-    fn an_event_split_across_reads_is_rejoined() {
-        assert_eq!(payloads(&["data: {\"a\":", "1}\n\n"]), ["{\"a\":1}"]);
-        assert_eq!(payloads(&["data: {\"a\":1}", "\n", "\n"]), ["{\"a\":1}"]);
-        // "일" is three bytes; the split falls inside it.
-        let text = "data: {\"a\":\"일\"}\n\n".as_bytes();
-        let (head, tail) = text.split_at(14);
-        let mut frames = Frames::default();
-        frames.push(head);
-        assert_eq!(frames.next_payload().unwrap(), None, "a partial character");
-        frames.push(tail);
-        assert_eq!(
-            frames.next_payload().unwrap().as_deref(),
-            Some("{\"a\":\"일\"}")
-        );
-    }
-
-    /// Keepalive comments and the SSE fields warpllm does not read must not
-    /// become events, and must not disturb the one being accumulated.
-    #[test]
-    fn comments_and_other_fields_are_ignored() {
-        assert_eq!(
-            payloads(&[": ping\nevent: message\nid: 7\nretry: 100\ndata: {\"a\":1}\n\n"]),
-            ["{\"a\":1}"]
-        );
-        assert_eq!(payloads(&[": ping\n\n: ping\n\n"]), [] as [String; 0]);
-    }
-
-    /// CRLF and the optional leading space are framing, not payload.
-    #[test]
-    fn crlf_and_the_optional_space_are_stripped() {
-        assert_eq!(payloads(&["data: {\"a\":1}\r\n\r\n"]), ["{\"a\":1}"]);
-        assert_eq!(payloads(&["data:{\"a\":1}\n\n"]), ["{\"a\":1}"]);
-        // Only ONE space belongs to the framing; the rest is payload, and
-        // `trim` on dispatch is what keeps it decodable either way.
-        assert_eq!(payloads(&["data:  {\"a\":1}\n\n"]), ["{\"a\":1}"]);
-    }
-
-    /// The specification allows one event's data to span several lines; no
-    /// provider does it today, so this pins the behaviour rather than a bug.
-    #[test]
-    fn multi_line_data_joins_with_newlines() {
-        assert_eq!(payloads(&["data: {\"a\":\ndata: 1}\n\n"]), ["{\"a\":\n1}"]);
-    }
-
-    /// The sentinel leaves the framing in the one state a reader must not
-    /// mistake for "send me more bytes": `next_payload` says `Ok(None)` to
-    /// both, and only [`Frames::done`] tells them apart.
-    ///
-    /// That ambiguity is why [`ChunkStream::next`] rechecks `done` before
-    /// awaiting the socket. Without the recheck an upstream that holds the
-    /// response open after `[DONE]` blocks the caller forever — a hang, so the
-    /// symptom is untestable, but the state that causes it is exactly this.
-    #[test]
-    fn the_sentinel_leaves_no_payload_and_a_done_flag() {
-        let mut frames = Frames::default();
-        frames.push(b"data: [DONE]\n\n");
-        assert_eq!(frames.next_payload().unwrap(), None);
-        assert!(frames.done, "only this distinguishes ended from starved");
-
-        let mut starved = Frames::default();
-        starved.push(b"data: {\"a\":1}");
-        assert_eq!(starved.next_payload().unwrap(), None);
-        assert!(!starved.done);
-    }
-
-    /// A body that ends without its final blank line still has an event.
-    #[test]
-    fn a_truncated_final_event_is_flushed() {
-        assert_eq!(payloads(&["data: {\"a\":1}\n"]), ["{\"a\":1}"]);
-        assert_eq!(payloads(&["data: [DONE]\n"]), [] as [String; 0]);
-    }
-
-    /// Invalid UTF-8 is reported rather than replaced: a lossy decode would
-    /// hand the caller a chunk the provider never sent.
-    #[test]
-    fn invalid_utf8_in_a_line_is_an_error() {
-        let mut frames = Frames::default();
-        frames.push(b"data: \xff\xfe\n\n");
-        assert!(frames.next_payload().is_err());
-    }
-
-    // -----------------------------------------------------------------------
     // Streaming transport
+    //
+    // The SSE framing itself is shared, and tested where it lives, at
+    // `crate::http::SseFrames`. What is protocol-specific — and tested here —
+    // is what the framing's states MEAN to this reader: the sentinel, and the
+    // truncation it distinguishes.
     // -----------------------------------------------------------------------
 
     const SSE: &str = concat!(
@@ -585,13 +425,22 @@ mod tests {
         "data: [DONE]\n\n",
     );
 
+    /// The body every streamed call arrives with — `render_request` puts the
+    /// gateway form's answer here, and `post_stream` refuses anything else.
+    fn streamed() -> CreateChatCompletionRequest {
+        CreateChatCompletionRequest {
+            stream: Some(true),
+            ..Default::default()
+        }
+    }
+
     async fn stream_from(server: &MockServer) -> Result<StreamOutcome> {
         post_stream(
             &reqwest::Client::new(),
             "demo",
             &server.uri(),
             "sk-demo",
-            &CreateChatCompletionRequest::default(),
+            &streamed(),
             // Unbounded, which is the default and what every test but the
             // stall one below wants: a mock answers instantly, so a limit
             // here could only ever fire spuriously.
@@ -836,7 +685,7 @@ mod tests {
             "demo",
             &format!("http://{addr}"),
             "sk-demo",
-            &CreateChatCompletionRequest::default(),
+            &streamed(),
             Some(LIMIT),
         )
         .await
@@ -857,6 +706,71 @@ mod tests {
             "a quiet socket is a stall, not a truncation or a network error: {error:?}"
         );
         assert!(stream.next().await.is_none(), "the error is terminal");
+    }
+
+    /// A body that disagrees with the function called for it is REFUSED, not
+    /// corrected.
+    ///
+    /// `stream: false` here means a caller took the wrong branch, and its own
+    /// gateway form still says non-streaming. Setting the flag on its behalf
+    /// would send a request the caller does not think it sent; the failure it
+    /// was heading for otherwise is a complete reply misreported as a
+    /// truncation.
+    #[tokio::test]
+    async fn a_streamed_call_refuses_a_body_that_does_not_ask_for_a_stream() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(SSE))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        for body in [None, Some(false)] {
+            let refused = post_stream(
+                &reqwest::Client::new(),
+                "demo",
+                &server.uri(),
+                "sk-demo",
+                &CreateChatCompletionRequest {
+                    stream: body,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await;
+            assert!(
+                matches!(refused, Err(Error::InvalidInput(_))),
+                "{body:?} opened a stream: {refused:?}"
+            );
+        }
+    }
+
+    /// ...and the mirror: a whole reply cannot carry chunks, so asking for
+    /// them here is refused rather than silently unasked.
+    #[tokio::test]
+    async fn an_unstreamed_call_refuses_a_body_that_asks_for_a_stream() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(SSE))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let refused = post(
+            &reqwest::Client::new(),
+            "demo",
+            &server.uri(),
+            "sk-demo",
+            &CreateChatCompletionRequest {
+                stream: Some(true),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(Error::InvalidInput(_))),
+            "{refused:?}"
+        );
     }
 
     /// A trailing slash on the base URL must not double up in the path.

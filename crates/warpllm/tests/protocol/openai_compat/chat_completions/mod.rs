@@ -11,33 +11,10 @@
 use warpllm::CreateChatCompletionResponse;
 use warpllm::protocol::openai_compat::chat_completions::types::CreateChatCompletionStreamResponse;
 
+use crate::assert_fixtures_round_trip;
+
 mod losslessness;
 mod reassembly;
-
-fn assert_fixtures_round_trip<T>(dir: &str)
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-{
-    let mut checked = 0;
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
-        let raw = std::fs::read_to_string(&path).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let parsed: T = serde_json::from_value(value.clone())
-            .unwrap_or_else(|e| panic!("{} failed to deserialize: {e}", path.display()));
-        assert_eq!(
-            serde_json::to_value(&parsed).unwrap(),
-            value,
-            "lossy round trip for {}",
-            path.display()
-        );
-        checked += 1;
-    }
-    assert!(checked > 0, "no fixtures found in {dir}");
-}
 
 fn fixtures(shape: &str) -> String {
     format!(

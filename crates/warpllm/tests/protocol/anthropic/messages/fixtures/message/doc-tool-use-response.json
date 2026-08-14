@@ -1,0 +1,26 @@
+{
+  "id": "msg_01Aq9w938a90dw8q",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "Okay, let's check the weather for San Francisco, CA:"
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_01A09q90qw90lq917835lq9",
+      "name": "get_weather",
+      "input": {
+        "location": "San Francisco, CA"
+      }
+    }
+  ],
+  "model": "claude-opus-5",
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 472,
+    "output_tokens": 89
+  }
+}

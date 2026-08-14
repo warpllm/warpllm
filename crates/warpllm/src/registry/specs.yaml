@@ -195,6 +195,62 @@ providers:
         capabilities:
           max_input_tokens: 1048576
 
+
+   # <https://docs.mistral.ai/getting-started/models/> (checked 2026-08-13).
+  # <https://docs.mistral.ai/api/> — base URL and MISTRAL_API_KEY
+  #
+  # Context windows and limitations:
+  # <https://docs.mistral.ai/resources/known-limitations/> (checked 2026-08-13).
+  #
+  # No `max_output_tokens` on any entry: Mistral enforces a shared token
+  # budget where `prompt_tokens + max_tokens <= context_window`, and
+  # publishes no separate output ceiling. `max_tokens` is an open-ended
+  # request-time value bounded only by whatever remains of the window after
+  # the prompt — not a length the model is documented to reach on its own.
+  # <https://docs.mistral.ai/api/endpoint/chat>
+  #
+  # Deliberately absent, checked 2026-08-13:
+  # - Floating `-latest` aliases (e.g., mistral-large-latest, codestral-latest):
+  #   omitted per file policy (matching OpenAI) to prevent context limits from
+  #   going stale when underlying snapshots shift.
+  # - Embeddings, Moderation, and FIM endpoints: surfaces not yet supported by
+  #   warpllm.
+  mistral:
+    base_url: "https://api.mistral.ai/v1"
+    env_api_key: MISTRAL_API_KEY
+    models:
+      # <https://docs.mistral.ai/models/#codestral-2501> (checked 2026-08-13).
+      # Code generation model. 256,000 context window.
+      mistral/codestral-2501:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        capabilities:
+          max_input_tokens: 256000
+      # <https://docs.mistral.ai/models/#ministral-8b-2410> (checked 2026-08-13).
+      # Edge-optimized 8B model. 128,000 context window.
+      mistral/ministral-8b-2410:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        capabilities:
+          max_input_tokens: 128000
+      # <https://docs.mistral.ai/models/#mistral-large-2411> (checked 2026-08-13).
+      # Flagship reasoning model. 128,000 context window.
+      mistral/mistral-large-2411:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        capabilities:
+          max_input_tokens: 128000
+      # <https://docs.mistral.ai/models/#pixtral-large-2411> (checked 2026-08-13).
+      # Multimodal/vision model. 128,000 context window.
+      mistral/pixtral-large-2411:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        capabilities:
+          max_input_tokens: 128000
   # <https://developers.openai.com/api/docs/models/all> (checked 2026-08-11).
   # Every model below was confirmed on its own model page to mark
   # `v1/chat/completions` supported; each entry carries that page's link.

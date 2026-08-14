@@ -18,3 +18,6 @@ mod openrouter_config_env;
 
 #[path = "providers/openrouter/chat_completions/mod.rs"]
 mod openrouter_chat_completions;
+
+#[path = "providers/mistral/chat_completions/mod.rs"]
+mod mistral_chat_completions;

@@ -101,3 +101,9 @@ pub fn openai_completion_body() -> Value {
         "system_fingerprint": "fp_44709d6fcb"
     })
 }
+
+pub const MISTRAL_KEY: &str = "sk-test-mistral";
+
+pub fn with_mistral_key<F: Future<Output = ()>>(body: F) {
+    with_env_key("MISTRAL_API_KEY", MISTRAL_KEY, body);
+}

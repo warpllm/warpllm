@@ -63,11 +63,10 @@ async fn every_configured_provider_streams_chunks_warpllm_can_hold() {
 
         let mut request = CreateChatCompletionRequest {
             model: model_str.to_owned(),
-            messages: vec![ChatCompletionRequestMessage {
-                role: "user".into(),
-                content: "Reply with exactly: hello".into(),
-                unknown_fields: Default::default(),
-            }],
+            messages: vec![ChatCompletionRequestMessage::new(
+                "user",
+                "Reply with exactly: hello",
+            )],
             ..Default::default()
         };
         // Both go through the catch-all — the job it exists for, on a request

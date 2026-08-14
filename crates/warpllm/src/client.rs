@@ -476,11 +476,7 @@ mod tests {
         let client = client(ClientConfig::default());
         let request = CreateChatCompletionRequest {
             model: "demo/chat".into(),
-            messages: vec![ChatCompletionRequestMessage {
-                role: "user".into(),
-                content: "hi".into(),
-                ..Default::default()
-            }],
+            messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
             ..Default::default()
         };
         // What `chat_completions` does, minus the routing it already proved:
@@ -535,11 +531,7 @@ mod tests {
         });
         let request = CreateChatCompletionRequest {
             model: "openai/gpt-5.6".into(),
-            messages: vec![ChatCompletionRequestMessage {
-                role: "user".into(),
-                content: "hi".into(),
-                ..Default::default()
-            }],
+            messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
             ..Default::default()
         };
         let (provider, model) = pair_for("openai/gpt-5.6");

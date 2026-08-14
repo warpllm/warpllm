@@ -22,22 +22,43 @@ pub use error::{Error, Origin, Result};
 pub use gateway::types::ProviderError;
 pub use json_client::{JsonChatStream, JsonClient};
 /// Everything a caller must NAME to make a call and hold its result: the
-/// request, the message it is built from, and the response handed back by
+/// request, everything it is built from, and the response handed back by
 /// [`Client::chat_completions`].
 ///
 /// That is the whole rule, and it is why the response's insides are absent.
 /// Reading `completion.choices[0].message.content` names none of them — field
-/// access needs no import — so `Choice`, `CompletionUsage` and the tool-call
-/// forms stay at `protocol::openai_compat::chat_completions::types`, where the
-/// path states what they are: shapes of the OpenAI protocol, which warpllm
-/// speaks, rather than warpllm's own vocabulary. Requests are the asymmetric
-/// half — you cannot build one without spelling its message type.
+/// access needs no import — so `Choice` and `CompletionUsage` stay at
+/// `protocol::openai_compat::chat_completions::types`, where the path states
+/// what they are: shapes of the OpenAI protocol, which warpllm speaks, rather
+/// than warpllm's own vocabulary. Requests are the asymmetric half — you
+/// cannot build one without spelling every type it reaches.
 ///
-/// A glob here claimed all of it as warpllm's, and widened the public API
-/// every time that module gained a type.
+/// Which is why the list is long. Setting `tools`, `tool_choice`,
+/// `response_format` or a multimodal `content` means naming the type of each,
+/// and the type each of those reaches in turn; a caller who has to write
+/// `protocol::openai_compat::chat_completions::types::ImageUrl` to attach an
+/// image is being sent through a path that reads like an internal one for a
+/// thing the request cannot be built without.
+///
+/// The tool-call forms are here for the same reason and only that reason. They
+/// are still not needed to READ a reply — the rule above holds — but an
+/// assistant turn replayed back into a conversation has to be spelled out, and
+/// that is a request.
+///
+/// A glob would have claimed all of it as warpllm's, and widened the public
+/// API every time that module gained a type.
 pub use protocol::openai_compat::chat_completions::types::{
-    ChatCompletionRequestMessage, CreateChatCompletionRequest, CreateChatCompletionResponse,
-    CreateChatCompletionStreamResponse,
+    ChatCompletionMessageCustomToolCall, ChatCompletionMessageToolCall,
+    ChatCompletionMessageToolCallUnion, ChatCompletionNamedToolChoice,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContent,
+    ChatCompletionRequestMessageContentPart, ChatCompletionRequestMessageContentPartAudio,
+    ChatCompletionRequestMessageContentPartFile, ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessageContentPartRefusal, ChatCompletionRequestMessageContentPartText,
+    ChatCompletionResponseFormat, ChatCompletionStop, ChatCompletionStreamOptions,
+    ChatCompletionTool, ChatCompletionToolChoiceOption, CreateChatCompletionRequest,
+    CreateChatCompletionResponse, CreateChatCompletionStreamResponse, Custom, FileContent,
+    Function, FunctionObject, ImageUrl, InputAudio, JsonSchemaDefinition, ResponseFormatJsonSchema,
+    ResponseFormatSimple, ToolChoiceFunction,
 };
 /// A failure rendered the way an OpenAI-compatible surface reports it, and
 /// the only error shape warpllm shows anyone who is not writing Rust.

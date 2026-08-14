@@ -26,16 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .chat_completions(CreateChatCompletionRequest {
             model: "openai/gpt-5-nano".to_string(),
             messages: vec![
-                ChatCompletionRequestMessage {
-                    role: "system".to_string(),
-                    content: "You are a helpful assistant.".to_string(),
-                    ..Default::default()
-                },
-                ChatCompletionRequestMessage {
-                    role: "user".to_string(),
-                    content: "Hello!".to_string(),
-                    ..Default::default()
-                },
+                ChatCompletionRequestMessage::new("system", "You are a helpful assistant."),
+                ChatCompletionRequestMessage::new("user", "Hello!"),
             ],
             ..Default::default()
         })

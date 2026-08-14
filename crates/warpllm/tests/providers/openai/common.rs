@@ -61,11 +61,7 @@ pub fn with_openrouter_key<F: Future<Output = ()>>(body: F) {
 pub fn request(model: &str) -> CreateChatCompletionRequest {
     CreateChatCompletionRequest {
         model: model.into(),
-        messages: vec![ChatCompletionRequestMessage {
-            role: "user".into(),
-            content: "hi".into(),
-            ..Default::default()
-        }],
+        messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
         ..Default::default()
     }
 }

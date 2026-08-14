@@ -48,11 +48,63 @@ export type ChatCompletionModerationResults = { model: string, results: Array<Mo
  */
 type: string, };
 
+export type ChatCompletionNamedToolChoice = {
+/**
+ * Conventionally `"function"`; compatible providers may differ.
+ */
+type: string, function: ToolChoiceFunction, };
+
 export type ChatCompletionRequestMessage = {
 /**
  * Provider-defined role; common values include `"system"` and `"user"`.
  */
-role: string, content: string, };
+role: string, content?: ChatCompletionRequestMessageContent | null,
+/**
+ * Set on the assistant turn that called tools; each entry is answered by
+ * a later message with `role: "tool"` carrying the matching
+ * `tool_call_id`.
+ */
+tool_calls?: Array<ChatCompletionMessageToolCallUnion> | null,
+/**
+ * Which call this message answers. Set on `role: "tool"` messages.
+ */
+tool_call_id?: string | null, };
+
+export type ChatCompletionRequestMessageContent = string | Array<ChatCompletionRequestMessageContentPart>;
+
+export type ChatCompletionRequestMessageContentPart = ChatCompletionRequestMessageContentPartText | ChatCompletionRequestMessageContentPartImage | ChatCompletionRequestMessageContentPartAudio | ChatCompletionRequestMessageContentPartFile | ChatCompletionRequestMessageContentPartRefusal | JsonValue;
+
+export type ChatCompletionRequestMessageContentPartAudio = {
+/**
+ * Conventionally `"input_audio"`; compatible providers may differ.
+ */
+type: string, input_audio: InputAudio, };
+
+export type ChatCompletionRequestMessageContentPartFile = {
+/**
+ * Conventionally `"file"`; compatible providers may differ.
+ */
+type: string, file: FileContent, };
+
+export type ChatCompletionRequestMessageContentPartImage = {
+/**
+ * Conventionally `"image_url"`; compatible providers may differ.
+ */
+type: string, image_url: ImageUrl, };
+
+export type ChatCompletionRequestMessageContentPartRefusal = {
+/**
+ * Conventionally `"refusal"`; compatible providers may differ.
+ */
+type: string, refusal: string, };
+
+export type ChatCompletionRequestMessageContentPartText = {
+/**
+ * Conventionally `"text"`; compatible providers may differ.
+ */
+type: string, text: string, };
+
+export type ChatCompletionResponseFormat = ResponseFormatJsonSchema | ResponseFormatSimple;
 
 export type ChatCompletionResponseMessage = { content: string | null, refusal: string | null,
 /**
@@ -63,6 +115,14 @@ role: string, annotations?: Array<Annotation>, audio?: ChatCompletionAudio | nul
  * Deprecated upstream in favor of `tool_calls`.
  */
 function_call?: FunctionCall | null, tool_calls?: Array<ChatCompletionMessageToolCallUnion>, };
+
+export type ChatCompletionStop = string | Array<string>;
+
+export type ChatCompletionStreamOptions = {
+/**
+ * Ask for a final chunk carrying the whole request's token totals.
+ */
+include_usage?: boolean | null, };
 
 export type ChatCompletionStreamResponseDelta = { content?: string | null,
 /**
@@ -75,6 +135,14 @@ function_call?: DeltaFunctionCall, refusal?: string | null,
 role?: string, tool_calls?: Array<ChatCompletionMessageToolCallChunk>, };
 
 export type ChatCompletionTokenLogprob = { token: string, bytes: Array<number> | null, logprob: number, top_logprobs: Array<TopLogprob>, };
+
+export type ChatCompletionTool = {
+/**
+ * Conventionally `"function"`; compatible providers may differ.
+ */
+type: string, function?: FunctionObject | null, };
+
+export type ChatCompletionToolChoiceOption = ChatCompletionNamedToolChoice | string | JsonValue;
 
 export type Choice = {
 /**
@@ -92,7 +160,16 @@ export type CreateChatCompletionRequest = {
 /**
  * Model string in `provider/model` form, e.g. `"openai/gpt-5.6"`.
  */
-model: string, messages: Array<ChatCompletionRequestMessage>, temperature?: number | null, max_tokens?: number | null, top_p?: number | null, stop?: Array<string> | null, stream?: boolean | null, };
+model: string, messages: Array<ChatCompletionRequestMessage>, temperature?: number | null, max_tokens?: number | null, top_p?: number | null, stop?: ChatCompletionStop | null, stream?: boolean | null, stream_options?: ChatCompletionStreamOptions | null,
+/**
+ * Tools the model may call.
+ */
+tools?: Array<ChatCompletionTool> | null, tool_choice?: ChatCompletionToolChoiceOption | null, response_format?: ChatCompletionResponseFormat | null,
+/**
+ * How much reasoning to spend; provider-defined, commonly `"low"`,
+ * `"medium"`, `"high"`.
+ */
+reasoning_effort?: string | null, };
 
 export type CreateChatCompletionResponse = { id: string, choices: Array<Choice>, created: number,
 /**
@@ -176,6 +253,16 @@ code: string | null, };
 
 export type ErrorClass = "api_connection" | "api_status" | "bad_request" | "authentication" | "permission_denied" | "not_found" | "conflict" | "unprocessable_entity" | "rate_limit" | "internal_server";
 
+export type FileContent = {
+/**
+ * Base64-encoded file bytes, for a file sent inline.
+ */
+file_data?: string | null,
+/**
+ * A file already uploaded to the provider.
+ */
+file_id?: string | null, filename?: string | null, };
+
 export type Function = {
 /**
  * JSON-encoded arguments; model-generated, so may be invalid JSON.
@@ -187,6 +274,44 @@ export type FunctionCall = {
  * JSON-encoded arguments; model-generated, so may be invalid JSON.
  */
 arguments: string, name: string, };
+
+export type FunctionObject = { name: string, description?: string | null,
+/**
+ * JSON Schema for the arguments, passed through verbatim.
+ */
+parameters?: JsonValue | null,
+/**
+ * Whether the provider must adhere exactly to the schema.
+ */
+strict?: boolean | null, };
+
+export type ImageUrl = {
+/**
+ * An `https:` URL, or a `data:` URL carrying base64 image bytes.
+ */
+url: string,
+/**
+ * Provider-defined fidelity hint; commonly `"auto"`, `"low"`, `"high"`.
+ */
+detail?: string | null, };
+
+export type InputAudio = {
+/**
+ * Base64-encoded audio bytes.
+ */
+data: string,
+/**
+ * Provider-defined container; commonly `"wav"`, `"mp3"`.
+ */
+format: string, };
+
+export type JsonSchemaDefinition = { name: string, description?: string | null,
+/**
+ * JSON Schema for the reply, passed through verbatim.
+ */
+schema?: JsonValue | null, strict?: boolean | null, };
+
+export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
 
 export type ModerationOutcome = ChatCompletionModerationResults | ChatCompletionModerationError;
 
@@ -222,6 +347,19 @@ export type PromptTokensDetails = { audio_tokens?: number,
  */
 cache_write_tokens?: number, cached_tokens?: number, };
 
+export type ResponseFormatJsonSchema = {
+/**
+ * Conventionally `"json_schema"`; compatible providers may differ.
+ */
+type: string, json_schema: JsonSchemaDefinition, };
+
+export type ResponseFormatSimple = {
+/**
+ * Conventionally `"text"` or `"json_object"`; compatible providers may
+ * differ.
+ */
+type: string, };
+
 export type StreamChoice = { delta: ChatCompletionStreamResponseDelta,
 /**
  * Provider-defined reason that generation stopped, and `null` until it
@@ -241,5 +379,7 @@ export type ToolCallChunkFunction = {
  * be invalid JSON.
  */
 arguments?: string, name?: string, };
+
+export type ToolChoiceFunction = { name: string, };
 
 export type TopLogprob = { token: string, bytes: Array<number> | null, logprob: number, };

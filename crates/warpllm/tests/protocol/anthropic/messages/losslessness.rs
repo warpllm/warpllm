@@ -1,29 +1,58 @@
-//! The fixtures next door prove the events we thought to write down survive.
-//! This proves the ones we didn't: generated events, every optional field in
-//! every state the wire allows, unknown fields at every level, asserting that
-//! deserialize → reserialize is the identity.
+//! The fixtures next door prove the bodies we thought to write down survive.
+//! This proves the ones we didn't: generated events and requests, every
+//! optional field in every state the wire allows, unknown fields at every
+//! level, asserting that deserialize → reserialize is the identity.
 //!
 //! The contract it states, exactly:
 //!
-//! > For any event whose fields are within the nullability Anthropic
+//! > For any body whose fields are within the nullability Anthropic
 //! > documents, warpllm re-emits what it received, byte for byte as JSON
 //! > values.
 //!
-//! One consequence of "within the nullability Anthropic documents", deliberate
-//! and generated accordingly: a field the spec marks optional but NOT nullable
-//! — a thinking block's `signature`, a tool result's `is_error` — is absent or
-//! a value here, never null. A provider that sends `null` for one anyway is
+//! # What this catches that the fixtures cannot
+//!
+//! A fixture checks the exact body someone thought to write down, so it can
+//! only find a bug in a field that body happens to carry. This generates
+//! unknown fields at EVERY nesting level, which is what proves each struct's
+//! `unknown_fields` catch-all is present and wired — the load-bearing claim of
+//! the whole module. Demonstrated rather than assumed: dropping the catch-all
+//! from `UrlSource` passes every fixture and fails this file.
+//!
+//! It also sweeps the optionality combinations. Six three-state fields alone
+//! are hundreds of bodies; a fixture pins one, and pinning the RIGHT one means
+//! having already guessed where the bug is.
+//!
+//! # Both directions
+//!
+//! Events came first, and they cover [`Message`], `ContentBlock`, `Source` and
+//! `Usage` transitively. Requests are swept separately because nothing else
+//! checks them at all: warpllm BUILDS those bodies and no caller or oracle
+//! ever sees one, so a field silently dropped on the way to Anthropic would
+//! reach no other test.
+//!
+//! # What is deliberately not generated
+//!
+//! A field the spec marks optional but NOT nullable — a thinking block's
+//! `signature`, a tool result's `is_error`, a tool's `strict` — is absent or a
+//! value here, never null. A provider that sends `null` for one anyway is
 //! understood, and normalized to absent. That is a permissive read of
 //! out-of-spec input, not a round trip of it, and the test below it says so.
 //!
-//! Every event also asserts it did NOT land in the `Unknown` arm. Without
-//! that, a generator bug that produced an unparseable event would still round
-//! trip — verbatim, through the catch-all — and the property would pass while
-//! testing nothing.
+//! # Passing for the wrong reason
+//!
+//! Two guards, because a generator bug would otherwise make every property
+//! vacuous. Every event asserts it did NOT land in the `Unknown` arm, and
+//! every custom tool asserts it did NOT land in [`Tool::Other`] — both are
+//! catch-alls that would round trip a malformed body verbatim. The tagged
+//! unions need no such guard since they now REFUSE a body that does not
+//! parse; `Tool` is untagged and has no discriminator to refuse on, which is
+//! exactly why it gets a property of its own.
 
 use proptest::prelude::*;
 use serde_json::{Map, Value, json};
-use warpllm::protocol::anthropic::messages::types::MessageStreamEvent;
+use warpllm::protocol::anthropic::messages::types::{
+    CreateMessageRequest, MessageStreamEvent, Tool,
+};
 
 /// Optional and nullable: absent, `null`, or a value — three states the wire
 /// distinguishes and these types have to as well.
@@ -160,7 +189,7 @@ fn content_block() -> BoxedStrategy<Value> {
         )),
         (
             text(),
-            optional(text()),
+            optional(result_content()),
             optional(any::<bool>().prop_map(Value::from).boxed()),
             unknown_fields(),
         )
@@ -197,6 +226,38 @@ fn content_block() -> BoxedStrategy<Value> {
             ],
             unknown,
         )),
+    ]
+    .boxed()
+}
+
+/// A tool's output: text, or blocks.
+///
+/// Bounded to text blocks rather than the full [`content_block`] recursion a
+/// `tool_result` nominally allows. A tool result nested inside a tool result
+/// is not a shape Anthropic produces, and generating one would make this
+/// strategy infinitely deep.
+fn result_content() -> BoxedStrategy<Value> {
+    prop_oneof![
+        text(),
+        prop::collection::vec(
+            (text(), unknown_fields()).prop_map(|(value, unknown)| object(
+                vec![("type", Some(json!("text"))), ("text", Some(value))],
+                unknown,
+            )),
+            0..3,
+        )
+        .prop_map(Value::from),
+    ]
+    .boxed()
+}
+
+/// `string | ContentBlock[]`, the shape both `system` and a message's
+/// `content` take. The two forms are different bytes and each must come back
+/// as itself.
+fn text_or_blocks() -> BoxedStrategy<Value> {
+    prop_oneof![
+        text(),
+        prop::collection::vec(content_block(), 0..3).prop_map(Value::from),
     ]
     .boxed()
 }
@@ -413,6 +474,217 @@ proptest! {
         prop_assert!(
             !matches!(parsed, MessageStreamEvent::Unknown(_)),
             "{body} fell through to Unknown instead of parsing as its own type",
+        );
+        prop_assert_eq!(serde_json::to_value(&parsed).unwrap(), body);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The request tree
+//
+// Nothing else checks this direction. warpllm builds these bodies and no
+// caller or oracle ever sees one, so a field dropped on the way to Anthropic
+// would otherwise reach no test at all.
+// ---------------------------------------------------------------------------
+
+/// A sampling parameter, as a FLOAT.
+///
+/// Generated through `f64` deliberately: `serde_json` holds an integer and a
+/// float as different `Number` variants that compare unequal, so a whole
+/// number generated as an integer would fail the round trip on a `f64` field
+/// for a reason that has nothing to do with warpllm.
+fn unit_interval() -> BoxedStrategy<Value> {
+    (0.0f64..=1.0).prop_map(Value::from).boxed()
+}
+
+fn flag() -> BoxedStrategy<Value> {
+    any::<bool>().prop_map(Value::from).boxed()
+}
+
+/// A tool warpllm models: named, schema'd, and carrying no `type` to be
+/// recognized by.
+fn custom_tool() -> BoxedStrategy<Value> {
+    (
+        text(),
+        optional(text()),
+        optional(flag()),
+        optional_nullable(cache_control()),
+        unknown_fields(),
+    )
+        .prop_map(|(name, description, strict, cache_control, unknown)| {
+            object(
+                vec![
+                    ("name", Some(name)),
+                    ("description", description),
+                    (
+                        "input_schema",
+                        Some(json!({"type": "object", "properties": {}})),
+                    ),
+                    ("strict", strict),
+                    ("cache_control", cache_control),
+                ],
+                unknown,
+            )
+        })
+        .boxed()
+}
+
+fn tool() -> BoxedStrategy<Value> {
+    prop_oneof![
+        custom_tool(),
+        // A server tool, which warpllm passes through whole. The ONLY thing
+        // telling it from a custom tool is the absent `input_schema` — a
+        // custom tool carries no discriminator at all, which is why `Tool`
+        // is the one union here that cannot be tag-dispatched.
+        (text(), unknown_fields()).prop_map(|(name, unknown)| object(
+            vec![
+                ("type", Some(json!("web_search_20260209"))),
+                ("name", Some(name)),
+            ],
+            unknown,
+        )),
+    ]
+    .boxed()
+}
+
+fn tool_choice() -> BoxedStrategy<Value> {
+    let mode = |kind: &'static str| {
+        (optional(flag()), unknown_fields()).prop_map(move |(disable, unknown)| {
+            object(
+                vec![
+                    ("type", Some(json!(kind))),
+                    ("disable_parallel_tool_use", disable),
+                ],
+                unknown,
+            )
+        })
+    };
+    prop_oneof![
+        mode("auto"),
+        mode("any"),
+        mode("none"),
+        (text(), optional(flag()), unknown_fields()).prop_map(|(name, disable, unknown)| object(
+            vec![
+                ("type", Some(json!("tool"))),
+                ("name", Some(name)),
+                ("disable_parallel_tool_use", disable),
+            ],
+            unknown,
+        )),
+    ]
+    .boxed()
+}
+
+/// All three thinking vocabularies. They are mutually exclusive per MODEL, not
+/// per protocol version, so every one of them is a body warpllm may have to
+/// read back.
+fn thinking_config() -> BoxedStrategy<Value> {
+    prop_oneof![
+        (1u32..64_000, unknown_fields()).prop_map(|(budget, unknown)| object(
+            vec![
+                ("type", Some(json!("enabled"))),
+                ("budget_tokens", Some(json!(budget))),
+            ],
+            unknown,
+        )),
+        (optional(text()), unknown_fields()).prop_map(|(display, unknown)| object(
+            vec![("type", Some(json!("adaptive"))), ("display", display)],
+            unknown,
+        )),
+        unknown_fields()
+            .prop_map(|unknown| object(vec![("type", Some(json!("disabled")))], unknown)),
+    ]
+    .boxed()
+}
+
+fn input_message() -> BoxedStrategy<Value> {
+    (text(), text_or_blocks(), unknown_fields())
+        .prop_map(|(role, content, unknown)| {
+            object(
+                vec![("role", Some(role)), ("content", Some(content))],
+                unknown,
+            )
+        })
+        .boxed()
+}
+
+/// Split into two tuples only because proptest's tuple strategies stop before
+/// this many elements.
+fn request() -> BoxedStrategy<Value> {
+    (
+        (
+            text(),
+            prop::collection::vec(input_message(), 0..3),
+            1u32..100_000,
+            optional(text_or_blocks()),
+            optional(unit_interval()),
+            optional(unit_interval()),
+        ),
+        (
+            optional(
+                prop::collection::vec(text(), 0..3)
+                    .prop_map(Value::from)
+                    .boxed(),
+            ),
+            optional(flag()),
+            optional(
+                prop::collection::vec(tool(), 0..3)
+                    .prop_map(Value::from)
+                    .boxed(),
+            ),
+            optional(tool_choice()),
+            optional(thinking_config()),
+            unknown_fields(),
+        ),
+    )
+        .prop_map(
+            |(
+                (model, messages, max_tokens, system, temperature, top_p),
+                (stop_sequences, stream, tools, tool_choice, thinking, unknown),
+            )| {
+                object(
+                    vec![
+                        ("model", Some(model)),
+                        ("messages", Some(Value::from(messages))),
+                        ("max_tokens", Some(json!(max_tokens))),
+                        ("system", system),
+                        ("temperature", temperature),
+                        ("top_p", top_p),
+                        ("stop_sequences", stop_sequences),
+                        ("stream", stream),
+                        ("tools", tools),
+                        ("tool_choice", tool_choice),
+                        ("thinking", thinking),
+                    ],
+                    unknown,
+                )
+            },
+        )
+        .boxed()
+}
+
+proptest! {
+    #[test]
+    fn any_in_spec_request_survives_a_round_trip(body in request()) {
+        let parsed: CreateMessageRequest = serde_json::from_value(body.clone())
+            .unwrap_or_else(|e| panic!("{body} failed to deserialize: {e}"));
+        prop_assert_eq!(serde_json::to_value(&parsed).unwrap(), body);
+    }
+
+    /// A custom tool must reach `Tool::Custom`, never the passthrough arm.
+    ///
+    /// `Tool` is the one union here with no discriminator, so it cannot refuse
+    /// a body that fails to parse the way the tag-dispatched ones now do — a
+    /// malformed custom tool just becomes `Other` and round trips verbatim.
+    /// Losslessness alone would therefore pass whatever this generator did,
+    /// which is what this asserts against.
+    #[test]
+    fn a_custom_tool_never_degrades_to_the_passthrough_arm(body in custom_tool()) {
+        let parsed: Tool = serde_json::from_value(body.clone())
+            .unwrap_or_else(|e| panic!("{body} failed to deserialize: {e}"));
+        prop_assert!(
+            matches!(parsed, Tool::Custom(_)),
+            "{body} fell through to the passthrough arm",
         );
         prop_assert_eq!(serde_json::to_value(&parsed).unwrap(), body);
     }

@@ -19,9 +19,16 @@
 //! an EGRESS protocol: nothing but `render_request` constructs a
 //! [`CreateMessageRequest`], so a field no renderer sets earns nothing by
 //! being typed and still reaches Anthropic through `unknown_fields`. So
-//! `top_k`, `metadata`, `service_tier`, `container`, `inference_geo`,
-//! `output_config` and a top-level `cache_control` are all deliberately
-//! untyped. Add one when a conversion needs to set or read it, not before.
+//! `top_k`, `metadata`, `service_tier`, `container`, `inference_geo` and a
+//! top-level `cache_control` are all deliberately untyped. Add one when a
+//! conversion needs to set or read it, not before.
+//!
+//! [`OutputConfig`] is what "not before" looks like from the other side: it
+//! was on that list until the conversions arrived and found that BOTH its
+//! fields have a gateway home — `format` is `ChatRequest::response_format` and
+//! `effort` is `ReasoningConfig::effort` — so a renderer now has to construct
+//! one. Same for [`OutputTokensDetails`], which carries the only count
+//! `Usage::reasoning_tokens` can be filled from.
 //!
 //! # Two structural differences from chat completions
 //!
@@ -168,6 +175,56 @@ pub struct CreateMessageRequest {
     pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<OutputConfig>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
+}
+
+/// What the reply must look like and how hard the model works on it.
+///
+/// Two unrelated controls under one key, which is Anthropic's arrangement
+/// rather than a grouping warpllm chose.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OutputConfig {
+    /// A schema the reply must satisfy — Anthropic's structured outputs, and
+    /// the counterpart of chat completions' `response_format`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<OutputFormat>,
+    /// `"low"`, `"medium"`, `"high"`, `"xhigh"` or `"max"`. Absent means
+    /// `"high"`, which Anthropic documents as behaving identically to omitting
+    /// it.
+    ///
+    /// A `String`, not an enum, per the codegen policy — and the policy earns
+    /// its keep here: `xhigh` and `max` are both newer than the parameter, and
+    /// the set is documented per model rather than once.
+    ///
+    /// This is where an effort level lives now. It is NOT part of `thinking`,
+    /// and Anthropic says so directly: "Don't pass `adaptive` as an `effort`
+    /// value: `adaptive` is a thinking mode, not an effort level."
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
+}
+
+/// The shape a reply must take.
+///
+/// A struct with a `type` string rather than a `type`-tagged enum, because
+/// there is exactly one variant — `json_schema` — and a single-variant union
+/// would be a dispatch with nothing to dispatch on. [`CacheControl`] is
+/// modelled the same way for the same reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputFormat {
+    /// Conventionally `"json_schema"`, the only format documented today.
+    #[serde(rename = "type")]
+    pub r#type: String,
+    /// REQUIRED for `json_schema`, and optional here only so that a format
+    /// type Anthropic adds later — one carrying something other than a schema
+    /// — parses rather than failing the whole request. Same instinct as an
+    /// `Unknown` arm, in the one shape that has no room for one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<Value>,
     #[serde(flatten)]
     pub unknown_fields: UnknownFields,
 }
@@ -543,13 +600,22 @@ unknown_means_an_unknown_tag!(ThinkingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThinkingEnabled {
     pub budget_tokens: u32,
+    /// See [`ThinkingAdaptive::display`] — the field is documented to work
+    /// "in both modes", so it sits on both arms rather than only on the newer
+    /// one. It is invalid on [`ThinkingDisabled`], where there is nothing to
+    /// display, which is why that arm has no such field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
     #[serde(flatten)]
     pub unknown_fields: UnknownFields,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThinkingAdaptive {
-    /// `"summarized"` or `"omitted"`.
+    /// `"summarized"` returns the thinking text; `"omitted"` returns thinking
+    /// blocks with an empty `thinking` field. Both are billed identically and
+    /// both must be passed back unchanged on the next turn — this controls
+    /// what the caller SEES, not whether the model thinks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
     #[serde(flatten)]
@@ -611,6 +677,35 @@ pub struct Usage {
         skip_serializing_if = "Option::is_none"
     )]
     pub cache_read_input_tokens: Option<Option<u32>>,
+    /// Documented nullable, hence the three-state spelling. `cache_creation`,
+    /// `server_tool_use`, `service_tier` and `inference_geo` stay untyped
+    /// beside it: none has a gateway field to be lifted into, so each earns
+    /// more by riding `unknown_fields` verbatim.
+    #[serde(
+        default,
+        deserialize_with = "present_or_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub output_tokens_details: Option<Option<OutputTokensDetails>>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
+}
+
+/// The breakdown of `output_tokens`.
+///
+/// One field today, and it is the reason this type is modelled at all: nothing
+/// else on the wire says how much of the reply was thinking, and
+/// `Usage::reasoning_tokens` has nowhere else to come from. Thinking tokens
+/// are BILLED as output tokens and already counted in `output_tokens`, so this
+/// is a breakdown, never an addend.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OutputTokensDetails {
+    #[serde(
+        default,
+        deserialize_with = "present_or_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub thinking_tokens: Option<Option<u32>>,
     #[serde(flatten)]
     pub unknown_fields: UnknownFields,
 }

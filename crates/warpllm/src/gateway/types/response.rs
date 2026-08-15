@@ -59,13 +59,35 @@ impl FinishReason {
 /// Token accounting in the widest cross-provider units; fields a provider
 /// doesn't report stay `None`. Protocol-specific residue (detail objects,
 /// unknown fields) rides `ext` so rendering back is lossless.
+///
+/// # The cached counts are a BREAKDOWN, never addends
+///
+/// [`input_tokens`](Self::input_tokens) is the WHOLE input, cached tokens
+/// included, and [`cache_read_tokens`](Self::cache_read_tokens) and
+/// [`cache_write_tokens`](Self::cache_write_tokens) say how much of it was
+/// which. [`total_tokens`](Self::total_tokens) is then input + output, and
+/// adding the cache counts on top double-counts them.
+///
+/// Stated here rather than left to each protocol because the two wire formats
+/// disagree and the difference is invisible in the field name: OpenAI's
+/// `prompt_tokens` already includes its `cached_tokens`, while Anthropic's
+/// `input_tokens` counts only what came AFTER the last cache breakpoint. A
+/// protocol whose wire value is exclusive has to add the cache counts back on
+/// ingest — otherwise the same conversation reports a different `prompt_tokens`
+/// depending on which backend served it, and `cached_tokens` can exceed the
+/// prompt it is supposedly part of.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Usage {
+    /// The whole input, INCLUDING whatever was read from or written to cache.
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// `input_tokens + output_tokens`. Not a third independent number.
     pub total_tokens: Option<u64>,
+    /// Part of `output_tokens`, not additional to it.
     pub reasoning_tokens: Option<u64>,
+    /// Part of `input_tokens`, not additional to it.
     pub cache_read_tokens: Option<u64>,
+    /// Part of `input_tokens`, not additional to it.
     pub cache_write_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "ProviderExt::is_empty")]
     pub ext: ProviderExt,

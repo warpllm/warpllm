@@ -262,16 +262,35 @@ fn text_or_blocks() -> BoxedStrategy<Value> {
     .boxed()
 }
 
+/// The breakdown of `output_tokens`, whose one field is where
+/// `Usage::reasoning_tokens` comes from.
+fn output_tokens_details() -> BoxedStrategy<Value> {
+    (
+        optional_nullable((0u32..4000).prop_map(Value::from).boxed()),
+        unknown_fields(),
+    )
+        .prop_map(|(thinking, unknown)| object(vec![("thinking_tokens", thinking)], unknown))
+        .boxed()
+}
+
 fn usage() -> BoxedStrategy<Value> {
     let count = || optional_nullable((0u32..4000).prop_map(Value::from).boxed());
-    (0u32..4000, 0u32..4000, count(), count(), unknown_fields())
-        .prop_map(|(input, output, creation, read, unknown)| {
+    (
+        0u32..4000,
+        0u32..4000,
+        count(),
+        count(),
+        optional_nullable(output_tokens_details()),
+        unknown_fields(),
+    )
+        .prop_map(|(input, output, creation, read, details, unknown)| {
             object(
                 vec![
                     ("input_tokens", Some(json!(input))),
                     ("output_tokens", Some(json!(output))),
                     ("cache_creation_input_tokens", creation),
                     ("cache_read_input_tokens", read),
+                    ("output_tokens_details", details),
                 ],
                 unknown,
             )
@@ -578,15 +597,21 @@ fn tool_choice() -> BoxedStrategy<Value> {
 /// All three thinking vocabularies. They are mutually exclusive per MODEL, not
 /// per protocol version, so every one of them is a body warpllm may have to
 /// read back.
+///
+/// `display` rides both of the arms that think and NEITHER `disabled` — where
+/// Anthropic documents it as invalid, there being nothing to display.
 fn thinking_config() -> BoxedStrategy<Value> {
     prop_oneof![
-        (1u32..64_000, unknown_fields()).prop_map(|(budget, unknown)| object(
-            vec![
-                ("type", Some(json!("enabled"))),
-                ("budget_tokens", Some(json!(budget))),
-            ],
-            unknown,
-        )),
+        (1u32..64_000, optional(text()), unknown_fields()).prop_map(
+            |(budget, display, unknown)| object(
+                vec![
+                    ("type", Some(json!("enabled"))),
+                    ("budget_tokens", Some(json!(budget))),
+                    ("display", display),
+                ],
+                unknown,
+            )
+        ),
         (optional(text()), unknown_fields()).prop_map(|(display, unknown)| object(
             vec![("type", Some(json!("adaptive"))), ("display", display)],
             unknown,
@@ -595,6 +620,37 @@ fn thinking_config() -> BoxedStrategy<Value> {
             .prop_map(|unknown| object(vec![("type", Some(json!("disabled")))], unknown)),
     ]
     .boxed()
+}
+
+/// The two unrelated controls Anthropic files under one key.
+fn output_config() -> BoxedStrategy<Value> {
+    (
+        optional(output_format()),
+        optional(text()),
+        unknown_fields(),
+    )
+        .prop_map(|(format, effort, unknown)| {
+            object(vec![("format", format), ("effort", effort)], unknown)
+        })
+        .boxed()
+}
+
+/// `schema` is REQUIRED for the one format Anthropic documents and optional on
+/// this type, so that a format type it adds later parses instead of failing the
+/// whole request. Both states are generated, because both must come back as
+/// themselves.
+fn output_format() -> BoxedStrategy<Value> {
+    (
+        optional(Just(json!({"type": "object"})).boxed()),
+        unknown_fields(),
+    )
+        .prop_map(|(schema, unknown)| {
+            object(
+                vec![("type", Some(json!("json_schema"))), ("schema", schema)],
+                unknown,
+            )
+        })
+        .boxed()
 }
 
 fn input_message() -> BoxedStrategy<Value> {
@@ -634,13 +690,14 @@ fn request() -> BoxedStrategy<Value> {
             ),
             optional(tool_choice()),
             optional(thinking_config()),
+            optional(output_config()),
             unknown_fields(),
         ),
     )
         .prop_map(
             |(
                 (model, messages, max_tokens, system, temperature, top_p),
-                (stop_sequences, stream, tools, tool_choice, thinking, unknown),
+                (stop_sequences, stream, tools, tool_choice, thinking, output_config, unknown),
             )| {
                 object(
                     vec![
@@ -655,6 +712,7 @@ fn request() -> BoxedStrategy<Value> {
                         ("tools", tools),
                         ("tool_choice", tool_choice),
                         ("thinking", thinking),
+                        ("output_config", output_config),
                     ],
                     unknown,
                 )

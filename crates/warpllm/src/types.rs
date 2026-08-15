@@ -51,6 +51,9 @@ pub(crate) enum Protocol {
     /// The OpenAI-compatible chat completions wire format, implemented at
     /// [`crate::protocol::openai_compat`].
     OpenAiCompat,
+    /// Anthropic's Messages wire format, implemented at
+    /// [`crate::protocol::anthropic`].
+    Anthropic,
 }
 
 impl Protocol {
@@ -63,6 +66,45 @@ impl Protocol {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Protocol::OpenAiCompat => "openai_compat",
+            Protocol::Anthropic => "anthropic",
+        }
+    }
+
+    /// Every protocol warpllm implements.
+    ///
+    /// Hand-written because [`Protocol`] is `non_exhaustive` and nothing
+    /// derives a variant list. [`from_name`](Self::from_name) reads THIS rather
+    /// than spelling the names a second time, so the forward and inverse
+    /// mappings cannot drift apart; the test below is what forces a new variant
+    /// into it.
+    const PROTOCOLS: &'static [Protocol] = &[Protocol::OpenAiCompat, Protocol::Anthropic];
+
+    /// The inverse of [`as_str`](Self::as_str): does this string name a
+    /// PROTOCOL? Asked of a provider name, which is the only case where the
+    /// answer changes anything — see [`may_read`](Self::may_read).
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        Self::PROTOCOLS.iter().copied().find(|p| p.as_str() == name)
+    }
+
+    /// Whether a renderer for `self` may read the gateway `ext` bag keyed
+    /// `namespace`.
+    ///
+    /// Its own protocol's bag, yes. A provider's bag, yes. ANOTHER protocol's
+    /// bag, never — that is the layer rule ("a renderer reads only the IR and
+    /// its own namespace") turned into code, because the two are otherwise
+    /// indistinguishable: a provider may deliberately share a name with the
+    /// protocol it defines, and `anthropic` is both. Without this, an Anthropic
+    /// reply rendered for an OpenAI caller would flatten Anthropic's retained
+    /// `content` block array in beside OpenAI's typed `content` string and emit
+    /// both under one key.
+    ///
+    /// Where the names DO match — an Anthropic renderer reading the `anthropic`
+    /// provider — the bag is read exactly as before. That shadow is intended;
+    /// a field addressed to "anthropic" is addressed to both.
+    pub(crate) fn may_read(self, namespace: &str) -> bool {
+        match Self::from_name(namespace) {
+            Some(owner) => owner == self,
+            None => true,
         }
     }
 }
@@ -131,6 +173,45 @@ impl Api {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`Protocol::PROTOCOLS`] is hand-written, so this walks it and matches
+    /// exhaustively: adding a variant fails to COMPILE here until someone
+    /// visits the list. Round-tripping each name is what pins `from_name` as
+    /// the true inverse of `as_str`.
+    #[test]
+    fn every_protocol_name_maps_back_to_its_variant() {
+        for &protocol in Protocol::PROTOCOLS {
+            match protocol {
+                Protocol::OpenAiCompat | Protocol::Anthropic => {}
+            }
+            assert_eq!(Protocol::from_name(protocol.as_str()), Some(protocol));
+        }
+        assert_eq!(Protocol::from_name("deepseek"), None);
+        assert_eq!(Protocol::from_name("openai"), None);
+    }
+
+    /// The layer rule as a table. The diagonal is every protocol reading its
+    /// own bag, and the off-diagonal is the leak `may_read` exists to stop —
+    /// including the case that motivated it, an OpenAI renderer serving the
+    /// `anthropic` provider.
+    #[test]
+    fn a_renderer_reads_its_own_bag_and_no_other_protocols() {
+        for &reader in Protocol::PROTOCOLS {
+            for &other in Protocol::PROTOCOLS {
+                assert_eq!(
+                    reader.may_read(other.as_str()),
+                    reader == other,
+                    "{} reading {}",
+                    reader.as_str(),
+                    other.as_str()
+                );
+            }
+            assert!(
+                reader.may_read("deepseek"),
+                "a provider bag whose name is not a protocol's must stay readable"
+            );
+        }
+    }
 
     /// Every surface with the protocol it is spoken in, so a new variant has
     /// one place to be added for the checks below to cover it.

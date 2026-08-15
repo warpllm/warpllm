@@ -21,9 +21,8 @@
 //! capture from `tests/live_stream.rs` is what would prove it reads what
 //! Anthropic sends. The deliberate additions to the documented bodies are
 //! fields warpllm does not model — `stop_details`, `container`,
-//! `cache_creation`, `output_tokens_details`, `service_tier`, `top_k`,
-//! `metadata`, a document's `citations` — which are exactly the ones a round
-//! trip would silently lose.
+//! `cache_creation`, `service_tier`, `top_k`, `metadata`, a document's
+//! `citations` — which are exactly the ones a round trip would silently lose.
 
 use warpllm::protocol::anthropic::messages::types::{
     CreateMessageRequest, Message, MessageStreamEvent,

@@ -1,0 +1,15 @@
+{
+  "model": "claude-sonnet-4-6",
+  "max_tokens": 16000,
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 10000,
+    "display": "summarized"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "Are there an infinite number of prime numbers such that n mod 4 == 3?"
+    }
+  ]
+}

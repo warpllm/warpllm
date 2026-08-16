@@ -15,6 +15,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+echo "==> env template"
+# The checker before the check: it is the only guard on the template, so a bug
+# in it reads as a clean run rather than as a failure.
+./scripts/check-env-example.test.sh
+./scripts/check-env-example.sh
+
 echo "==> rust"
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings

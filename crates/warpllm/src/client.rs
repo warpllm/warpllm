@@ -1,5 +1,7 @@
-//! The client: one pooled HTTP connection set, one entrypoint.
+//! The client: one pooled HTTP connection set, one roster, one entrypoint.
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::auth::Authenticator;
@@ -10,13 +12,26 @@ use crate::gateway::openai_compat;
 use crate::protocol::openai_compat::chat_completions::types::{
     CreateChatCompletionRequest, CreateChatCompletionResponse, CreateChatCompletionStreamResponse,
 };
-use crate::registry::{self, ModelSpec, ProviderSpec, fetch_model};
+use crate::registry::{self, ModelSpec, ProviderSpec, Registry};
 use crate::types::Api;
+
+/// Where a roster file is named when [`ClientConfig::specs_path`] does not name
+/// one. The last resort before the shipped roster alone.
+///
+/// It is read here rather than by the server, so that pointing a container at a
+/// mounted roster works for every surface at once — the gateway, the Rust
+/// client, and both bindings — with no per-surface plumbing. Symmetric with
+/// keys, which are read from the environment at this same moment.
+pub(crate) const SPECS_ENV_VAR: &str = "WARPLLM_SPECS";
 
 pub struct Client {
     http: reqwest::Client,
     config: ClientConfig,
     credentials: Credentials,
+    /// This client's roster, and its alone. Shared with every other client
+    /// that was given no file of its own, since they all route against the
+    /// shipped tables.
+    registry: Arc<Registry>,
 }
 
 /// Everything one validated request needs to reach its model: where to send it,
@@ -25,13 +40,16 @@ pub struct Client {
 /// A struct rather than a tuple, because both call sites read all three by
 /// name and a fourth would otherwise renumber them.
 struct ModelDefinition<'a> {
-    provider: &'static ProviderSpec,
-    model: &'static ModelSpec,
-    auth: &'a Authenticator,
+    provider: &'a ProviderSpec,
+    model: &'a ModelSpec,
+    /// `None` where the roster says `auth: none`: the host takes no credential,
+    /// so the request goes out with no `Authorization` header rather than with
+    /// an empty one.
+    auth: Option<&'a Authenticator>,
 }
 
 impl Client {
-    /// Resolves the providers this client can authenticate, once.
+    /// Reads the roster and the environment once, and keeps what it found.
     ///
     /// Constructing a client still never *requires* credentials: an environment
     /// holding none builds a client that reaches no provider, and each request
@@ -39,29 +57,89 @@ impl Client {
     /// question up front, so it can be logged at the moment a caller is set up
     /// to read it rather than discovered one failed request at a time.
     ///
-    /// A declaration is checked here for the same reason, one step earlier: a
-    /// misspelled provider is wrong the moment it is written, and is not a
-    /// condition to discover at request time.
+    /// A roster file is the other half of the same idea, and the reason this
+    /// can now fail: a malformed one is reported here, where the caller is
+    /// holding the path and can go fix it, rather than as a closed registry
+    /// refusing a request hours later.
+    ///
+    /// A declaration is checked here too, and it is checked against the roster
+    /// this client actually loaded — a caller who wrote their own `local`
+    /// provider may declare it, and validating against the shipped list would
+    /// refuse them their own file.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] if
-    /// [`ClientConfig::providers`] names a provider the roster does not hold.
+    /// [`Error::InvalidRoster`] if a roster file was named and cannot be used.
+    /// [`Error::InvalidInput`] if [`ClientConfig::providers`] names a provider
+    /// this client's roster does not hold.
+    /// [`Error::Internal`] if the HTTP client will not build.
     pub fn new(config: ClientConfig) -> Result<Self> {
-        // Before the transport: a caller's spelling mistake should not be
-        // reported after, or masked by, a TLS-init failure.
-        Self::validate_declarations(&config)?;
+        // Both before the transport: a mistake in the caller's roster or in
+        // their declaration should not be reported after, or masked by, a
+        // TLS-init failure. The roster comes first of the two because the
+        // declaration is checked against it.
+        let specs_path = Self::specs_path(&config);
+        // Both are global redirections of where a request goes, and the first
+        // wins over the second — including over the local address that was the
+        // whole reason for writing the roster. Nobody means that.
+        if let (Some(base_url), Some(path)) = (&config.base_url, &specs_path) {
+            tracing::warn!(
+                base_url,
+                roster = %path.display(),
+                "base_url overrides EVERY provider, the roster file's own \
+                 included, so nothing will reach the addresses it names"
+            );
+        }
+        let registry = registry::load_for_client(specs_path.as_deref())?;
+        Self::validate_declarations(&config, &registry)?;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(
                 config.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
             ))
             .build()
             .map_err(|e| Error::Internal(e.to_string()))?;
-        let credentials = Credentials::resolve(config.providers.as_ref());
+        let credentials = Credentials::resolve(&registry, config.providers.as_ref());
         Ok(Self {
             http,
-            config,
             credentials,
+            config,
+            registry,
+        })
+    }
+
+    /// The roster file to load, if any: what the caller configured, then
+    /// [`SPECS_ENV_VAR`], then nothing.
+    ///
+    /// An empty environment variable counts as unset, matching the reading
+    /// `Credentials` gives an empty API key — a variable that is exported and
+    /// blank is a configuration mistake, not an answer.
+    fn specs_path(config: &ClientConfig) -> Option<PathBuf> {
+        config.specs_path.clone().or_else(|| {
+            std::env::var(SPECS_ENV_VAR)
+                .ok()
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+        })
+    }
+
+    /// What THIS client knows about a `model_str`: the provider that serves it,
+    /// and the model itself.
+    ///
+    /// The per-client counterpart of [`fetch_model`](crate::fetch_model), and
+    /// the one to ask about a client built with a roster of its own — that free
+    /// function answers about the roster warpllm ships, which is a different
+    /// question and stops being the same answer the moment a file is loaded.
+    ///
+    /// Matching is unchanged and exact: the key matches its own entry or
+    /// nothing at all. A roster file adds names; it does not add guessing.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidModel`] if this client's roster registers nothing for
+    /// `model_str`.
+    pub fn fetch_model(&self, model_str: &str) -> Result<(&ProviderSpec, &ModelSpec)> {
+        registry::resolve(&self.registry, model_str).ok_or_else(|| Error::InvalidModel {
+            given: model_str.to_string(),
         })
     }
 
@@ -76,7 +154,12 @@ impl Client {
     /// The message LISTS the roster, because the caller cannot: the registry
     /// is private by design, the list is short, and the failure is nearly
     /// always a spelling. Diagnostic text, not an API.
-    fn validate_declarations(config: &ClientConfig) -> Result<()> {
+    ///
+    /// `registry` is the MERGED roster, so a caller may declare a provider only
+    /// their own file names. Checking the shipped list instead would refuse
+    /// somebody their own `local`, which is the pair of features working
+    /// against each other rather than together.
+    fn validate_declarations(config: &ClientConfig, registry: &Registry) -> Result<()> {
         let Some(declared) = &config.providers else {
             return Ok(());
         };
@@ -94,8 +177,10 @@ impl Client {
         // BTreeMap, so the name reported first is the first alphabetically
         // rather than the first a hash seed happened to yield.
         for name in declared.keys() {
-            if registry::provider(name).is_none() {
-                let mut known: Vec<&str> = registry::providers().map(ProviderSpec::name).collect();
+            if registry::provider(registry, name).is_none() {
+                let mut known: Vec<&str> = registry::providers(registry)
+                    .map(ProviderSpec::name)
+                    .collect();
                 known.sort_unstable();
                 return Err(Error::InvalidInput(format!(
                     "providers: `{name}` is not a provider warpllm serves; the roster has {}",
@@ -201,9 +286,10 @@ impl Client {
     /// The whole validation sequence, in the one order that keeps each refusal
     /// about the thing that is actually wrong.
     ///
-    /// FOUR gates, coarse to fine: the roster registers the name, this client
-    /// serves the provider, the model serves the surface, and the client holds
-    /// a key. The order is the design.
+    /// FOUR gates, coarse to fine: this client's roster registers the name, the
+    /// client serves the provider, the model serves the surface, and the client
+    /// holds a credential or the roster says none is wanted. The order is the
+    /// design.
     ///
     /// The roster comes first because a name nothing registers is a typo, and
     /// hearing "declare deepseek" or "set `DEEPSEEK_API_KEY`" for
@@ -219,7 +305,7 @@ impl Client {
     /// entrypoints differ in exactly one argument — and a fifth gate added to
     /// one copy and not the other is a hole nothing would catch.
     fn validate(&self, requested: &str, api: Api) -> Result<ModelDefinition<'_>> {
-        let (provider, model) = fetch_model(requested)?;
+        let (provider, model) = self.fetch_model(requested)?;
         self.validate_declared(provider, requested)?;
         Self::validate_api(model, api, provider, requested)?;
         Ok(ModelDefinition {
@@ -241,7 +327,7 @@ impl Client {
     /// client: it is a lookup over a handful of entries, invisible beside an
     /// HTTP request, and it keeps one source of truth instead of derived state
     /// to hold in step.
-    fn validate_declared(&self, provider: &'static ProviderSpec, requested: &str) -> Result<()> {
+    fn validate_declared(&self, provider: &ProviderSpec, requested: &str) -> Result<()> {
         match &self.config.providers {
             None => Ok(()),
             Some(declared) if declared.contains_key(provider.name()) => Ok(()),
@@ -255,17 +341,36 @@ impl Client {
     /// The routed provider's credential, from the snapshot this client took of
     /// the environment when it was built.
     ///
-    /// A miss is not "the variable is unset now" but "it was unset then", and
-    /// the error still names the variable to set, because that is the remedy
-    /// either way. A provider with no `env_api_key` has no key source at all,
-    /// so the error names the roster rather than a variable nothing reads.
-    fn authenticator(&self, provider: &'static ProviderSpec) -> Result<&Authenticator> {
-        self.credentials
-            .get(provider.name())
-            .ok_or(Error::MissingApiKey {
-                provider: provider.name(),
-                env_var: provider.env_api_key(),
-            })
+    /// Three answers, not two, matching the three states a roster entry can be
+    /// in. `Ok(Some(auth))` is the ordinary case. `Ok(None)` is a provider that
+    /// declared `auth: none` — a host that takes no credential, which is what a
+    /// self-hosted box on a private network usually is; no `Authorization`
+    /// header is sent for it at all.
+    ///
+    /// `Err` is everything else: a variable that was unset when this client was
+    /// built, or an entry naming no way to authenticate. A miss is not "the
+    /// variable is unset now" but "it was unset then", and the error still names
+    /// the variable to set, because that is the remedy either way. A provider
+    /// with no `env_api_key` has no key source at all, so the error names the
+    /// roster rather than a variable nothing reads.
+    ///
+    /// A resolved credential is consulted BEFORE `auth: none`, so a caller who
+    /// declared an inline key for their own provider still sends it. The roster
+    /// says what the host wants in general; a caller who put a token in front of
+    /// their box has said something more specific, and that is the same
+    /// precedence [`Credentials::key_for`] gives inline keys over the
+    /// environment.
+    fn authenticator(&self, provider: &ProviderSpec) -> Result<Option<&Authenticator>> {
+        if let Some(auth) = self.credentials.get(provider.name()) {
+            return Ok(Some(auth));
+        }
+        if provider.unauthenticated() {
+            return Ok(None);
+        }
+        Err(Error::MissingApiKey {
+            provider: provider.name(),
+            env_var: provider.env_api_key(),
+        })
     }
 
     /// Whether the routed MODEL serves `api`, which is what every entrypoint
@@ -286,9 +391,9 @@ impl Client {
     /// completions, so the failing branch is otherwise unreachable from the
     /// public entrypoint until one lands that does not.
     fn validate_api(
-        model: &'static ModelSpec,
+        model: &ModelSpec,
         api: Api,
-        provider: &'static ProviderSpec,
+        provider: &ProviderSpec,
         requested: &str,
     ) -> Result<()> {
         if model.supports_api(api) {
@@ -306,7 +411,10 @@ impl Client {
 
     /// A configured `base_url` overrides the provider default (proxies,
     /// tests); otherwise each provider talks to its own API.
-    fn base_url(&self, provider: &'static ProviderSpec) -> &str {
+    ///
+    /// One lifetime for both, spelled out: the answer borrows from whichever
+    /// won, and elision would otherwise take it from `&self` alone.
+    fn base_url<'a>(&'a self, provider: &'a ProviderSpec) -> &'a str {
         self.config
             .base_url
             .as_deref()
@@ -375,7 +483,7 @@ mod tests {
     use crate::config::ProviderConfig;
     use crate::credentials::with_env;
     use crate::protocol::openai_compat::chat_completions::types::ChatCompletionRequestMessage;
-    use crate::registry::{Capabilities, ModelSpec, SupportedApi};
+    use crate::registry::{Capabilities, Credential, ModelSpec, SupportedApi};
 
     /// A client built under the environment lock.
     ///
@@ -389,30 +497,30 @@ mod tests {
     /// The two halves the client works from, for a model the shipped roster
     /// does have.
     fn pair_for(model: &str) -> (&'static ProviderSpec, &'static ModelSpec) {
-        fetch_model(model).unwrap()
+        crate::fetch_model(model).unwrap()
     }
 
-    /// Leaked because the client takes `&'static` specs, which costs nothing
-    /// in a test process that is about to exit.
-    fn demo_provider(base_url: &str, env_api_key: Option<&str>) -> &'static ProviderSpec {
-        Box::leak(Box::new(ProviderSpec {
-            name: "demo".into(),
+    /// A provider spec built by hand, for the cases the shipped roster cannot
+    /// express. Owned outright — the client borrows its specs from its own
+    /// roster now, so nothing here has to be leaked to satisfy a lifetime.
+    fn demo_provider(base_url: &str, credential: Credential) -> ProviderSpec {
+        ProviderSpec {
+            name: "demo",
             base_url: base_url.into(),
-            env_api_key: env_api_key.map(str::to_string),
-        }))
+            credential,
+        }
     }
 
-    /// Leaked for the same reason as [`demo_provider`]. Takes its surfaces so
-    /// a caller can express the case the roster cannot yet: a model under a
-    /// chat-serving host that does not itself serve chat.
-    fn demo_model(supported_apis: Vec<SupportedApi>) -> &'static ModelSpec {
-        Box::leak(Box::new(ModelSpec {
+    /// Takes its surfaces so a caller can express the case the roster cannot:
+    /// a model under a chat-serving host that does not itself serve chat.
+    fn demo_model(supported_apis: Vec<SupportedApi>) -> ModelSpec {
+        ModelSpec {
             provider: "demo".into(),
             model: "demo-embed".into(),
             supported_apis,
             capabilities: Capabilities::blank(),
             deprecation_date: None,
-        }))
+        }
     }
 
     /// The gate the whole model-level `supported_apis` split exists for. This
@@ -421,11 +529,11 @@ mod tests {
     #[test]
     fn a_model_that_does_not_serve_the_api_is_refused() {
         let err = Client::validate_api(
-            demo_model(vec![SupportedApi {
+            &demo_model(vec![SupportedApi {
                 api: Api::OpenAiCompatResponses,
             }]),
             Api::OpenAiCompatChatCompletions,
-            demo_provider("https://api.demo.test", Some("DEMO_API_KEY")),
+            &demo_provider("https://api.demo.test", Credential::EnvVar("DEMO_API_KEY")),
             "demo/embed",
         )
         .unwrap_err();
@@ -450,7 +558,7 @@ mod tests {
     #[test]
     fn a_model_that_serves_the_api_is_admitted() {
         Client::validate_api(
-            demo_model(vec![
+            &demo_model(vec![
                 SupportedApi {
                     api: Api::OpenAiCompatChatCompletions,
                 },
@@ -459,7 +567,7 @@ mod tests {
                 },
             ]),
             Api::OpenAiCompatChatCompletions,
-            demo_provider("https://api.demo.test", Some("DEMO_API_KEY")),
+            &demo_provider("https://api.demo.test", Credential::EnvVar("DEMO_API_KEY")),
             "demo/chat",
         )
         .unwrap();
@@ -470,10 +578,10 @@ mod tests {
     /// would pass both of the tests above and fail here.
     #[test]
     fn the_answer_depends_on_which_api_is_asked_about() {
-        let model = demo_model(vec![SupportedApi {
+        let model = &demo_model(vec![SupportedApi {
             api: Api::OpenAiCompatResponses,
         }]);
-        let provider = demo_provider("https://api.demo.test", Some("DEMO_API_KEY"));
+        let provider = &demo_provider("https://api.demo.test", Credential::EnvVar("DEMO_API_KEY"));
 
         Client::validate_api(model, Api::OpenAiCompatResponses, provider, "demo/x").unwrap();
         for refused in [
@@ -498,11 +606,11 @@ mod tests {
     #[test]
     fn chat_completions_does_not_imply_its_streaming_surface() {
         let err = Client::validate_api(
-            demo_model(vec![SupportedApi {
+            &demo_model(vec![SupportedApi {
                 api: Api::OpenAiCompatChatCompletions,
             }]),
             Api::OpenAiCompatChatCompletionsStream,
-            demo_provider("https://api.demo.test", Some("DEMO_API_KEY")),
+            &demo_provider("https://api.demo.test", Credential::EnvVar("DEMO_API_KEY")),
             "demo/chat",
         )
         .unwrap_err()
@@ -519,7 +627,10 @@ mod tests {
     #[test]
     fn a_provider_with_no_env_api_key_names_the_roster() {
         let err = client(ClientConfig::default())
-            .authenticator(demo_provider("https://api.demo.test", None))
+            .authenticator(&demo_provider(
+                "https://api.demo.test",
+                Credential::Unavailable,
+            ))
             .unwrap_err();
         match &err {
             Error::MissingApiKey { provider, env_var } => {
@@ -688,9 +799,14 @@ mod tests {
             .validate("openai/gpt-5.6", Api::OpenAiCompatChatCompletions)
             .unwrap();
         assert_eq!(
-            crate::auth::testing::applied(admitted.auth, "authorization")
-                .await
-                .as_deref(),
+            crate::auth::testing::applied(
+                admitted
+                    .auth
+                    .expect("openai reads a variable, so it is never `auth: none`"),
+                "authorization",
+            )
+            .await
+            .as_deref(),
             Some("Bearer sk-inline")
         );
     }
@@ -748,6 +864,24 @@ mod tests {
         });
     }
 
+    /// The other side of the same coin, and the whole reason `auth: none` is a
+    /// separate spelling: a provider that declares it takes no credential is
+    /// ADMITTED with none, where the test above is refused.
+    ///
+    /// Both run under an empty environment, so nothing but the roster entry
+    /// separates them.
+    #[test]
+    fn a_provider_that_takes_no_credential_needs_no_key() {
+        let client = client(ClientConfig::default());
+        let auth = client
+            .authenticator(&demo_provider(
+                "http://localhost:8000/v1",
+                Credential::NotRequired,
+            ))
+            .expect("a host that wants no credential is not a missing key");
+        assert!(auth.is_none(), "an unauthenticated host is sent no token");
+    }
+
     /// What ships upstream is the ENTRY's name, never the string the caller
     /// routed with. That is the whole point of `model:` — a warpllm alias may
     /// differ from the provider's own name for the same model.
@@ -797,7 +931,7 @@ mod tests {
             &client.http,
             "demo",
             &server.uri(),
-            &Authenticator::bearer("k".into()),
+            Some(&Authenticator::bearer("k".into())),
         )
         .await
         .unwrap();
@@ -851,7 +985,7 @@ mod tests {
             &client.http,
             provider.name(),
             client.base_url(provider),
-            &Authenticator::bearer("k".into()),
+            Some(&Authenticator::bearer("k".into())),
         )
         .await
         .unwrap();

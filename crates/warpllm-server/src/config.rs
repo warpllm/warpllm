@@ -1,5 +1,7 @@
 //! Server configuration: built-in defaults overridden by command-line flags.
 
+use std::path::PathBuf;
+
 use clap::Parser;
 use warpllm::ClientConfig;
 
@@ -16,6 +18,13 @@ pub struct ServerConfig {
     /// Listen port
     #[arg(long, default_value_t = 8080)]
     pub port: u16,
+    /// A roster of your own, in the same schema as warpllm's built-in
+    /// `specs.yaml`, merged over it. How a self-hosted OpenAI-compatible
+    /// server — vLLM, TGI, Ollama, llama.cpp — becomes routable. The built-in
+    /// providers survive the merge; an entry naming one of them replaces it
+    /// whole. Also read from `WARPLLM_SPECS` when this is not given.
+    #[arg(long, value_name = "PATH")]
+    pub specs: Option<PathBuf>,
     /// Upstream request timeout in seconds
     #[arg(long, default_value_t = 600)]
     pub timeout_secs: u64,
@@ -49,15 +58,17 @@ pub fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli, String> {
 impl ServerConfig {
     /// No key is set here: the client reads one per provider from the
     /// environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, …) when it is built,
-    /// and `base_url` stays absent so every provider talks to its own API.
+    /// and `base_url` stays absent so every provider talks to its own API —
+    /// which includes any address `--specs` named.
     ///
-    /// `providers` stays absent too, so the gateway serves warpllm's whole
-    /// roster. Narrowing it is a client-side capability the gateway does not
-    /// expose today — a key on the command line would sit in `ps` for a
-    /// benefit the environment already provides.
+    /// `providers` stays absent too, so the gateway serves the whole roster it
+    /// loaded, `--specs` entries included. Narrowing it is a client-side
+    /// capability the gateway does not expose today — a key on the command line
+    /// would sit in `ps` for a benefit the environment already provides.
     pub fn client_config(&self) -> ClientConfig {
         ClientConfig {
             base_url: None,
+            specs_path: self.specs.clone(),
             timeout_secs: Some(self.timeout_secs),
             stream_read_timeout_secs: self.stream_read_timeout_secs,
             providers: None,
@@ -100,6 +111,26 @@ mod tests {
         let config = config(&["--stream-read-timeout-secs", "45"]);
         assert_eq!(config.stream_read_timeout_secs, Some(45));
         assert_eq!(config.client_config().stream_read_timeout_secs, Some(45));
+    }
+
+    /// The same, for the flag whose whole purpose is to reach the client: a
+    /// `--specs` that parsed and went no further would leave the gateway
+    /// silently routing against the built-in roster alone, and the only
+    /// symptom would be a self-hosted model reported as unregistered.
+    #[test]
+    fn the_specs_flag_reaches_the_client_config() {
+        let config = config(&["--specs", "./warpllm.yaml"]);
+        assert_eq!(
+            config.client_config().specs_path,
+            Some(PathBuf::from("./warpllm.yaml"))
+        );
+    }
+
+    /// Absent means the built-in roster, and the client falls back to
+    /// `WARPLLM_SPECS` on its own — this must not manufacture a path.
+    #[test]
+    fn no_specs_flag_names_no_roster() {
+        assert_eq!(config(&[]).client_config().specs_path, None);
     }
 
     #[test]
@@ -149,6 +180,7 @@ mod tests {
         for expected in [
             "--host",
             "--port",
+            "--specs",
             "--timeout-secs",
             "--stream-read-timeout-secs",
             "8080",

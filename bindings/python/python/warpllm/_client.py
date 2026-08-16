@@ -38,12 +38,14 @@ class ProviderOptions(TypedDict, total=False):
 
 def _native_client(
     base_url: str | None,
+    specs_path: str | None,
     timeout: int | None,
     stream_read_timeout: int | None,
     providers: Mapping[str, ProviderOptions] | None,
 ) -> _NativeClient:
     config = {
         "base_url": base_url,
+        "specs_path": specs_path,
         "timeout_secs": timeout,
         "stream_read_timeout_secs": stream_read_timeout,
         # `dict()`, because the parameter is a `Mapping` and `json.dumps`
@@ -139,11 +141,37 @@ class WarpLLM:
         self,
         *,
         base_url: str | None = None,
+        specs_path: str | None = None,
         timeout: int | None = None,
         stream_read_timeout: int | None = None,
         providers: Mapping[str, ProviderOptions] | None = None,
     ) -> None:
-        """`stream_read_timeout` bounds how long a stream may go without a
+        """`specs_path` points at a roster of your own, in the same schema as
+        warpllm's built-in `specs.yaml`, merged over it. It is how a
+        self-hosted OpenAI-compatible server -- vLLM, TGI, Ollama, llama.cpp --
+        becomes routable, and no key is required:
+
+        ```yaml
+        providers:
+          local:
+            base_url: "http://localhost:8000/v1"
+            auth: none
+            models:
+              local/llama-3.3-70b:
+                supported_apis:
+                  - {api: openai_compat_chat_completions}
+        ```
+
+        The built-in providers survive the merge, so adding `local/` leaves
+        `openai/` exactly where it was. Reusing a built-in provider's name
+        replaces that provider whole, models included, and does so SILENTLY
+        here: warpllm warns over Rust's `tracing`, which this binding installs
+        no subscriber for. The file is read HERE, when the client is built, so
+        a roster that cannot be used raises now rather than failing a request
+        later. Unset falls back to the `WARPLLM_SPECS` environment variable,
+        and then to the built-in roster alone.
+
+        `stream_read_timeout` bounds how long a stream may go without a
         single byte; unset means never.
 
         `timeout` is a total deadline and cannot tell a slow stream from a
@@ -161,7 +189,7 @@ class WarpLLM:
         upstream. A name the registry does not hold raises here, not later.
         """
         self._native = _native_client(
-            base_url, timeout, stream_read_timeout, providers
+            base_url, specs_path, timeout, stream_read_timeout, providers
         )
 
     # Signatures 1 and 2 overlap on purpose: a `_StreamingRequest` IS a
@@ -242,23 +270,18 @@ class AsyncWarpLLM:
         self,
         *,
         base_url: str | None = None,
+        specs_path: str | None = None,
         timeout: int | None = None,
         stream_read_timeout: int | None = None,
         providers: Mapping[str, ProviderOptions] | None = None,
     ) -> None:
-        """`stream_read_timeout` bounds how long a stream may go without a
-        single byte; unset means never.
-
-        `timeout` is a total deadline and cannot tell a slow stream from a
-        wedged one. This bounds the GAP instead and resets on every byte. Set
-        it above the slowest time-to-first-token you expect, not merely above
-        the gap between chunks -- the wait before the first chunk is a gap too.
-
-        `providers` narrows this client to the providers it names; see
-        `WarpLLM.__init__`.
+        """The same arguments as `WarpLLM.__init__`, which documents them --
+        including `specs_path`, the roster file that makes a self-hosted
+        server routable, and `providers`, which narrows this client to the
+        providers it names.
         """
         self._native = _native_client(
-            base_url, timeout, stream_read_timeout, providers
+            base_url, specs_path, timeout, stream_read_timeout, providers
         )
 
     # Overlapping on purpose; see `WarpLLM.chat_completions`.

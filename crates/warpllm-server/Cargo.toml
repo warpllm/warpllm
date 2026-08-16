@@ -28,3 +28,5 @@ wiremock = "0.6"
 # The gateway's client reads provider keys from the environment, so the tests
 # that reach an upstream have to set one; temp-env serializes the unsafe write.
 temp-env = "0.3"
+# Roster files for the `--specs` cases, which need a path that really exists.
+tempfile = "3"

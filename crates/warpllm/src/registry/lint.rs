@@ -1,34 +1,61 @@
 //! Roster hygiene: everything true of a GOOD roster that loading it does not
 //! need in order to succeed.
 //!
-//! `cfg(test)`, which is the whole point. A roster that is merely untidy still
-//! produces correct tables, so none of this belongs in the code a caller
-//! links: the tables are right whether or not two providers share an
-//! environment variable. The tests below run [`check`] over the shipped file,
-//! so CI is the gate and a PR is where it bites.
+//! Two audiences now, and they are not held to the same rules. warpllm reads
+//! its own `specs.yaml` and, when a client is pointed at one, a roster written
+//! by somebody who has never seen this file. The split is between what makes a
+//! roster USABLE and what makes the shipped one TIDY:
+//!
+//! [`usable`] is compiled in and runs against every roster a client loads. Each
+//! of its checks catches something that produces perfectly correct tables and
+//! then cannot serve a request — a `base_url` an endpoint cannot be appended
+//! to, a model listing no surface, a provider nothing routes to. Finding those
+//! at construction is the whole value: the alternative is a gateway that starts
+//! clean and fails closed on the first request, hours later, somewhere else.
+//! Worse, in the one case [`appendable`] describes, a gateway that starts clean
+//! and then sends a request to the wrong path and is answered.
+//!
+//! [`tidy`] stays `cfg(test)`, and holds the one rule that is convention rather
+//! than correctness: both maps in ascending key order. That exists so a
+//! contributor adding a provider has exactly one place to put it and two PRs do
+//! not collide — which is a fact about this repository and nothing at all about
+//! a stranger's three-line file. Lecturing them about `LC_ALL=C sort` in their
+//! own config would be rude and would block a roster that works.
+//!
+//! Between the two sits [`shared_env_api_keys`], which is compiled in and
+//! returns findings rather than an error. Two providers sharing one variable is
+//! the silent cross-authentication it was written to catch — and it is also
+//! exactly what somebody fronting OpenAI with their own proxy means to do. The
+//! shipped roster is still refused for it, by [`check`]; a user's is warned.
+//!
+//! [`check`] is what CI runs over `specs.yaml`: load, then tidy, then usable,
+//! then the strict reading of the variable collision.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// Only the `cfg(test)` half loads a roster from text; [`usable`] is handed
+/// tables that have already been folded together.
+#[cfg(test)]
 use super::load::load;
 use super::types::{ModelSpec, ProviderSpec, Registry};
 
-/// Every policy below, first failure reported.
-pub(super) fn check(yaml: &str) -> Result<(), String> {
-    // Structure first: a real syntax or key error should be reported as
-    // itself, not as whatever hygiene complaint it happens to also trip.
-    let registry = load(yaml)?;
+/// Everything a roster has to satisfy before a request can be routed against
+/// it, first failure reported.
+///
+/// Takes the resolved tables rather than the text, because by the time this
+/// runs there may be no single text: a client's roster is its file folded over
+/// the shipped one, and a complaint about the result belongs to neither file
+/// alone. [`tidy`], which reads line numbers out of the source, is the half
+/// that must stay on text — and is exactly the half a user is not held to.
+pub(super) fn usable(registry: &Registry) -> Result<(), String> {
     if registry.providers.is_empty() {
         return Err("providers: the registry names no providers".into());
     }
-    // Only `Value` keeps the order keys appear in the file; the typed pass has
-    // hashed them by the time it returns, and the tables keep no order either.
-    let value: yaml_serde::Value = yaml_serde::from_str(yaml).map_err(|e| e.to_string())?;
-    sorted(yaml, &value)?;
-    serves_models(&registry)?;
+    serves_models(registry)?;
     // `HashMap`s, so iterating them directly would make a message name
     // whichever member of a collision came up first. Both loops below read a
     // sorted view instead, so the error a contributor sees is the one CI saw.
-    for (name, provider) in by_name(&registry) {
+    for (name, provider) in by_name(registry) {
         routable(provider).map_err(|e| format!("`{name}`: {e}"))?;
     }
     for (key, spec) in registry.models.iter().collect::<BTreeMap<_, _>>() {
@@ -40,7 +67,34 @@ pub(super) fn check(yaml: &str) -> Result<(), String> {
         }
         serves(spec).map_err(|e| format!("`{key}`: {e}"))?;
     }
-    env_api_keys(&registry)
+    Ok(())
+}
+
+/// The rules the SHIPPED roster is held to and nobody else is: both maps in
+/// ascending key order.
+#[cfg(test)]
+pub(super) fn tidy(yaml: &str) -> Result<(), String> {
+    // Only `Value` keeps the order keys appear in the file; the typed pass has
+    // hashed them by the time it returns, and the tables keep no order either.
+    let value: yaml_serde::Value = yaml_serde::from_str(yaml).map_err(|e| e.to_string())?;
+    sorted(yaml, &value)
+}
+
+/// Every policy, in the order a reader would want them, first failure
+/// reported. The gate CI runs over `specs.yaml`.
+#[cfg(test)]
+pub(super) fn check(yaml: &str) -> Result<(), String> {
+    // Structure first: a real syntax or key error should be reported as
+    // itself, not as whatever hygiene complaint it happens to also trip.
+    let registry = load(yaml)?;
+    tidy(yaml)?;
+    usable(&registry)?;
+    match shared_env_api_keys(&registry).first() {
+        Some(collision) => Err(format!(
+            "{collision}; every provider needs its own environment variable"
+        )),
+        None => Ok(()),
+    }
 }
 
 fn by_name(registry: &Registry) -> BTreeMap<&str, &ProviderSpec> {
@@ -60,6 +114,7 @@ fn by_name(registry: &Registry) -> BTreeMap<&str, &ProviderSpec> {
 /// the message. The whole point of this check is that a contributor can fix it
 /// without having to work out what "unsorted" means, so it names the key to
 /// move, where to move it, and the ordering it is being judged against.
+#[cfg(test)]
 fn sorted(yaml: &str, value: &yaml_serde::Value) -> Result<(), String> {
     // A missing or malformed `providers:` is the typed pass's error to report.
     let Some(providers) = value.get("providers").and_then(|v| v.as_mapping()) else {
@@ -79,6 +134,7 @@ fn sorted(yaml: &str, value: &yaml_serde::Value) -> Result<(), String> {
 }
 
 /// One map's keys, in the order the file writes them.
+#[cfg(test)]
 fn ascending<'a>(
     what: &str,
     yaml: &str,
@@ -110,6 +166,7 @@ fn ascending<'a>(
 /// Requiring the `:` immediately after the key is what keeps a search for
 /// `openai/gpt-5.6` off the `openai/gpt-5.6-luna` line. It only ever decorates
 /// a message, so a miss costs nothing but the number.
+#[cfg(test)]
 fn line_of(yaml: &str, key: &str) -> String {
     yaml.lines()
         .position(|line| {
@@ -153,6 +210,7 @@ fn routable(provider: &ProviderSpec) -> Result<(), String> {
             provider.base_url()
         ));
     }
+    appendable(provider.base_url())?;
     // Optional — a provider may name no variable at all — but an empty string
     // is never what anyone meant by that. Say so rather than resolve it to a
     // lookup of `""` at request time.
@@ -162,6 +220,61 @@ fn routable(provider: &ProviderSpec) -> Result<(), String> {
              key variable yet"
                 .into(),
         );
+    }
+    Ok(())
+}
+
+/// Whether an endpoint can actually be APPENDED to this `base_url`.
+///
+/// warpllm builds a URL by concatenation — `{base_url}/chat/completions` — so
+/// the base has to be a string that survives having a path stuck on the end.
+/// Three ways it does not, and none of them is visible by reading the line:
+///
+/// - No scheme. `localhost:8000/v1` is the address a server prints in its own
+///   startup log, and it is the most likely thing to be pasted here. It PARSES
+///   — as scheme `localhost` with path `8000/v1` — so a parse alone would let
+///   it through, and reqwest then refuses to build the request.
+/// - A query string. `http://host/v1?token=x` becomes
+///   `http://host/v1?token=x/chat/completions`, which reaches the host with the
+///   endpoint buried in the query and no path at all. The request is sent and
+///   answered — wrongly — which makes this the worst of the three.
+/// - A fragment, for the same reason one step further along.
+///
+/// Parsed with reqwest's own `Url`, deliberately rather than with a hand-rolled
+/// prefix check or a second URL crate: the question being asked is whether the
+/// thing that will build the request can build it, and only its parser answers
+/// that. It is already in the dependency tree for exactly that reason.
+///
+/// This matters more than it used to. The shipped roster's four `base_url`s
+/// were written once and reviewed; a roster file's is typed by somebody
+/// copying an address out of their own server's logs, and the whole point of
+/// checking at load is that they hear about it while they are still looking at
+/// the file.
+fn appendable(base_url: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(base_url).map_err(|e| {
+        format!(
+            "base_url `{base_url}` is not a URL: {e}. Write it whole, scheme \
+             included — `http://localhost:8000/v1`"
+        )
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "base_url `{base_url}` has scheme `{}`, and warpllm speaks HTTP. A \
+             host and port with no scheme reads as one of these rather than \
+             failing, so write `http://{base_url}` if that is what was meant",
+            url.scheme()
+        ));
+    }
+    if let Some(tail) = url
+        .query()
+        .map(|q| format!("query string `?{q}`"))
+        .or_else(|| url.fragment().map(|f| format!("fragment `#{f}`")))
+    {
+        return Err(format!(
+            "base_url `{base_url}` carries a {tail}; an endpoint is appended to \
+             this string, so `/chat/completions` would land inside it rather \
+             than in the path. A credential belongs in `env_api_key`, not here"
+        ));
     }
     Ok(())
 }
@@ -197,26 +310,36 @@ fn serves(spec: &ModelSpec) -> Result<(), String> {
     Ok(())
 }
 
-/// Two providers sharing one environment variable would silently authenticate
-/// one with the other's credentials, so a collision has to be resolved
-/// deliberately rather than inherited by accident.
-fn env_api_keys(registry: &Registry) -> Result<(), String> {
-    // A lookup, never iterated: the ordering that makes this message
-    // deterministic is `by_name`'s, one line below.
+/// Every environment variable claimed by more than one provider, described.
+///
+/// Two providers sharing a variable would authenticate one with the other's
+/// credentials, and between two third-party providers that is always an
+/// accident. Between `openai` and somebody's own proxy in front of it, it is
+/// the point — the proxy forwards the same key, and demanding a second variable
+/// holding the same secret buys nothing. So this REPORTS rather than refuses,
+/// and the two callers read it differently: [`check`] treats a finding as a
+/// failure of the shipped roster, and a client logs it as a warning against a
+/// user's.
+///
+/// In `by_name` order, so a roster with two collisions names the same one every
+/// run.
+pub(super) fn shared_env_api_keys(registry: &Registry) -> Vec<String> {
+    // A lookup, never iterated: the ordering that makes this deterministic is
+    // `by_name`'s, one line below.
     let mut owner: HashMap<&str, &str> = HashMap::new();
+    let mut collisions = Vec::new();
     for (name, provider) in by_name(registry) {
         // Nothing to collide over when a provider names no variable.
         let Some(env_api_key) = provider.env_api_key() else {
             continue;
         };
         if let Some(other) = owner.insert(env_api_key, name) {
-            return Err(format!(
-                "`{env_api_key}` is claimed by both `{other}` and `{name}`; \
-                 every provider needs its own environment variable"
+            collisions.push(format!(
+                "`{env_api_key}` is claimed by both `{other}` and `{name}`"
             ));
         }
     }
-    Ok(())
+    collisions
 }
 
 /// Every case here LOADS fine — the tables it produces are correct. What is
@@ -312,6 +435,36 @@ mod tests {
         );
     }
 
+    /// The split this module exists for, stated as a test: a roster that is
+    /// merely untidy is perfectly USABLE, and a client loading a stranger's
+    /// file must accept it.
+    ///
+    /// Asserted rather than assumed, because the failure mode is silent in the
+    /// worst direction — folding the order check back into `usable` would
+    /// refuse a working roster over a convention that means nothing outside
+    /// this repository, and every test above would still pass.
+    #[test]
+    fn an_untidy_roster_is_still_usable() {
+        let yaml = with(&models(&["demo/zeta", "demo/alpha"]));
+        let registry = load(&yaml).unwrap();
+        assert!(tidy(&yaml).is_err(), "the fixture must be untidy");
+        usable(&registry).expect("untidiness is not warpllm's business to refuse");
+    }
+
+    /// The collision the shipped roster is refused for is REPORTED for anyone
+    /// else's, because two providers sharing a variable is somebody fronting
+    /// one with a proxy at least as often as it is a mistake.
+    #[test]
+    fn a_shared_env_api_key_is_reported_rather_than_refused() {
+        let registry = load(&two_providers("DEMO_API_KEY")).unwrap();
+        usable(&registry).expect("a shared variable still routes");
+        let shared = shared_env_api_keys(&registry);
+        assert_eq!(shared.len(), 1, "{shared:?}");
+        assert!(shared[0].contains("DEMO_API_KEY"), "{shared:?}");
+        assert!(shared[0].contains("`demo`"), "{shared:?}");
+        assert!(shared[0].contains("`other`"), "{shared:?}");
+    }
+
     /// Both maps are kept sorted so a new entry has one place to go and two
     /// PRs adding different providers do not collide. Purely a convention,
     /// which is exactly why it must not stop the tables being built.
@@ -394,6 +547,54 @@ mod tests {
 
         let err = check("providers: {}\n").unwrap_err();
         assert!(err.contains("names no providers"), "{err}");
+    }
+
+    /// A `base_url` an endpoint cannot be appended to. Every one of these
+    /// loads, builds a client, and fails on the FIRST REQUEST — which is
+    /// precisely the failure `usable` exists to move to construction, and the
+    /// field a stranger writing their own roster is most likely to get wrong.
+    ///
+    /// The three are separated because they break differently. The first two
+    /// never reach the network; the third does, and is answered — with the
+    /// endpoint swallowed into the query, so the host sees a request for `/v1`
+    /// and warpllm reports whatever it makes of that. A wrong answer is worse
+    /// than no answer, which is why a query string is a refusal and not a
+    /// warning.
+    #[test]
+    fn a_base_url_an_endpoint_cannot_be_appended_to_is_rejected() {
+        let roster = |base_url: &str| {
+            with(&model("demo/plain")).replace("https://api.demo.test/v1", base_url)
+        };
+        for (base_url, expected) in [
+            // Parses as scheme `localhost`, which is why a bare parse is not
+            // enough and the scheme is checked by name.
+            ("localhost:8000/v1", "speaks HTTP"),
+            ("not a url at all", "is not a URL"),
+            ("http://api.demo.test/v1?token=x", "query string `?token=x`"),
+            ("http://api.demo.test/v1#frag", "fragment `#frag`"),
+        ] {
+            let yaml = roster(base_url);
+            assert!(
+                load(&yaml).is_ok(),
+                "`{base_url}`: the roster is what is wrong, not the tables"
+            );
+            let err = check(&yaml).unwrap_err();
+            assert!(err.contains(expected), "`{base_url}`: {err}");
+        }
+    }
+
+    /// The other side of it: an ordinary address, with and without a path,
+    /// passes. A check that refused everything would satisfy the case above.
+    #[test]
+    fn an_ordinary_base_url_is_accepted() {
+        for base_url in [
+            "http://localhost:8000/v1",
+            "https://api.demo.test",
+            "https://vllm.internal.example.com:8443/v1",
+        ] {
+            let yaml = with(&model("demo/plain")).replace("https://api.demo.test/v1", base_url);
+            clean(&yaml);
+        }
     }
 
     /// Two models of one provider may serve entirely different surfaces, and

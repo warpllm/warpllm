@@ -31,7 +31,7 @@ pub(crate) async fn exchange(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    auth: &Authenticator,
+    auth: Option<&Authenticator>,
 ) -> Result<types::ChatResponse> {
     let wire = render_request(request, provider)?;
     match transport::post(http, provider, base_url, auth, &wire).await? {
@@ -65,7 +65,7 @@ pub(crate) async fn exchange_stream(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    auth: &Authenticator,
+    auth: Option<&Authenticator>,
     read_timeout: Option<Duration>,
 ) -> Result<ChatChunkStream> {
     let wire = render_request(request, provider)?;

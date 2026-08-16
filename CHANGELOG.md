@@ -10,6 +10,105 @@ incompatible, and `^0.1` will not upgrade you into one.
 
 ## [Unreleased]
 
+Point warpllm at your own roster. Self-hosted OpenAI-compatible servers — vLLM,
+TGI, Ollama, llama.cpp — are first-class routable targets, with no fork and no
+key required.
+
+The registry used to be compiled into the binary and nothing else, so the only
+way to add a model was to fork the crate. That is disqualifying for exactly the
+people running their own models: those live behind their own addresses, on their
+own hardware, under names warpllm could not ship even if it wanted to.
+
+Now a client can be handed a file in the same schema as `specs.yaml`:
+
+```yaml
+# ./warpllm.yaml
+providers:
+  local:
+    base_url: "http://localhost:8000/v1"
+    auth: none                       # the box is on a private network
+    models:
+      local/llama-3.3-70b:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+```
+
+```python
+client = WarpLLM(specs_path="./warpllm.yaml")
+client.chat_completions({"model": "local/llama-3.3-70b", "messages": [...]})
+```
+
+```bash
+warpllm-server --specs ./warpllm.yaml
+```
+
+Your file is **merged** over the built-in roster: adding `local/` leaves
+`openai/` exactly where it was, and one client routes both. Reusing a built-in
+provider's name replaces that provider whole, models included, and warpllm warns
+rather than shadowing it silently — through `tracing`, so `warpllm-server` and
+any Rust client with a subscriber installed surface it. The Python and Node
+bindings install no subscriber, so the warning goes nowhere there; that is
+already true of the older warning about an environment holding no provider keys,
+and bridging `tracing` into both host languages is its own change.
+
+It is read when the client is built, like API keys and for the same reason —
+which is also where everything wrong with it is reported. A `base_url` with a
+trailing slash, a model listing no surface, a provider nothing routes to: all of
+these used to be things a roster could say and a request would discover. A
+gateway with a bad roster now refuses to start instead of starting clean and
+failing every call.
+
+**Beside 0.4.0's `providers` declaration.** The two compose, and the composition
+is the useful part rather than an accident. A provider from your own file may be
+declared like any other — the declaration is checked against the roster this
+client actually loaded, so `providers: {"local": {}}` is legal and narrows the
+client to your box alone. And an inline `api_key` still wins over `auth: none`:
+the roster says what the host wants in general, while a caller who put a token
+in front of their own box has said something more specific. That is the same
+precedence an inline key already had over an environment variable.
+
+**Beside weighted load balancing.** `BalancedClient` resolves its candidates
+against the roster of the client it wraps, so balancing across two boxes of your
+own — the ordinary self-hosting shape — works. It previously read the shipped
+roster through the free `fetch_model`, which was correct while there was only
+one roster and became wrong the moment a client could carry its own: it would
+have refused a caller's own entries while `chat_completions` served the very
+same string. `Candidate` lost its `provider` and `model` fields in the process;
+both were `#[allow(dead_code)]`, since the selected `model_str` is written back
+onto the request and resolved again by the inner client.
+
+**Why no wildcard.** `local/*` is a load error rather than a catch-all, and this
+came up as a real question — the usual argument for failing closed is that a
+typo becomes a live billed request, and on a box you own it is a 404 instead.
+The rule stays because `supported_apis` and `capabilities` are per model: a
+pattern would have to claim both on behalf of models nobody enumerated, which is
+the same fails-open claim a bare `{}` entry has always been refused for. If your
+server's model set moves often, generate the file from its own `/v1/models`.
+
+### Added
+
+- `ClientConfig::specs_path`, `WarpLLM(specs_path=…)` in Python,
+  `{ specsPath }` in Node, `warpllm-server --specs <PATH>`, and `WARPLLM_SPECS`
+  for all of them. Consulted in that order; an empty environment variable counts
+  as unset, and a path that names nothing is an error rather than a silent
+  fallback to the built-in roster.
+- `Client::fetch_model`, the per-client counterpart of `warpllm::fetch_model`.
+  The free function still answers about the roster warpllm **ships**, which is a
+  real question and now a different one.
+- `auth: none` on a provider entry: this host takes no credential, so no
+  `Authorization` header is sent at all. Deliberately NOT the meaning of an
+  absent `env_api_key`, which still means the roster records no way to
+  authenticate the provider — otherwise a forgotten line on a paid provider
+  would quietly become an unauthenticated request.
+- `ProviderSpec::unauthenticated`, which tells those two apart.
+- `Error::InvalidRoster`, code `invalid_roster`, rendered as a 500. It is the
+  gateway's own configuration and never the caller's payload, so a 400 would
+  send someone off to fix a request that was fine.
+- `examples/warpllm.yaml` and `examples/self_hosted.{rs,py,ts}`, plus
+  `tests/live_self_hosted.rs` — an opt-in test against a real server, since a
+  mock cannot prove that a real backend's replies decode.
+
 ### Fixed
 
 - **An OpenCode Zen account out of credit was reported as an authentication
@@ -41,6 +140,39 @@ incompatible, and `^0.1` will not upgrade you into one.
   No other provider reclassifies: nothing on the roster mapped a `type` of its
   own, so every existing failure resolves exactly as before. `ErrorMapper` is
   internal, so no package's API changes.
+
+- A provider taking no credential was **unreachable**, not merely unsupported.
+  `env_api_key` has always been optional, but such a provider was skipped when
+  keys were resolved, so every request to it failed with `MissingApiKey` and
+  never left the process. `auth: none` is the fix, and the bearer token is now
+  attached conditionally rather than always.
+- A `*` in a model key is a load error. It was read literally, so `local/*`
+  registered one model named `*` and routed nothing — the one mistake a roster
+  could make that looked like it had worked.
+- `examples/.env.example` claims to mirror the roster and had drifted;
+  `scripts/check-env-example.sh` now holds it to that, in CI, in both
+  directions — a roster variable with no block here, and a block here the
+  roster no longer names. It found three drifts on arrival: `MOONSHOT_API_KEY`,
+  `MISTRAL_API_KEY` and `OPENCODE_API_KEY` had all shipped without one.
+
+### Changed — breaking
+
+Narrow, and worth stating precisely rather than leaving to imagination:
+
+- `ClientConfig` gained a field, so an exhaustive struct literal without
+  `..Default::default()` no longer compiles. **This is the only source break for
+  a Rust caller** — and 0.4.0 already forced that same edit for the same reason,
+  so anyone who took its advice is unaffected by this one.
+- `Client::new` now reads a file when one is configured, and can fail with
+  `Error::InvalidRoster`. `Error` is `non_exhaustive`, so the variant itself is
+  not a break.
+- `ProviderSpec::name` and `env_api_key` return `&'static str` rather than
+  `&str`. Source-compatible in every ordinary use — `&'static str` coerces —
+  and it is what lets a per-client roster exist without changing the public
+  error types.
+
+Python and Node are purely additive. `ProviderError`, `ChatCompletionStream`,
+and every error code are untouched.
 
 ## [0.4.0] - 2026-08-16
 

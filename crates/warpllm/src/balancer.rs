@@ -19,21 +19,19 @@
 /// request to that provider), but the distribution remains correct over the cycle.
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use crate::registry::{ModelSpec, ProviderSpec};
-
 /// One candidate in a balanced model's rotation.
 ///
-/// Each candidate maps a user-facing `model_str` to its resolved
-/// provider/model pair. The balancer hands back the candidate on each
-/// selection, and the caller uses the `model_str` for its 4-gate validation
-/// and the resolved pair for the actual request.
+/// The `model_str` and its weight, and nothing else. It used to carry the
+/// resolved `&'static ProviderSpec`/`ModelSpec` pair as well, both
+/// `#[allow(dead_code)]`: the selected candidate's `model_str` is written back
+/// onto the request and the inner client resolves it again through its own four
+/// gates, so the pair was never read. Once a roster could belong to one client
+/// those references stopped being `'static` at all, and threading a lifetime
+/// through the balancer to carry data nobody looks at would have been the wrong
+/// half of the trade.
 #[derive(Debug)]
 pub struct Candidate {
     pub model_str: String,
-    #[allow(dead_code)]
-    pub provider: &'static ProviderSpec,
-    #[allow(dead_code)]
-    pub model: &'static ModelSpec,
     pub weight: u32,
 }
 
@@ -112,25 +110,12 @@ impl Balancer {
 mod tests {
     use super::*;
 
-    fn candidate(name: &str, weight: u32) -> Candidate {
-        // Leaked because the balancer takes `&'static` specs. Costs nothing
-        // in a test process that is about to exit.
-        let provider = Box::leak(Box::new(ProviderSpec {
-            name: name.to_string(),
-            base_url: format!("https://api.{name}.test"),
-            env_api_key: None,
-        }));
-        let model = Box::leak(Box::new(ModelSpec {
-            provider: name.to_string(),
-            model: name.to_string(),
-            supported_apis: vec![],
-            capabilities: crate::Capabilities::blank(),
-            deprecation_date: None,
-        }));
+    /// `name` IS the `model_str` here. These cases are about which candidate
+    /// comes out in which order, so the string is an opaque label and a
+    /// provider-shaped one would only make every assertion longer.
+    fn candidate(name: &'static str, weight: u32) -> Candidate {
         Candidate {
-            model_str: format!("{name}/{name}"),
-            provider,
-            model,
+            model_str: name.to_string(),
             weight,
         }
     }
@@ -139,14 +124,16 @@ mod tests {
     fn single_candidate_always_selects() {
         let balancer = Balancer::new(vec![candidate("a", 1)]);
         for _ in 0..100 {
-            assert_eq!(balancer.select().provider.name(), "a");
+            assert_eq!(balancer.select().model_str, "a");
         }
     }
 
     #[test]
     fn two_equal_weight_candidates_alternate() {
         let balancer = Balancer::new(vec![candidate("a", 1), candidate("b", 1)]);
-        let picks: Vec<&str> = (0..6).map(|_| balancer.select().provider.name()).collect();
+        let picks: Vec<&str> = (0..6)
+            .map(|_| balancer.select().model_str.as_str())
+            .collect();
         assert_eq!(picks, vec!["a", "b", "a", "b", "a", "b"]);
     }
 
@@ -156,7 +143,7 @@ mod tests {
         let mut counts = [0u32; 2];
         for _ in 0..1000 {
             let c = balancer.select();
-            if c.provider.name() == "a" {
+            if c.model_str == "a" {
                 counts[0] += 1;
             } else {
                 counts[1] += 1;
@@ -184,7 +171,7 @@ mod tests {
         let mut counts = [0u32; 3];
         for _ in 0..4 {
             let c = balancer.select();
-            let idx = match c.provider.name() {
+            let idx = match c.model_str.as_str() {
                 "a" => 0,
                 "b" => 1,
                 "c" => 2,
@@ -199,7 +186,9 @@ mod tests {
     fn smoothness_no_two_identical_picks_are_far_apart() {
         // Weights [5, 1], total = 6. Max gap between A picks is ceil(6/5) = 2.
         let balancer = Balancer::new(vec![candidate("a", 5), candidate("b", 1)]);
-        let picks: Vec<&str> = (0..12).map(|_| balancer.select().provider.name()).collect();
+        let picks: Vec<&str> = (0..12)
+            .map(|_| balancer.select().model_str.as_str())
+            .collect();
         // Find gaps between consecutive A picks.
         let a_positions: Vec<usize> = picks
             .iter()

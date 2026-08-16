@@ -23,8 +23,7 @@ pub fn client_for(server: &MockServer) -> Client {
     Client::new(ClientConfig {
         base_url: Some(server.uri()),
         timeout_secs: Some(5),
-        stream_read_timeout_secs: None,
-        providers: None,
+        ..Default::default()
     })
     .unwrap()
 }
@@ -43,9 +42,15 @@ pub fn client_for(server: &MockServer) -> Client {
 ///
 /// The future is built before the variable is set, which is safe because
 /// futures are lazy: nothing in `body` runs until `block_on` polls it.
+///
+/// `WARPLLM_SPECS` is cleared alongside the key. A contributor who exports it
+/// is pointing every client built here at a roster this suite has never seen,
+/// and the failures that produces name nothing that would lead back to it.
 pub fn with_env_key<F: Future<Output = ()>>(var: &str, key: &str, body: F) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    temp_env::with_var(var, Some(key), || runtime.block_on(body));
+    temp_env::with_vars([(var, Some(key)), ("WARPLLM_SPECS", None)], || {
+        runtime.block_on(body);
+    });
 }
 
 pub fn with_openai_key<F: Future<Output = ()>>(body: F) {

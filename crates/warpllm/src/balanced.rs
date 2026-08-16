@@ -11,7 +11,6 @@ use crate::error::{Error, Result};
 use crate::protocol::openai_compat::chat_completions::types::{
     CreateChatCompletionRequest, CreateChatCompletionResponse,
 };
-use crate::registry::fetch_model;
 use std::fmt;
 
 /// A client that load-balances across multiple provider/model pairs.
@@ -72,11 +71,14 @@ impl<'a> BalancedClient<'a> {
         }
         let mut resolved = Vec::with_capacity(candidates.len());
         for &(model_str, weight) in candidates {
-            let (provider, model) = fetch_model(model_str)?;
+            // THIS client's roster, not the shipped one. A caller balancing
+            // across models from a roster file of their own is the ordinary
+            // case for self-hosting — two boxes behind one name — and asking
+            // the free `fetch_model` would refuse them their own entries while
+            // `client.chat_completions` served the very same string.
+            client.fetch_model(model_str)?;
             resolved.push(crate::balancer::Candidate {
                 model_str: model_str.to_string(),
-                provider,
-                model,
                 weight,
             });
         }
@@ -124,25 +126,7 @@ impl<'a> BalancedClient<'a> {
 mod tests {
     use super::*;
     use crate::balancer::Candidate;
-    use crate::{Api, Client, ClientConfig, ModelSpec, ProviderSpec, SupportedApi};
-
-    fn leaked_spec_pair(name: &str) -> (&'static ProviderSpec, &'static ModelSpec) {
-        let provider = Box::leak(Box::new(ProviderSpec {
-            name: name.to_string(),
-            base_url: format!("https://api.{name}.test"),
-            env_api_key: None,
-        }));
-        let model = Box::leak(Box::new(ModelSpec {
-            provider: name.to_string(),
-            model: name.to_string(),
-            supported_apis: vec![SupportedApi {
-                api: Api::OpenAiCompatChatCompletions,
-            }],
-            capabilities: crate::Capabilities::blank(),
-            deprecation_date: None,
-        }));
-        (provider, model)
-    }
+    use crate::{Client, ClientConfig};
 
     #[test]
     fn empty_candidates_rejected() {
@@ -161,26 +145,20 @@ mod tests {
     #[test]
     fn balancer_distribution_from_public_interface() {
         // Directly test the balancer that BalancedClient wraps.
-        let (p_a, m_a) = leaked_spec_pair("a");
-        let (p_b, m_b) = leaked_spec_pair("b");
         let balancer = Balancer::new(vec![
             Candidate {
                 model_str: "a/test".into(),
-                provider: p_a,
-                model: m_a,
                 weight: 3,
             },
             Candidate {
                 model_str: "b/test".into(),
-                provider: p_b,
-                model: m_b,
                 weight: 1,
             },
         ]);
         let mut counts = [0u32; 2];
         for _ in 0..1000 {
             let c = balancer.select();
-            if c.provider.name() == "a" {
+            if c.model_str == "a/test" {
                 counts[0] += 1;
             } else {
                 counts[1] += 1;

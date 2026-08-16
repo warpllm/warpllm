@@ -1,0 +1,1 @@
+../../../examples/self_hosted.rs

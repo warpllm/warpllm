@@ -28,9 +28,15 @@ const GATEWAY_KEY: &str = "sk-gateway";
 ///
 /// A runtime per test rather than `#[tokio::test]` because `async_with_vars`
 /// cannot hold the lock across an await.
+///
+/// `WARPLLM_SPECS` is cleared too: a contributor who exports it points every
+/// gateway spawned here at a roster this suite has never seen, and the failures
+/// that follow name nothing that would lead back to the variable.
 fn with_env<F: Future<Output = ()>>(key: Option<&str>, body: F) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    temp_env::with_var("OPENAI_API_KEY", key, || runtime.block_on(body));
+    temp_env::with_vars([("OPENAI_API_KEY", key), ("WARPLLM_SPECS", None)], || {
+        runtime.block_on(body)
+    });
 }
 
 /// The gateway holding its provider key, for the tests that reach upstream.
@@ -51,8 +57,7 @@ async fn spawn_app(upstream_uri: &str) -> String {
     let client = warpllm::Client::new(warpllm::ClientConfig {
         base_url: Some(upstream_uri.to_string()),
         timeout_secs: Some(5),
-        stream_read_timeout_secs: None,
-        providers: None,
+        ..Default::default()
     })
     .unwrap();
     let app = router(AppState {
@@ -565,6 +570,7 @@ fn serve_boots_answers_health_and_shuts_down_gracefully() {
         let config = warpllm_server::config::ServerConfig {
             host: "127.0.0.1".into(),
             port,
+            specs: None,
             timeout_secs: 5,
             stream_read_timeout_secs: None,
         };
@@ -607,5 +613,148 @@ fn health_reports_ok() {
         let body: Value = response.json().await.unwrap();
         assert_eq!(body["status"], "ok");
         assert_eq!(body["version"], warpllm::version());
+    });
+}
+
+/// A gateway serving a model only the operator's own roster knows about.
+///
+/// The whole `--specs` path, end to end and through a real axum server: the
+/// file names a self-hosted host, the caller routes `local/…` at the gateway,
+/// and the request reaches that host carrying no credential. Nothing in this
+/// test is authenticated — `without_key` runs it with the environment empty —
+/// so a regression that started demanding one would fail here rather than in
+/// somebody's cluster.
+///
+/// `base_url` stays absent, unlike every other case in this file: the roster's
+/// own address is the thing under test, and a global override would replace it.
+#[test]
+fn a_roster_file_makes_a_self_hosted_model_routable_through_the_gateway() {
+    without_key(async {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-local",
+                "object": "chat.completion",
+                "created": 1_700_000_000,
+                "model": "llama-3.3-70b",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello from the box"},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&upstream)
+            .await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let roster = dir.path().join("warpllm.yaml");
+        std::fs::write(
+            &roster,
+            format!(
+                "providers:\n  local:\n    base_url: \"{}\"\n    auth: none\n    \
+                 models:\n      local/llama-3.3-70b:\n        supported_apis:\n          \
+                 - {{api: openai_compat_chat_completions}}\n",
+                upstream.uri()
+            ),
+        )
+        .unwrap();
+
+        // Built the way `serve` builds one, from a `ServerConfig` — so this
+        // covers the flag reaching the client, not just the field existing.
+        let config = warpllm_server::config::ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            specs: Some(roster),
+            timeout_secs: 5,
+            stream_read_timeout_secs: None,
+        };
+        let app = router(AppState {
+            client: Arc::new(warpllm::Client::new(config.client_config()).unwrap()),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/v1/chat/completions"))
+            .json(&json!({
+                "model": "local/llama-3.3-70b",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{:?}", response.text().await);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["model"], "local/llama-3.3-70b");
+
+        let sent = &upstream.received_requests().await.unwrap()[0];
+        assert!(
+            sent.headers.get("authorization").is_none(),
+            "the gateway invented a credential for a host that wants none"
+        );
+    });
+}
+
+/// The merge guarantee, from the gateway's side: pointing it at a roster must
+/// not cost it the providers it shipped with.
+#[test]
+fn a_roster_file_leaves_the_gateways_built_in_providers_routable() {
+    with_gateway_key(async {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header(
+                "authorization",
+                format!("Bearer {GATEWAY_KEY}").as_str(),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 1_700_000_000,
+                "model": "gpt-5.6",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&upstream)
+            .await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let roster = dir.path().join("warpllm.yaml");
+        std::fs::write(
+            &roster,
+            "providers:\n  local:\n    base_url: \"http://127.0.0.1:1/v1\"\n    \
+             auth: none\n    models:\n      local/llama-3.3-70b:\n        \
+             supported_apis:\n          - {api: openai_compat_chat_completions}\n",
+        )
+        .unwrap();
+
+        // The global override still points every provider at the mock, which
+        // is what lets a SHIPPED model be exercised without a real key.
+        let client = warpllm::Client::new(warpllm::ClientConfig {
+            base_url: Some(upstream.uri()),
+            specs_path: Some(roster),
+            timeout_secs: Some(5),
+            ..Default::default()
+        })
+        .unwrap();
+        let app = router(AppState {
+            client: Arc::new(client),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/v1/chat/completions"))
+            .json(&request_body())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{:?}", response.text().await);
     });
 }

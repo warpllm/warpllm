@@ -226,6 +226,11 @@ fn opinion(error: &Error) -> Opinion {
         Error::StreamStalled { .. } => (Is(504), Some("api_error"), Some("stream_stalled")),
         Error::NotImplemented(_) => (Is(501), Some("api_error"), Some("not_implemented")),
         Error::Internal(_) => (Is(500), Some("server_error"), Some("internal_error")),
+        // The gateway's own configuration, never the caller's payload — so it
+        // sits beside `Internal` at 500 rather than at 400, which would send
+        // someone off to fix a request that was fine. Its own code, because
+        // the remedy is a file the operator can open.
+        Error::InvalidRoster(_) => (Is(500), Some("server_error"), Some("invalid_roster")),
 
         // ------------------------------------ the provider's, normalized
         Error::RateLimited(_) => (

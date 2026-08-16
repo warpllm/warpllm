@@ -189,6 +189,12 @@ cargo run -p warpllm-codegen
 
 ### Adding a provider or model
 
+This section is about the roster warpllm **ships** — a public provider everyone
+gets. If instead you want to reach a model of your own, on your own hardware,
+that is not a contribution at all: write your own roster file and point warpllm
+at it, as [the README](README.md#your-own-models) describes. `specs.yaml` is not
+the place for somebody's localhost.
+
 The common path (if the provider speaks a protocol warpllm already knows), in order:
 
 1.  Add the entry to

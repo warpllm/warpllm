@@ -58,6 +58,14 @@ static OVERRIDES: LazyLock<HashMap<&'static str, &'static dyn ErrorMapper>> = La
 /// A miss is the NORMAL answer, not a failure: most providers speak their
 /// protocol faithfully and inherit it whole, which is what keeps adding one a
 /// roster edit and no Rust.
+///
+/// Keyed on the NAME, which now means a provider from a user's own roster file
+/// can match one of these — somebody who calls their entry `deepseek` gets
+/// DeepSeek's error mapping. That is the right answer rather than a hazard:
+/// they named it that, the overrides describe how a DeepSeek-shaped envelope
+/// reads, and a proxy in front of DeepSeek really does speak it. The
+/// alternative — scoping overrides to the shipped roster — would mean the same
+/// upstream classified two ways depending on which file named it.
 pub(super) fn error_mapper(provider: &str) -> &'static dyn ErrorMapper {
     OVERRIDES.get(provider).copied().unwrap_or(&MatchesProtocol)
 }
@@ -74,7 +82,7 @@ mod tests {
     fn every_override_names_a_provider_the_roster_has() {
         for name in OVERRIDES.keys() {
             assert!(
-                crate::registry::provider(name).is_some(),
+                crate::registry::is_registered(name),
                 "`{name}` has error overrides but is not in specs.yaml — a roster \
                  rename would leave them silently unused"
             );

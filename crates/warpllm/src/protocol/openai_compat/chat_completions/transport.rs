@@ -55,7 +55,7 @@ pub(crate) async fn post(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    auth: &Authenticator,
+    auth: Option<&Authenticator>,
     body: &CreateChatCompletionRequest,
 ) -> Result<Outcome> {
     if body.stream == Some(true) {
@@ -140,7 +140,7 @@ pub(crate) async fn post_stream(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    auth: &Authenticator,
+    auth: Option<&Authenticator>,
     body: &CreateChatCompletionRequest,
     read_timeout: Option<Duration>,
 ) -> Result<StreamOutcome> {
@@ -186,11 +186,16 @@ pub(crate) async fn post_stream(
 /// Azure's OpenAI-compatible endpoints read `api-key`, and a self-hosted one
 /// (#22) may read neither — so the spelling belongs to the provider and this
 /// file states only the path.
+/// `auth` is an [`Option`] because a host may genuinely want nothing: the
+/// roster's `auth: none`, which is what a self-hosted box on a private network
+/// declares. `None` sends the request exactly as built, with no `Authorization`
+/// header rather than an empty one — several OpenAI-compatible servers reject a
+/// bare `Bearer ` outright, so the two are not the same request.
 async fn send(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    auth: &Authenticator,
+    auth: Option<&Authenticator>,
     body: &CreateChatCompletionRequest,
 ) -> Result<reqwest::Response> {
     let request = http
@@ -205,7 +210,11 @@ async fn send(
         // looking at the provider's status page.
         .build()
         .map_err(|e| Error::Internal(format!("could not build the {provider} request: {e}")))?;
-    http.execute(auth.authenticate(request).await?)
+    let request = match auth {
+        Some(auth) => auth.authenticate(request).await?,
+        None => request,
+    };
+    http.execute(request)
         .await
         .map_err(|e| network_error(provider, e))
 }
@@ -371,7 +380,7 @@ mod tests {
             &reqwest::Client::new(),
             "demo",
             &server.uri(),
-            &key(),
+            Some(&key()),
             &CreateChatCompletionRequest::default(),
         )
         .await
@@ -468,7 +477,7 @@ mod tests {
             &reqwest::Client::new(),
             "demo",
             &server.uri(),
-            &key(),
+            Some(&key()),
             &streamed(),
             // Unbounded, which is the default and what every test but the
             // stall one below wants: a mock answers instantly, so a limit
@@ -713,7 +722,7 @@ mod tests {
             &reqwest::Client::new(),
             "demo",
             &format!("http://{addr}"),
-            &key(),
+            Some(&key()),
             &streamed(),
             Some(LIMIT),
         )
@@ -759,7 +768,7 @@ mod tests {
                 &reqwest::Client::new(),
                 "demo",
                 &server.uri(),
-                &key(),
+                Some(&key()),
                 &CreateChatCompletionRequest {
                     stream: body,
                     ..Default::default()
@@ -789,7 +798,7 @@ mod tests {
             &reqwest::Client::new(),
             "demo",
             &server.uri(),
-            &key(),
+            Some(&key()),
             &CreateChatCompletionRequest {
                 stream: Some(true),
                 ..Default::default()
@@ -818,7 +827,7 @@ mod tests {
             &reqwest::Client::new(),
             "demo",
             &format!("{}/", server.uri()),
-            &key(),
+            Some(&key()),
             &CreateChatCompletionRequest::default(),
         )
         .await;

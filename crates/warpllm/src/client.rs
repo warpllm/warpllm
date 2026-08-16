@@ -732,7 +732,7 @@ mod tests {
             let message = err.to_string();
             assert!(message.contains("openia"), "{message}");
             assert!(
-                message.contains("deepseek, kimi, openai, openrouter"),
+                message.contains("deepseek, kimi, openai, opencode, openrouter"),
                 "{message}"
             );
             assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");

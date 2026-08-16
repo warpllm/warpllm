@@ -220,7 +220,7 @@ mod tests {
         let registry = load::load(yaml).unwrap();
         assert_eq!(
             providers(&registry),
-            vec!["deepseek", "kimi", "openai", "openrouter"]
+            vec!["deepseek", "kimi", "openai", "opencode", "openrouter"]
         );
         assert_eq!(
             keys(&registry),
@@ -249,6 +249,22 @@ mod tests {
                 "openai/gpt-5.6-sol",
                 "openai/gpt-5.6-terra",
                 "openai/o3",
+                "opencode/big-pickle",
+                "opencode/deepseek-v4-flash",
+                "opencode/deepseek-v4-flash-free",
+                "opencode/deepseek-v4-pro",
+                "opencode/glm-5.1",
+                "opencode/glm-5.2",
+                "opencode/hy3-free",
+                "opencode/kimi-k2.6",
+                "opencode/kimi-k2.7-code",
+                "opencode/kimi-k3",
+                "opencode/laguna-s-2.1-free",
+                "opencode/mimo-v2.5-free",
+                "opencode/minimax-m2.7",
+                "opencode/minimax-m3",
+                "opencode/nemotron-3-ultra-free",
+                "opencode/nemotron-3.5-lightning-free",
                 "openrouter/anthropic/claude-opus-4",
                 "openrouter/anthropic/claude-sonnet-4",
                 "openrouter/auto",
@@ -438,6 +454,43 @@ mod tests {
             assert!(msg.contains(model_str), "{msg}");
             assert!(msg.contains("no registered model spec"), "{msg}");
         }
+    }
+
+    /// OpenCode Zen is the one provider on the roster serving its catalog
+    /// across FOUR protocols, and only one of them is a surface warpllm has.
+    /// Zen states the endpoint per model and nowhere else — there is nothing
+    /// in a request or a response that says which one a name sits on — so a
+    /// `/responses` or `/messages` model added here would load, lint, pass
+    /// `every_shipped_model_serves_exactly_the_implemented_surfaces`, and then
+    /// send a live, billed request to an endpoint that does not serve it.
+    ///
+    /// This is the only gate on that. It is a prefix check rather than a list
+    /// of the 40-odd names, so a model Zen adds to a family it already serves
+    /// elsewhere is caught without this test being edited.
+    #[test]
+    fn no_opencode_entry_sits_on_a_surface_warpllm_cannot_reach() {
+        // `/zen/v1/responses`: every GPT, plus Grok and Muse.
+        // `/zen/v1/messages`: Claude and Qwen.
+        // `/zen/v1/models/<id>`: Gemini.
+        let elsewhere = ["gpt-", "grok-", "muse-", "claude-", "qwen", "gemini-"];
+        for key in REGISTRY.models.keys() {
+            let Some(name) = key.strip_prefix("opencode/") else {
+                continue;
+            };
+            for prefix in elsewhere {
+                assert!(
+                    !name.starts_with(prefix),
+                    "`{key}`: OpenCode Zen serves `{prefix}…` models on an endpoint \
+                     other than /chat/completions, so this entry would route a paid \
+                     request nowhere. Check the endpoint column of \
+                     <https://opencode.ai/docs/zen/> before registering a Zen model."
+                );
+            }
+        }
+        // The registry is still closed to them by name, the same as any
+        // unlisted model.
+        assert!(fetch_model("opencode/gpt-5-nano").is_err());
+        assert!(fetch_model("opencode/claude-opus-5").is_err());
     }
 
     /// A slash-containing name needs an entry of its own, and the registry

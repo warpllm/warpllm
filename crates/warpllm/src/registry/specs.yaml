@@ -85,6 +85,22 @@
 #                                          <https://platform.kimi.ai/docs/api/chat>,
 #                                          <https://openrouter.ai/docs/api-reference/streaming>
 #                                          (all checked 2026-08-12).
+#
+#                                          `opencode` is the one exception, and
+#                                          it is listed on weaker evidence:
+#                                          Zen's docs describe no request
+#                                          parameter at all, `stream` included.
+#                                          What they do is name
+#                                          `@ai-sdk/openai-compatible` as the
+#                                          client for every model registered
+#                                          here, which is the AI SDK's chat
+#                                          completions binding and streams over
+#                                          SSE — and OpenCode's own agent
+#                                          streams every reply through this
+#                                          endpoint. Inference from the client
+#                                          Zen prescribes, then, rather than a
+#                                          line in its docs (checked
+#                                          2026-08-16).
 #   openai_compat_responses                OpenAI's Responses API. Not
 #                                          implemented yet.
 #
@@ -392,6 +408,135 @@ providers:
         capabilities:
           max_input_tokens: 200000
           max_output_tokens: 100000
+
+  # <https://opencode.ai/docs/zen/> (checked 2026-08-16). An aggregator, and
+  # the only one on this roster that does not serve its whole catalog over one
+  # protocol: Zen publishes an endpoint PER MODEL, and the four it uses are
+  # `/chat/completions`, `/responses`, `/messages`, and Google's
+  # `/models/<id>`. Only the first is a surface warpllm implements, so this
+  # provider is the models sitting on it and nothing else. Every entry below
+  # was checked against the endpoint column of that page's model table, which
+  # is the only place Zen states it.
+  #
+  # `OPENCODE_API_KEY`, sent as a bearer token. Zen is a real key-authenticated
+  # API and not only a TUI integration: the docs say to copy the key out of the
+  # dashboard, and `/connect` merely stores that same key for the terminal app.
+  # Sending a bad one to `/chat/completions` gets HTTP 401 and
+  # `{"error":{"type":"AuthError","message":"Invalid API key."}}`.
+  #
+  # The Zen page never names the variable. `models.dev` does, and it is the
+  # registry OpenCode itself reads to configure this provider — `env:
+  # [OPENCODE_API_KEY]`, `api: https://opencode.ai/zen/v1`, both matching the
+  # two lines below exactly. <https://models.dev/api.json>, key `opencode`.
+  #
+  # A `-free` suffix is part of the name Zen serves, not a flag — those models
+  # are billed at nothing during a beta evaluation window, and Zen may
+  # withdraw one when the window closes.
+  #
+  # No `capabilities` on any entry below, and that is the docs rather than an
+  # oversight: Zen publishes a price per model and nothing else — no context
+  # window, no output ceiling, no concurrency. Every model here is re-hosted,
+  # so the original provider's figures are not Zen's to promise, the same
+  # reasoning the `openrouter/` note below spells out.
+  #
+  # `models.dev` DOES carry a window and an output ceiling per Zen model, and
+  # they are deliberately not copied here. It records one figure per HOST, and
+  # the hosts disagree enormously — `glm-5.2` alone spans 200,000 to 1,048,576
+  # of context and 16,384 to 1,048,576 of output across the providers it lists,
+  # so a figure filed under `opencode` is that registry's claim about Zen and
+  # not Zen's about itself. It is also not a liveness signal: it still lists
+  # `glm-5`, `kimi-k2.5` and `minimax-m2.5`, all retired below, along with two
+  # dozen more Zen no longer serves. Good for `env:` and `api:`, which are
+  # facts about reaching the host; not good enough for a number a caller sizes
+  # a prompt against.
+  #
+  # Deliberately absent, all checked 2026-08-16 against the same table:
+  # - Every GPT model, and Grok and Muse with them — 24 names Zen serves at
+  #   `/zen/v1/responses`. That is `openai_compat_responses`, which warpllm
+  #   does not implement, so an entry for one would load and then refuse every
+  #   request routed to it. Same reason `openai/gpt-5-pro` is missing above.
+  # - The Claude and Qwen models, at `/zen/v1/messages`, and the Gemini
+  #   models, at `/zen/v1/models/<id>`. Neither protocol has an `api:` on this
+  #   roster at all.
+  # - OpenCode Go, the cheaper plan reached at `/zen/go/v1/…` with a catalog
+  #   of its own. A second base URL is a second provider entry, not a variant
+  #   of this one. <https://opencode.ai/docs/go/>
+  # - `glm-5` (deprecated 2026-05-14), `kimi-k2.5` and `minimax-m2.5` (both
+  #   2026-08-05). Zen serves chat completions for all three and still returns
+  #   them from `GET /zen/v1/models`, which is exactly why the model table is
+  #   not enough to check an entry against: the DEPRECATED MODELS section
+  #   further down that same page is the only place the dates appear, and all
+  #   three had already passed when this provider was added. Their live
+  #   successors — `glm-5.2`, `kimi-k3`, `minimax-m3` — are registered above.
+  opencode:
+    base_url: "https://opencode.ai/zen/v1"
+    env_api_key: OPENCODE_API_KEY
+    models:
+      # Zen's own unbranded model, listed with no upstream attributed to it.
+      opencode/big-pickle:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/deepseek-v4-flash:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/deepseek-v4-flash-free:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/deepseek-v4-pro:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/glm-5.1:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/glm-5.2:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/hy3-free:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/kimi-k2.6:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/kimi-k2.7-code:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/kimi-k3:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/laguna-s-2.1-free:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/mimo-v2.5-free:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/minimax-m2.7:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/minimax-m3:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/nemotron-3-ultra-free:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/nemotron-3.5-lightning-free:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
 
   # <https://openrouter.ai/docs/api-reference> (checked 2026-08-06).
   #

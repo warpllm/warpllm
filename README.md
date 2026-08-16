@@ -95,6 +95,7 @@ the provider needs and change the model string. Nothing else moves.
 | `openai/gpt-5-nano` | `OPENAI_API_KEY` |
 | `deepseek/deepseek-v4-flash` | `DEEPSEEK_API_KEY` |
 | `kimi/kimi-k3` | `MOONSHOT_API_KEY` |
+| `opencode/glm-5.2` | `OPENCODE_API_KEY` |
 | `openrouter/anthropic/claude-sonnet-4` | `OPENROUTER_API_KEY` |
 
 The `provider/` prefix is required. warpllm matches the whole string against its

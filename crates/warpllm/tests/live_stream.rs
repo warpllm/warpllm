@@ -35,9 +35,29 @@ use warpllm::{
 /// `max_completion_tokens`, while the others still take `max_tokens`. warpllm
 /// passes either through untouched rather than translating between them, so
 /// the caller is what has to know, and here that is this table.
-const MODELS: [(&str, &str); 3] = [
+///
+/// `opencode` earns its row for a reason the others do not need: every other
+/// provider here documents `stream` on the endpoint, and Zen documents no
+/// request parameter at all. Its streaming surface was registered on inference
+/// from the client Zen prescribes — `@ai-sdk/openai-compatible` — so this is
+/// the only place that claim meets the wire.
+///
+/// It is a `-free` model, and the only row here that is. Zen bills per request
+/// and refuses a paid model OUTRIGHT when the account carries no payment
+/// method — `CreditsError` at HTTP 401, not a warning — so a paid pick would
+/// leave a contributor holding a perfectly good `OPENCODE_API_KEY` watching
+/// this fail for a reason that is not warpllm's.
+///
+/// The free tier's own cost is a per-model `FreeUsageLimitError`, generous
+/// enough for the one request per run this makes but not for a burst. Two
+/// consequences worth knowing before changing this line: a rerun in quick
+/// succession can 429, and Zen may withdraw a free model when its evaluation
+/// window closes. Both surface as this test naming the model it failed on,
+/// which is why the name is printed rather than only asserted.
+const MODELS: [(&str, &str); 4] = [
     ("openai/gpt-5-nano", "max_completion_tokens"),
     ("deepseek/deepseek-v4-flash", "max_tokens"),
+    ("opencode/laguna-s-2.1-free", "max_tokens"),
     (
         "openrouter/~deepseek/deepseek-v4-flash-latest",
         "max_tokens",

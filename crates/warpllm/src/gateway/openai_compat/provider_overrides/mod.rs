@@ -67,7 +67,7 @@ mod tests {
     fn every_override_names_a_provider_the_roster_has() {
         for name in OVERRIDES.keys() {
             assert!(
-                crate::registry::is_registered(name),
+                crate::registry::provider(name).is_some(),
                 "`{name}` has error overrides but is not in specs.yaml — a roster \
                  rename would leave them silently unused"
             );

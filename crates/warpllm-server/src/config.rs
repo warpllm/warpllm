@@ -47,14 +47,20 @@ pub fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli, String> {
 }
 
 impl ServerConfig {
-    /// No key is set here: the client resolves one per request from the routed
-    /// provider's env var (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, …), and
-    /// `base_url` stays absent so every provider talks to its own API.
+    /// No key is set here: the client reads one per provider from the
+    /// environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, …) when it is built,
+    /// and `base_url` stays absent so every provider talks to its own API.
+    ///
+    /// `providers` stays absent too, so the gateway serves warpllm's whole
+    /// roster. Narrowing it is a client-side capability the gateway does not
+    /// expose today — a key on the command line would sit in `ps` for a
+    /// benefit the environment already provides.
     pub fn client_config(&self) -> ClientConfig {
         ClientConfig {
             base_url: None,
             timeout_secs: Some(self.timeout_secs),
             stream_read_timeout_secs: self.stream_read_timeout_secs,
+            providers: None,
         }
     }
 }

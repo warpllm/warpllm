@@ -13,7 +13,7 @@ pub mod protocol;
 pub mod types;
 
 pub use client::{ChatCompletionStream, Client};
-pub use config::ClientConfig;
+pub use config::{ClientConfig, ProviderConfig};
 pub use error::{Error, Origin, Result};
 /// The gateway's canonical form for an upstream failure — the error-side
 /// counterpart to the request and response forms, and the payload every

@@ -195,6 +195,17 @@ fn opinion(error: &Error) -> Opinion {
             Some("invalid_request_error"),
             Some("invalid_request"),
         ),
+        // Beside InvalidModel, its nearest sibling: warpllm will not route
+        // this string, and the fix is in the request or in the deployment's
+        // configuration. Deliberately NOT 401 — a caller told to check their
+        // credentials for a provider they chose not to serve is the exact
+        // confusion this variant exists to prevent — and not 404, which on a
+        // gateway reads as "no such endpoint".
+        Error::ProviderNotDeclared { .. } => (
+            Is(400),
+            Some("invalid_request_error"),
+            Some("provider_not_declared"),
+        ),
         // OpenAI answers a missing or unusable key the same way, so this one
         // does have a spelling to borrow.
         Error::MissingApiKey { .. } => (

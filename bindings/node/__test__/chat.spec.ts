@@ -332,3 +332,45 @@ test('an undecodable event ends the stream as a typed error', async () => {
     }
   }).rejects.toBeInstanceOf(APIError)
 })
+
+// ---------------------------------------------------------- declared providers
+
+test('declaring providers narrows what this client routes', async () => {
+  // Set precisely so a client checking credentials first would answer the
+  // wrong question: the deepseek key is right there, and deliberately unused.
+  process.env.DEEPSEEK_API_KEY = 'sk-test-deepseek'
+  const narrowed = new WarpLLM({
+    baseUrl: server.url,
+    timeout: 5,
+    providers: { openai: {} },
+  })
+
+  const err = await narrowed
+    .chatCompletions(request('deepseek/deepseek-v4-flash'))
+    .catch((e: unknown) => e)
+
+  expect(err).toBeInstanceOf(BadRequestError)
+  expect((err as APIError).status).toBe(400)
+  expect((err as APIError).code).toBe('provider_not_declared')
+  expect(server.requests).toHaveLength(0)
+})
+
+test('an inline key authenticates a provider the environment cannot', async () => {
+  delete process.env.OPENAI_API_KEY
+  server.respondWith(200, OPENAI_COMPLETION)
+  const configured = new WarpLLM({
+    baseUrl: server.url,
+    timeout: 5,
+    providers: { openai: { apiKey: 'sk-from-the-config' } },
+  })
+
+  await configured.chatCompletions(request())
+
+  expect(server.requests[0].headers.authorization).toBe('Bearer sk-from-the-config')
+})
+
+test('an unknown declared provider throws from the constructor', () => {
+  expect(
+    () => new WarpLLM({ baseUrl: server.url, timeout: 5, providers: { openia: {} } }),
+  ).toThrow(/openia/)
+})

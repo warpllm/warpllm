@@ -95,12 +95,48 @@ impl JsonChatStream {
 mod tests {
     use super::*;
 
+    /// Every construction here reads the environment, so it holds temp-env's
+    /// lock — see [`crate::credentials::with_env`].
+    fn json_client(config_json: &str) -> Result<JsonClient> {
+        crate::credentials::with_env(&[], || JsonClient::new(config_json))
+    }
+
     #[test]
     fn invalid_config_is_a_core_error() {
-        let error = JsonClient::new(r#"{"unknown": true}"#)
+        let error = json_client(r#"{"unknown": true}"#)
             .err()
             .expect("invalid configuration should fail");
         assert!(matches!(error, Error::InvalidInput(_)));
+    }
+
+    /// A declaration narrows the JSON boundary exactly as it narrows Rust's,
+    /// which is what lets both bindings inherit the behaviour from here rather
+    /// than each reimplementing it.
+    #[tokio::test]
+    async fn a_declaration_narrows_the_json_boundary_too() {
+        let client = json_client(r#"{"providers":{"openai":{"api_key":"sk-x"}}}"#).unwrap();
+        let error = client
+            .chat_completions(r#"{"model":"deepseek/deepseek-v4-flash","messages":[]}"#)
+            .await
+            .expect_err("this client does not serve deepseek");
+        assert!(
+            matches!(&error, Error::ProviderNotDeclared { provider, .. } if *provider == "deepseek"),
+            "{error:?}"
+        );
+        assert_eq!(error.to_openai().status, Some(400));
+    }
+
+    /// A misspelled provider fails where it was written, at construction —
+    /// the bindings raise on the constructor rather than on a later request.
+    #[test]
+    fn an_unknown_declared_provider_is_a_core_error() {
+        let error = json_client(r#"{"providers":{"openia":{}}}"#)
+            .err()
+            .expect("the roster has no `openia`");
+        assert!(
+            matches!(&error, Error::InvalidInput(m) if m.contains("openia")),
+            "{error:?}"
+        );
     }
 
     /// `chat_completions` returns one whole reply, which is a shape chunks do
@@ -113,7 +149,7 @@ mod tests {
     /// `chat_completions_stream`, which it could not before.
     #[tokio::test]
     async fn stream_true_is_refused_and_names_the_streaming_method() {
-        let client = JsonClient::new("{}").unwrap();
+        let client = json_client("{}").unwrap();
         let error = client
             .chat_completions(r#"{"model":"openai/gpt-5.6","messages":[],"stream":true}"#)
             .await
@@ -132,7 +168,7 @@ mod tests {
     /// anything reaches the roster or the network.
     #[tokio::test]
     async fn a_malformed_request_body_is_invalid_input_on_both_entrypoints() {
-        let client = JsonClient::new("{}").unwrap();
+        let client = json_client("{}").unwrap();
         assert!(matches!(
             client.chat_completions("not json").await,
             Err(Error::InvalidInput(_))
@@ -147,7 +183,7 @@ mod tests {
     /// too — an unregistered name never opens a socket.
     #[tokio::test]
     async fn an_unregistered_model_never_opens_a_stream() {
-        let client = JsonClient::new("{}").unwrap();
+        let client = json_client("{}").unwrap();
         let error = client
             .chat_completions_stream(r#"{"model":"openai/not-a-model","messages":[]}"#)
             .await

@@ -8,6 +8,42 @@ Versions follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a breaking change bumps the MINOR number: `0.1.x` and `0.2.x` are
 incompatible, and `^0.1` will not upgrade you into one.
 
+## [Unreleased]
+
+### Added
+
+- A client can declare the providers it serves. `ClientConfig.providers` in
+  Rust, `providers=` in Python, `providers:` in TypeScript — a map keyed by
+  registry name, each entry optionally carrying an `api_key`.
+
+  ```python
+  WarpLLM(providers={"openai": {}, "deepseek": {"api_key": "sk-..."}})
+  ```
+
+  It narrows two things at once. Only the declared providers' environment
+  variables are read, so a key exported for something else is not quietly
+  adopted; and only the declared providers are routable, so a request for a
+  model under one you did not name is refused before any upstream call, with a
+  new `provider_not_declared` error rather than the missing-credential error
+  that would have sent you after a key you deliberately withheld.
+
+  An inline `api_key` is for callers holding keys somewhere the process
+  environment cannot reach — a secret manager, a per-tenant database row. It
+  wins over the variable the roster names, and it can authenticate a provider
+  whose roster entry names no variable at all, which was previously impossible.
+
+  A provider name the roster does not hold fails when the client is built, not
+  at the request that happened to route there.
+
+### Changed
+
+- **Source-breaking for Rust only.** `ClientConfig` gained a field, so an
+  exhaustive struct literal no longer compiles; add `providers: None` or switch
+  to `..Default::default()`. Nothing else changes: a client that leaves
+  `providers` alone behaves exactly as before, reading the whole roster's
+  variables and routing to all of it. Python and TypeScript are purely
+  additive — the new argument is optional in both.
+
 ## [0.3.1] - 2026-08-13
 
 Nothing in any of the three packages changed. 0.3.0 reached crates.io and PyPI

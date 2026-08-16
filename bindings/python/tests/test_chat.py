@@ -1,5 +1,6 @@
 import asyncio
 import time
+from types import MappingProxyType
 
 import pytest
 from pytest_httpserver import HTTPServer
@@ -420,3 +421,81 @@ def test_an_undecodable_event_ends_the_stream_as_a_typed_error(
     stream = client.chat_completions(request(stream=True))
     with pytest.raises(APIError):
         list(stream)
+
+
+def test_declared_providers_narrow_what_this_client_routes(
+    base_url: str, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+):
+    """A model under an undeclared provider is refused before any request
+    goes out -- with a 400 about the configuration, not the 401 a missing
+    credential would give. The deepseek key is set precisely so that a client
+    checking credentials first would answer the wrong question.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-deepseek")
+    client = WarpLLM(base_url=base_url, timeout=5, providers={"openai": {}})
+
+    with pytest.raises(BadRequestError) as exc_info:
+        client.chat_completions(request(model="deepseek/deepseek-v4-flash"))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.code == "provider_not_declared"
+    assert httpserver.log == [], "nothing should have reached an upstream"
+
+
+def test_an_inline_key_reaches_the_upstream_request(
+    base_url: str, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch,
+    openai_completion_body: dict,
+):
+    """The point of carrying a key in the config: it authenticates a provider
+    whose environment variable is not set at all.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    httpserver.expect_request("/chat/completions").respond_with_json(
+        openai_completion_body
+    )
+    client = WarpLLM(
+        base_url=base_url,
+        timeout=5,
+        providers={"openai": {"api_key": "sk-from-the-config"}},
+    )
+
+    client.chat_completions(request())
+
+    sent = httpserver.log[0][0]
+    assert sent.headers["Authorization"] == "Bearer sk-from-the-config"
+
+
+def test_an_unknown_declared_provider_raises_at_construction(
+    base_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    """A misspelling is wrong where it is written, not at the request that
+    happened to route there -- and the message hands back the roster.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
+
+    with pytest.raises(BadRequestError, match="openia"):
+        WarpLLM(base_url=base_url, timeout=5, providers={"openia": {}})
+
+
+def test_providers_accepts_any_mapping_not_only_a_dict(
+    base_url: str, monkeypatch: pytest.MonkeyPatch
+):
+    """The parameter is typed `Mapping`, so a read-only one has to work.
+
+    `json.dumps` serializes only a real dict, which is why every request on
+    this boundary is materialized with `dict()` before it crosses. The config
+    needs the same materialization, or a valid argument raises a raw
+    `TypeError` before reaching Rust.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
+
+    client = WarpLLM(
+        base_url=base_url,
+        timeout=5,
+        providers=MappingProxyType({"openai": {}}),
+    )
+
+    # And it really narrowed, rather than being dropped on the way across.
+    with pytest.raises(BadRequestError, match="not declared"):
+        client.chat_completions(request(model="deepseek/deepseek-v4-flash"))

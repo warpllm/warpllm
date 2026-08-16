@@ -41,6 +41,31 @@ pub enum Error {
         /// bindings receive has no field to put a variable name in.
         env_var: Option<&'static str>,
     },
+    /// The routed provider is not one this client declared, so nothing routes
+    /// to it here — whatever the roster says about it.
+    ///
+    /// Distinct from [`InvalidModel`](Self::InvalidModel), which means warpllm
+    /// serves no such model anywhere, and from
+    /// [`MissingApiKey`](Self::MissingApiKey), which means the provider IS
+    /// served here and has no credential. Both of those remedies would be
+    /// wrong advice: there is nothing to spell differently and nothing to
+    /// export. What is wrong is the client's declaration, or the model string
+    /// aimed at it.
+    ///
+    /// Only a client that declared
+    /// [`ClientConfig::providers`](crate::ClientConfig::providers) can produce
+    /// this. Leaving that field absent leaves the whole roster routable, which
+    /// is what every client did before it existed.
+    #[error(
+        "{provider} is not declared on this client: add it to `providers` in the client \
+         configuration, or route {requested} to a provider that is"
+    )]
+    ProviderNotDeclared {
+        provider: &'static str,
+        /// The caller's own routing string, quoted back so the message names
+        /// what was typed rather than only the provider it resolved to.
+        requested: String,
+    },
     /// The provider was never reached, so it never had a chance to answer.
     #[error("network error talking to {provider}: {source}")]
     Network {
@@ -187,7 +212,7 @@ fn missing_api_key_message(provider: &str, env_var: Option<&str>) -> String {
         Some(var) => format!("missing API key for {provider}: set the {var} environment variable"),
         None => format!(
             "missing API key for {provider}: its registry entry names no environment variable \
-             to read one from"
+             to read one from, so declare it under `providers` with an `api_key` instead"
         ),
     }
 }
@@ -203,6 +228,7 @@ impl Error {
             Error::InvalidInput(_)
             | Error::InvalidModel { .. }
             | Error::MissingApiKey { .. }
+            | Error::ProviderNotDeclared { .. }
             // Network and Decode name a provider but are NOT its failures:
             // one never reached it, the other means it answered with a
             // success warpllm could not read. Neither is something the
@@ -262,6 +288,7 @@ impl Error {
         match self {
             Error::InvalidInput(_) | Error::InvalidModel { .. } => "invalid_request",
             Error::MissingApiKey { .. } => "missing_api_key",
+            Error::ProviderNotDeclared { .. } => "provider_not_declared",
             Error::Network { .. } => "connection_error",
             Error::Decode { .. } => "decode_error",
             Error::StreamTruncated { .. } => "stream_truncated",
@@ -455,6 +482,14 @@ mod tests {
                 401,
                 "invalid_request_error",
             ),
+            (
+                Error::ProviderNotDeclared {
+                    provider: "deepseek",
+                    requested: "deepseek/deepseek-v4-flash".into(),
+                },
+                400,
+                "invalid_request_error",
+            ),
             (Error::NotImplemented("streaming"), 501, "api_error"),
             (Error::Internal("tls".into()), 500, "server_error"),
         ];
@@ -463,6 +498,44 @@ mod tests {
             assert_eq!(rendered.status, Some(status), "{error:?}");
             assert_eq!(rendered.error.error_type, error_type, "{error:?}");
         }
+    }
+
+    /// An undeclared provider and a missing key are the two failures most
+    /// easily mistaken for each other, and the wire has to keep them apart:
+    /// one is answered by editing the client's configuration, the other by
+    /// exporting a variable. A caller sent after a credential they already
+    /// hold and deliberately withheld has been told the wrong thing.
+    ///
+    /// This is also the only guard on the mapping itself. `opinion` ends in a
+    /// catch-all arm, so a variant left out of it does not fail to compile —
+    /// it renders with a null status and nobody hears about it until a caller
+    /// does.
+    #[test]
+    fn an_undeclared_provider_is_not_a_missing_key_on_the_wire() {
+        let undeclared = wire(&Error::ProviderNotDeclared {
+            provider: "deepseek",
+            requested: "deepseek/deepseek-v4-flash".into(),
+        });
+        let unauthenticated = wire(&Error::MissingApiKey {
+            provider: "deepseek",
+            env_var: Some("DEEPSEEK_API_KEY"),
+        });
+
+        assert_eq!(undeclared["status"], 400, "the configuration is wrong");
+        assert_eq!(unauthenticated["status"], 401, "the credential is missing");
+        assert_ne!(
+            undeclared["error"]["code"],
+            unauthenticated["error"]["code"]
+        );
+        // The routing string the caller typed, so the message names what they
+        // wrote rather than only the provider it resolved to.
+        assert!(
+            undeclared["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("deepseek/deepseek-v4-flash"),
+            "{undeclared}"
+        );
     }
 
     /// The two ways a stream dies badly, told apart on the wire.
@@ -520,6 +593,10 @@ mod tests {
                 provider: "openai",
                 env_var: None,
             },
+            Error::ProviderNotDeclared {
+                provider: "openai",
+                requested: "openai/gpt-5.6".into(),
+            },
             Error::Decode {
                 provider: "openai",
                 message: "x".into(),
@@ -576,6 +653,11 @@ mod tests {
             Error::MissingApiKey {
                 provider: "openai",
                 env_var: None,
+            }
+            .code(),
+            Error::ProviderNotDeclared {
+                provider: "openai",
+                requested: "openai/gpt-5.6".into(),
             }
             .code(),
             Error::Decode {

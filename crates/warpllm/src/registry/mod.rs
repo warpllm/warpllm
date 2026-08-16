@@ -102,16 +102,19 @@ pub(crate) fn providers() -> impl Iterator<Item = &'static ProviderSpec> {
     REGISTRY.providers.values()
 }
 
-/// Whether the roster holds a provider under this exact name.
+/// The roster's row for this provider, by bare name.
 ///
-/// Test-only, and that is the point: nothing at runtime should reach a
-/// provider by bare name — [`fetch_model`] hands back the spec. This exists
-/// so a table keyed by provider name, like the per-provider error overrides,
-/// can be checked against the roster rather than silently never matching
-/// after a rename.
-#[cfg(test)]
-pub(crate) fn is_registered(provider: &str) -> bool {
-    REGISTRY.providers.contains_key(provider)
+/// The one lookup that starts from a provider rather than from a model.
+/// [`fetch_model`] is still how a REQUEST reaches a provider — nothing routes
+/// on a bare name, and no guess is made from one. This answers the other
+/// question: a client declaring which providers it serves names them directly,
+/// and the declaration has to be checked against the roster that will serve it.
+///
+/// Not public, for the reason [`providers`] is not: the shipped list would
+/// become an API that could not gain an entry without a semver argument. A
+/// caller states a name and hears whether it worked.
+pub(crate) fn provider(name: &str) -> Option<&'static ProviderSpec> {
+    REGISTRY.providers.get(name)
 }
 
 /// The model row filed under `model_str`, and the provider row it names.
@@ -284,6 +287,33 @@ mod tests {
         assert_eq!(provider.env_api_key(), Some("OPENROUTER_API_KEY"));
         assert!(model.supports_api(Api::OpenAiCompatChatCompletions));
         assert_eq!(model.model(), "anthropic/claude-sonnet-4");
+    }
+
+    /// Every provider the roster holds is reachable by its bare name, and
+    /// hands back the same row `fetch_model` routes through — one roster, not
+    /// two ways of reading it.
+    #[test]
+    fn every_roster_name_resolves_to_its_own_spec() {
+        // Qualified: this module's `providers` is shadowed in here by the
+        // `testing` helper of the same name, which reads a fixture registry.
+        for spec in super::providers() {
+            let found = provider(spec.name()).expect("a roster name resolves");
+            assert!(
+                std::ptr::eq(found, spec),
+                "`{}` got a second copy of its provider row",
+                spec.name()
+            );
+        }
+    }
+
+    /// A bare name is matched as exactly as a model key is: no case folding,
+    /// no prefix, no guess. A declaration naming `OpenAI` is a typo and has to
+    /// hear so.
+    #[test]
+    fn a_name_the_roster_does_not_hold_resolves_to_nothing() {
+        for unheld in ["openia", "OpenAI", "openai/", "", "*"] {
+            assert!(provider(unheld).is_none(), "`{unheld}`");
+        }
     }
 
     /// OpenRouter's slugs are two segments (`anthropic/claude-sonnet-4`), and

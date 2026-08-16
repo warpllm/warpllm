@@ -101,6 +101,35 @@ The `provider/` prefix is required. warpllm matches the whole string against its
 roster, so a bare `gpt-5-nano` — or any name it doesn't know — is an error
 rather than a guess at an upstream default.
 
+### Narrowing a client to the providers it serves
+
+By default a client serves the whole roster and reads every provider's variable.
+Declare the ones you mean and it reads no others, routes to no others, and takes
+a key directly for the callers who keep theirs somewhere the environment can't
+reach:
+
+```python
+WarpLLM(providers={"openai": {}, "deepseek": {"api_key": "sk-..."}})
+```
+
+```ts
+new WarpLLM({ providers: { openai: {}, deepseek: { apiKey: 'sk-...' } } })
+```
+
+```rust
+ClientConfig {
+    providers: Some(BTreeMap::from([
+        ("openai".into(), ProviderConfig::default()),
+        ("deepseek".into(), ProviderConfig { api_key: Some(key) }),
+    ])),
+    ..Default::default()
+}
+```
+
+An empty entry means "serve this one, key from the environment". A request for a
+model under a provider you didn't declare is refused before any upstream call,
+and a provider name the roster doesn't hold fails when the client is built.
+
 Runnable versions of all three, with comments, are in
 [`examples/`](examples/).
 

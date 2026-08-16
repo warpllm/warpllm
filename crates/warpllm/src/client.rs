@@ -9,7 +9,7 @@ use crate::gateway::openai_compat;
 use crate::protocol::openai_compat::chat_completions::types::{
     CreateChatCompletionRequest, CreateChatCompletionResponse, CreateChatCompletionStreamResponse,
 };
-use crate::registry::{ModelSpec, ProviderSpec, fetch_model};
+use crate::registry::{self, ModelSpec, ProviderSpec, fetch_model};
 use crate::types::Api;
 
 pub struct Client {
@@ -18,35 +18,98 @@ pub struct Client {
     credentials: Credentials,
 }
 
+/// Everything one validated request needs to reach its model: where to send it,
+/// what the model is called upstream, and what to authenticate with.
+///
+/// A struct rather than a tuple, because both call sites read all three by
+/// name and a fourth would otherwise renumber them.
+struct ModelDefinition<'a> {
+    provider: &'static ProviderSpec,
+    model: &'static ModelSpec,
+    api_key: &'a str,
+}
+
 impl Client {
-    /// Reads the environment once and keeps the providers it can authenticate.
+    /// Resolves the providers this client can authenticate, once.
     ///
     /// Constructing a client still never *requires* credentials: an environment
     /// holding none builds a client that reaches no provider, and each request
     /// says which variable it wanted. What construction does is answer that
     /// question up front, so it can be logged at the moment a caller is set up
     /// to read it rather than discovered one failed request at a time.
+    ///
+    /// A declaration is checked here for the same reason, one step earlier: a
+    /// misspelled provider is wrong the moment it is written, and is not a
+    /// condition to discover at request time.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] if
+    /// [`ClientConfig::providers`] names a provider the roster does not hold.
     pub fn new(config: ClientConfig) -> Result<Self> {
+        // Before the transport: a caller's spelling mistake should not be
+        // reported after, or masked by, a TLS-init failure.
+        Self::validate_declarations(&config)?;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(
                 config.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
             ))
             .build()
             .map_err(|e| Error::Internal(e.to_string()))?;
+        let credentials = Credentials::resolve(config.providers.as_ref());
         Ok(Self {
             http,
             config,
-            credentials: Credentials::from_env(),
+            credentials,
         })
+    }
+
+    /// Every declared name is one the roster holds.
+    ///
+    /// A client that accepted a misspelling would go on refusing perfectly
+    /// good requests for a provider it believed it did not serve, pointing at
+    /// the configuration rather than at the typo in it. It is also what lets
+    /// [`Credentials::resolve`] look a declared name up without a fallible
+    /// path — nothing downstream has to re-ask this question.
+    ///
+    /// The message LISTS the roster, because the caller cannot: the registry
+    /// is private by design, the list is short, and the failure is nearly
+    /// always a spelling. Diagnostic text, not an API.
+    fn validate_declarations(config: &ClientConfig) -> Result<()> {
+        let Some(declared) = &config.providers else {
+            return Ok(());
+        };
+        // An empty declaration is legal and almost certainly a mistake — it is
+        // what a caller building the map from an empty list produces, and it
+        // reaches nothing. Refusing it would make `providers: their_list` fail
+        // where the equivalent `None` succeeds by accident, so it warns
+        // instead, beside the "no keys" warning `resolve` may be about to log.
+        if declared.is_empty() {
+            tracing::warn!(
+                "`providers` is declared and empty, so no request can be routed; \
+                 leave it absent to serve warpllm's whole roster"
+            );
+        }
+        // BTreeMap, so the name reported first is the first alphabetically
+        // rather than the first a hash seed happened to yield.
+        for name in declared.keys() {
+            if registry::provider(name).is_none() {
+                let mut known: Vec<&str> = registry::providers().map(ProviderSpec::name).collect();
+                known.sort_unstable();
+                return Err(Error::InvalidInput(format!(
+                    "providers: `{name}` is not a provider warpllm serves; the roster has {}",
+                    known.join(", ")
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Serves one OpenAI-compatible chat completion.
     ///
-    /// A request is admitted only when BOTH halves hold: the roster registers
-    /// the model, and this client holds a key for the provider serving it. They
-    /// are checked in that order deliberately — a name nothing registers is a
-    /// typo, and hearing "set `DEEPSEEK_API_KEY`" for `deepseek/typo` would send
-    /// someone after a credential they already have.
+    /// Validation is [`Client::validate`]'s, which is where the order of the
+    /// checks and the reason for it are written down. This entrypoint differs
+    /// from the streaming one only in the surface it asks about.
     pub async fn chat_completions(
         &self,
         request: CreateChatCompletionRequest,
@@ -60,17 +123,11 @@ impl Client {
             ));
         }
         let requested_model = request.model.clone();
-        // Half one: the roster. Closed, so an unregistered name stops here.
-        let (provider, model) = fetch_model(&requested_model)?;
-        Self::validate_api(
-            model,
-            Api::OpenAiCompatChatCompletions,
+        let ModelDefinition {
             provider,
-            &requested_model,
-        )?;
-        // Half two: this client. A registered model whose provider was not
-        // authenticated at construction never reaches the network.
-        let api_key = self.api_key(provider)?;
+            model,
+            api_key,
+        } = self.validate(&requested_model, Api::OpenAiCompatChatCompletions)?;
 
         // Ingest answers to the protocol warpllm was CALLED with, which is
         // openai_compat and only ever will be for this entrypoint. The ENTRY's
@@ -99,10 +156,9 @@ impl Client {
 
     /// Serves one OpenAI-compatible chat completion as a stream of chunks.
     ///
-    /// The same two admission halves as [`Client::chat_completions`], in the
-    /// same order, against a DIFFERENT surface: streaming is its own entry in
-    /// the roster, so a model that serves whole replies says nothing about
-    /// whether it serves streamed ones.
+    /// The same validation as [`Client::chat_completions`], against a DIFFERENT
+    /// surface: streaming is its own entry in the roster, so a model that
+    /// serves whole replies says nothing about whether it serves streamed ones.
     ///
     /// `stream` is set on the caller's behalf rather than required: the method
     /// name already states the intent, and a request that contradicts it would
@@ -116,14 +172,11 @@ impl Client {
     ) -> Result<ChatCompletionStream> {
         request.stream = Some(true);
         let requested_model = request.model.clone();
-        let (provider, model) = fetch_model(&requested_model)?;
-        Self::validate_api(
-            model,
-            Api::OpenAiCompatChatCompletionsStream,
+        let ModelDefinition {
             provider,
-            &requested_model,
-        )?;
-        let api_key = self.api_key(provider)?;
+            model,
+            api_key,
+        } = self.validate(&requested_model, Api::OpenAiCompatChatCompletionsStream)?;
 
         let normalized =
             openai_compat::api::chat_completions::ingest_request(request, model.model());
@@ -142,6 +195,60 @@ impl Client {
             provider: provider.name(),
             model: requested_model,
         })
+    }
+
+    /// The whole validation sequence, in the one order that keeps each refusal
+    /// about the thing that is actually wrong.
+    ///
+    /// FOUR gates, coarse to fine: the roster registers the name, this client
+    /// serves the provider, the model serves the surface, and the client holds
+    /// a key. The order is the design.
+    ///
+    /// The roster comes first because a name nothing registers is a typo, and
+    /// hearing "declare deepseek" or "set `DEEPSEEK_API_KEY`" for
+    /// `deepseek/typo` would send someone after a configuration edit or a
+    /// credential they already have.
+    ///
+    /// The declaration comes before the key, and that is load-bearing rather
+    /// than tidy: a provider left undeclared holds no key HERE by construction,
+    /// so a key check reached first would report a missing credential for one
+    /// the caller has and deliberately withheld.
+    ///
+    /// One helper rather than the sequence written twice, because the two
+    /// entrypoints differ in exactly one argument — and a fifth gate added to
+    /// one copy and not the other is a hole nothing would catch.
+    fn validate(&self, requested: &str, api: Api) -> Result<ModelDefinition<'_>> {
+        let (provider, model) = fetch_model(requested)?;
+        self.validate_declared(provider, requested)?;
+        Self::validate_api(model, api, provider, requested)?;
+        Ok(ModelDefinition {
+            provider,
+            model,
+            api_key: self.api_key(provider)?,
+        })
+    }
+
+    /// Whether this client serves the routed provider at all.
+    ///
+    /// An absent [`ClientConfig::providers`] is NO OPINION, not an empty list:
+    /// the whole roster stays routable, which is what every client did before
+    /// the field existed and what makes declaring purely opt-in. The [`Option`]
+    /// is the entire mechanism keeping "I did not say" apart from "I said
+    /// none".
+    ///
+    /// Read from the config per request rather than precomputed onto the
+    /// client: it is a lookup over a handful of entries, invisible beside an
+    /// HTTP request, and it keeps one source of truth instead of derived state
+    /// to hold in step.
+    fn validate_declared(&self, provider: &'static ProviderSpec, requested: &str) -> Result<()> {
+        match &self.config.providers {
+            None => Ok(()),
+            Some(declared) if declared.contains_key(provider.name()) => Ok(()),
+            Some(_) => Err(Error::ProviderNotDeclared {
+                provider: provider.name(),
+                requested: requested.to_string(),
+            }),
+        }
     }
 
     /// The routed provider's key, from the snapshot this client took of the
@@ -261,7 +368,10 @@ impl ChatCompletionStream {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::config::ProviderConfig;
     use crate::credentials::with_env;
     use crate::protocol::openai_compat::chat_completions::types::ChatCompletionRequestMessage;
     use crate::registry::{Capabilities, ModelSpec, SupportedApi};
@@ -437,6 +547,196 @@ mod tests {
                 .unwrap()
                 .contains("names no environment variable")
         );
+    }
+
+    // ------------------------------------------------------- declared clients
+
+    /// A config declaring these providers, each reading its own variable.
+    fn declaring(names: &[&str]) -> ClientConfig {
+        ClientConfig {
+            providers: Some(
+                names
+                    .iter()
+                    .map(|name| ((*name).to_string(), ProviderConfig::default()))
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    /// The load-bearing ordering claim, tested where it is hardest: the key
+    /// for the undeclared provider IS in the environment. A client that
+    /// checked credentials first would answer "set `DEEPSEEK_API_KEY`" to
+    /// someone holding that key and deliberately withholding the provider.
+    #[test]
+    fn an_undeclared_provider_is_refused_before_the_key_check() {
+        with_env(
+            &[
+                ("OPENAI_API_KEY", Some("sk-openai")),
+                ("DEEPSEEK_API_KEY", Some("sk-deepseek")),
+            ],
+            || {
+                let client = Client::new(declaring(&["openai"])).unwrap();
+                let err = client
+                    .validate(
+                        "deepseek/deepseek-v4-flash",
+                        Api::OpenAiCompatChatCompletions,
+                    )
+                    .err()
+                    .expect("an undeclared provider is refused");
+                match &err {
+                    Error::ProviderNotDeclared {
+                        provider,
+                        requested,
+                    } => {
+                        assert_eq!(*provider, "deepseek");
+                        assert_eq!(requested, "deepseek/deepseek-v4-flash");
+                    }
+                    other => panic!("expected ProviderNotDeclared, got {other:?}"),
+                }
+                // And the declared one still routes, so the gate is not one
+                // that refuses everything.
+                client
+                    .validate("openai/gpt-5.6", Api::OpenAiCompatChatCompletions)
+                    .unwrap();
+            },
+        );
+    }
+
+    /// The same refusal with no key anywhere. It is still the DECLARATION that
+    /// is wrong, not the credential — a caller who declared nothing for
+    /// deepseek is not missing a key for it.
+    #[test]
+    fn an_undeclared_provider_is_refused_even_with_no_key_anywhere() {
+        with_env(&[], || {
+            let err = Client::new(declaring(&["openai"]))
+                .unwrap()
+                .validate(
+                    "deepseek/deepseek-v4-flash",
+                    Api::OpenAiCompatChatCompletions,
+                )
+                .err()
+                .expect("an undeclared provider is refused");
+            assert!(matches!(err, Error::ProviderNotDeclared { .. }), "{err:?}");
+        });
+    }
+
+    /// A name nothing registers is a typo first, whether or not its provider
+    /// was declared. Sending someone to edit `providers` for `openai/nope`
+    /// would point at the wrong line.
+    #[test]
+    fn an_unregistered_model_is_a_typo_before_it_is_a_declaration_problem() {
+        with_env(&[("OPENAI_API_KEY", Some("sk-openai"))], || {
+            let client = Client::new(declaring(&["openai"])).unwrap();
+            for typo in ["openai/nope", "deepseek/nope"] {
+                let err = client
+                    .validate(typo, Api::OpenAiCompatChatCompletions)
+                    .err()
+                    .expect("validation refuses it");
+                assert!(
+                    matches!(&err, Error::InvalidModel { given } if given == typo),
+                    "`{typo}`: {err:?}"
+                );
+            }
+        });
+    }
+
+    /// Declaring a provider does not conjure its key. The remedy here really
+    /// is the variable, and the message still names it.
+    #[test]
+    fn a_declared_provider_with_no_key_still_names_its_variable() {
+        with_env(&[], || {
+            let err = Client::new(declaring(&["openai"]))
+                .unwrap()
+                .validate("openai/gpt-5.6", Api::OpenAiCompatChatCompletions)
+                .err()
+                .expect("validation refuses it");
+            assert!(
+                matches!(
+                    &err,
+                    Error::MissingApiKey {
+                        env_var: Some("OPENAI_API_KEY"),
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+        });
+    }
+
+    /// An inline key routes a provider whose variable is absent — the point of
+    /// carrying one at all.
+    #[test]
+    fn an_inline_key_admits_a_provider_the_environment_cannot() {
+        with_env(&[], || {
+            let config = ClientConfig {
+                providers: Some(BTreeMap::from([(
+                    "openai".to_string(),
+                    ProviderConfig {
+                        api_key: Some("sk-inline".into()),
+                    },
+                )])),
+                ..Default::default()
+            };
+            let client = Client::new(config).unwrap();
+            let admitted = client
+                .validate("openai/gpt-5.6", Api::OpenAiCompatChatCompletions)
+                .unwrap();
+            assert_eq!(admitted.api_key, "sk-inline");
+        });
+    }
+
+    /// The compatibility claim at the routing gate: saying nothing leaves the
+    /// whole roster reachable, exactly as before the field existed.
+    #[test]
+    fn an_absent_declaration_routes_the_whole_roster() {
+        with_env(
+            &[
+                ("OPENAI_API_KEY", Some("sk-openai")),
+                ("DEEPSEEK_API_KEY", Some("sk-deepseek")),
+            ],
+            || {
+                let client = Client::new(ClientConfig::default()).unwrap();
+                for model in ["openai/gpt-5.6", "deepseek/deepseek-v4-flash"] {
+                    client
+                        .validate(model, Api::OpenAiCompatChatCompletions)
+                        .unwrap();
+                }
+            },
+        );
+    }
+
+    /// And declaring none reaches none — the other half of the distinction the
+    /// `Option` exists to keep.
+    #[test]
+    fn an_empty_declaration_routes_nothing() {
+        with_env(&[("OPENAI_API_KEY", Some("sk-openai"))], || {
+            let err = Client::new(declaring(&[]))
+                .unwrap()
+                .validate("openai/gpt-5.6", Api::OpenAiCompatChatCompletions)
+                .err()
+                .expect("validation refuses it");
+            assert!(matches!(err, Error::ProviderNotDeclared { .. }), "{err:?}");
+        });
+    }
+
+    /// A misspelling is caught at construction, not at the request that
+    /// happened to route there — and the message hands back the roster,
+    /// because a caller cannot list it themselves.
+    #[test]
+    fn an_unknown_declared_name_fails_at_construction() {
+        with_env(&[], || {
+            let err = Client::new(declaring(&["openia"]))
+                .err()
+                .expect("a misspelled provider is refused");
+            let message = err.to_string();
+            assert!(message.contains("openia"), "{message}");
+            assert!(
+                message.contains("deepseek, kimi, openai, openrouter"),
+                "{message}"
+            );
+            assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+        });
     }
 
     /// What ships upstream is the ENTRY's name, never the string the caller

@@ -76,13 +76,16 @@ impl ProviderSpec {
     }
 
     /// The environment variable warpllm reads this provider's API key from, if
-    /// the roster names one. Currently the only key source there is.
+    /// the roster names one. The default key source, and the only one a client
+    /// that declares nothing has.
     ///
-    /// `None` therefore means this provider cannot be authenticated: there is
-    /// no variable to read and nothing to suggest setting. The roster still
-    /// accepts it — a provider entry can land before the key plumbing it needs
-    /// does — and a request to one says exactly that rather than naming a
-    /// variable nothing reads.
+    /// `None` means the roster offers this provider no key source of its own:
+    /// there is no variable to read and nothing to suggest setting. The roster
+    /// accepts that — a provider entry can land before the key plumbing it
+    /// needs does — and a request to one says exactly that rather than naming
+    /// a variable nothing reads. Such a provider is still authenticatable, by
+    /// a client that supplies the key itself through
+    /// [`ProviderConfig::api_key`](crate::ProviderConfig::api_key).
     pub fn env_api_key(&self) -> Option<&str> {
         self.env_api_key.as_deref()
     }

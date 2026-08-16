@@ -3,20 +3,26 @@
 //! the module path spells the API's name rather than its route.
 //!
 //! Everything Anthropic does differently at the HTTP layer is in this file and
-//! nowhere else — the path, the key header, and the version header:
+//! nowhere else — the path and the version header:
 //!
 //! | | openai_compat | anthropic |
 //! |---|---|---|
 //! | path | `{base_url}/chat/completions` | `{base_url}/messages` |
-//! | auth | `Authorization: Bearer …` | `x-api-key: …` |
 //! | extra | — | `anthropic-version: 2023-06-01` |
 //!
 //! That containment is the point: Bedrock (#24) and Vertex (#25) speak the same
-//! Messages shapes over different transports and auth, so they contribute a
-//! sibling of this file and reuse [`types`](super::types) whole.
+//! Messages shapes over different transports, so they contribute a sibling of
+//! this file and reuse [`types`](super::types) whole.
+//!
+//! What is NOT in this table any more is the credential. `x-api-key: …` is a
+//! fact about `api.anthropic.com`, not about the Messages wire format — the
+//! same shapes reach Bedrock under a SigV4 signature and Vertex under an OAuth
+//! token — so it belongs to the provider's [`Authenticator`] and would
+//! otherwise be the one thing each of those siblings had to reimplement.
 
 use std::time::Duration;
 
+use crate::auth::Authenticator;
 use crate::error::{Error, Result};
 use crate::http::{SseFrames, network_error, read_response};
 use crate::protocol::anthropic::messages::types::{
@@ -69,7 +75,7 @@ pub(crate) async fn post(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    api_key: &str,
+    auth: &Authenticator,
     body: &CreateMessageRequest,
 ) -> Result<Outcome> {
     if body.stream == Some(true) {
@@ -77,10 +83,7 @@ pub(crate) async fn post(
             "stream: true asks for events; a whole reply cannot carry them".into(),
         ));
     }
-    let response = request(http, base_url, api_key, body)
-        .send()
-        .await
-        .map_err(|e| network_error(provider, e))?;
+    let response = send(http, provider, base_url, auth, body).await?;
 
     let parts = read_response(provider, response).await?;
     if !(200..300).contains(&parts.status) {
@@ -135,7 +138,7 @@ pub(crate) enum StreamOutcome {
 /// asked for.
 ///
 /// REQUIRES a body that already asks for a stream, and REFUSES one that does
-/// not rather than setting the flag on its behalf — see [`request`].
+/// not rather than setting the flag on its behalf — see [`send`].
 ///
 /// A non-2xx body is read to the end here, exactly as [`post`] does: an error
 /// reply is small, complete, and worth nothing streamed.
@@ -149,7 +152,7 @@ pub(crate) async fn post_stream(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    api_key: &str,
+    auth: &Authenticator,
     body: &CreateMessageRequest,
     read_timeout: Option<Duration>,
 ) -> Result<StreamOutcome> {
@@ -158,10 +161,7 @@ pub(crate) async fn post_stream(
             "a streamed request must carry stream: true".into(),
         ));
     }
-    let response = request(http, base_url, api_key, body)
-        .send()
-        .await
-        .map_err(|e| network_error(provider, e))?;
+    let response = send(http, provider, base_url, auth, body).await?;
 
     if !(200..300).contains(&response.status().as_u16()) {
         let parts = read_response(provider, response).await?;
@@ -205,16 +205,32 @@ pub(crate) async fn post_stream(
 /// the gateway form's answer on the body; this asserts that it did.
 ///
 /// `openai_compat`'s transport checks the same invariant the same way.
-fn request(
+///
+/// The credential is applied to a BUILT [`reqwest::Request`] rather than to the
+/// builder, so that a signing scheme (#24) can read the method, the URL and the
+/// body it has to sign; `reqwest`'s own `send` would have executed the request
+/// before anything could touch it. `anthropic-version` stays here, because that
+/// one IS a fact about this wire format.
+async fn send(
     http: &reqwest::Client,
+    provider: &'static str,
     base_url: &str,
-    api_key: &str,
+    auth: &Authenticator,
     body: &CreateMessageRequest,
-) -> reqwest::RequestBuilder {
-    http.post(format!("{}/messages", base_url.trim_end_matches('/')))
-        .header("x-api-key", api_key)
+) -> Result<reqwest::Response> {
+    let request = http
+        .post(format!("{}/messages", base_url.trim_end_matches('/')))
         .header("anthropic-version", API_VERSION)
         .json(body)
+        // NOT `Error::Network`: nothing was sent, and nothing was going to be.
+        // A URL that will not parse is a warpllm bug or a misconfigured
+        // `base_url`, and calling it a network error would send someone
+        // looking at the provider's status page.
+        .build()
+        .map_err(|e| Error::Internal(format!("could not build the {provider} request: {e}")))?;
+    http.execute(auth.authenticate(request).await?)
+        .await
+        .map_err(|e| network_error(provider, e))
 }
 
 /// The events of one streamed reply, read off the socket as they arrive.
@@ -385,6 +401,14 @@ mod tests {
 
     use super::*;
 
+    /// The credential every call below sends. `x-api-key`, because that is what
+    /// `api.anthropic.com` reads — but the choice is made here rather than in
+    /// `send`, which is the whole point: Bedrock and Vertex send these same
+    /// bodies under a credential of their own.
+    fn key() -> Authenticator {
+        Authenticator::anthropic_api_key("sk-ant-demo".into())
+    }
+
     fn reply() -> serde_json::Value {
         serde_json::json!({
             "id": "msg_1",
@@ -403,7 +427,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            "sk-ant-demo",
+            &key(),
             &CreateMessageRequest::default(),
         )
         .await
@@ -497,7 +521,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &format!("{}/", server.uri()),
-            "sk-ant-demo",
+            &key(),
             &CreateMessageRequest::default(),
         )
         .await;
@@ -543,7 +567,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            "sk-ant-demo",
+            &key(),
             &streamed(),
             // Unbounded, which is the default and what every test but the
             // stall one below wants: a mock answers instantly, so a limit
@@ -828,7 +852,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &format!("http://{addr}"),
-            "sk-ant-demo",
+            &key(),
             &streamed(),
             Some(LIMIT),
         )
@@ -874,7 +898,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            "sk-ant-demo",
+            &key(),
             &CreateMessageRequest {
                 model: "claude-opus-5".to_string(),
                 max_tokens: 7,
@@ -910,7 +934,7 @@ mod tests {
                 &reqwest::Client::new(),
                 "anthropic",
                 &server.uri(),
-                "sk-ant-demo",
+                &key(),
                 &CreateMessageRequest {
                     stream,
                     ..Default::default()
@@ -940,7 +964,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            "sk-ant-demo",
+            &key(),
             &CreateMessageRequest {
                 stream: Some(true),
                 ..Default::default()

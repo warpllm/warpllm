@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use crate::auth::Authenticator;
 use crate::error::Result;
 use crate::gateway::openai_compat::error::error_from_body;
 use crate::gateway::types;
@@ -30,10 +31,10 @@ pub(crate) async fn exchange(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    api_key: &str,
+    auth: &Authenticator,
 ) -> Result<types::ChatResponse> {
     let wire = render_request(request, provider)?;
-    match transport::post(http, provider, base_url, api_key, &wire).await? {
+    match transport::post(http, provider, base_url, auth, &wire).await? {
         Outcome::Ok(response) => Ok(ingest_response(response)),
         Outcome::Status {
             status,
@@ -64,11 +65,11 @@ pub(crate) async fn exchange_stream(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    api_key: &str,
+    auth: &Authenticator,
     read_timeout: Option<Duration>,
 ) -> Result<ChatChunkStream> {
     let wire = render_request(request, provider)?;
-    match transport::post_stream(http, provider, base_url, api_key, &wire, read_timeout).await? {
+    match transport::post_stream(http, provider, base_url, auth, &wire, read_timeout).await? {
         StreamOutcome::Ok(chunks) => Ok(ChatChunkStream { chunks }),
         StreamOutcome::Status {
             status,

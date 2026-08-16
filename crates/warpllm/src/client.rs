@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use crate::auth::Authenticator;
 use crate::config::{ClientConfig, DEFAULT_TIMEOUT_SECS};
 use crate::credentials::Credentials;
 use crate::error::{Error, Result};
@@ -26,7 +27,7 @@ pub struct Client {
 struct ModelDefinition<'a> {
     provider: &'static ProviderSpec,
     model: &'static ModelSpec,
-    api_key: &'a str,
+    auth: &'a Authenticator,
 }
 
 impl Client {
@@ -126,7 +127,7 @@ impl Client {
         let ModelDefinition {
             provider,
             model,
-            api_key,
+            auth,
         } = self.validate(&requested_model, Api::OpenAiCompatChatCompletions)?;
 
         // Ingest answers to the protocol warpllm was CALLED with, which is
@@ -144,7 +145,7 @@ impl Client {
             &self.http,
             provider.name(),
             self.base_url(provider),
-            api_key,
+            auth,
         )
         .await?;
         let mut completion =
@@ -175,7 +176,7 @@ impl Client {
         let ModelDefinition {
             provider,
             model,
-            api_key,
+            auth,
         } = self.validate(&requested_model, Api::OpenAiCompatChatCompletionsStream)?;
 
         let normalized =
@@ -186,7 +187,7 @@ impl Client {
                 &self.http,
                 provider.name(),
                 self.base_url(provider),
-                api_key,
+                auth,
                 self.config
                     .stream_read_timeout_secs
                     .map(Duration::from_secs),
@@ -224,7 +225,7 @@ impl Client {
         Ok(ModelDefinition {
             provider,
             model,
-            api_key: self.api_key(provider)?,
+            auth: self.authenticator(provider)?,
         })
     }
 
@@ -251,14 +252,14 @@ impl Client {
         }
     }
 
-    /// The routed provider's key, from the snapshot this client took of the
-    /// environment when it was built.
+    /// The routed provider's credential, from the snapshot this client took of
+    /// the environment when it was built.
     ///
     /// A miss is not "the variable is unset now" but "it was unset then", and
     /// the error still names the variable to set, because that is the remedy
     /// either way. A provider with no `env_api_key` has no key source at all,
     /// so the error names the roster rather than a variable nothing reads.
-    fn api_key(&self, provider: &'static ProviderSpec) -> Result<&str> {
+    fn authenticator(&self, provider: &'static ProviderSpec) -> Result<&Authenticator> {
         self.credentials
             .get(provider.name())
             .ok_or(Error::MissingApiKey {
@@ -518,7 +519,7 @@ mod tests {
     #[test]
     fn a_provider_with_no_env_api_key_names_the_roster() {
         let err = client(ClientConfig::default())
-            .api_key(demo_provider("https://api.demo.test", None))
+            .authenticator(demo_provider("https://api.demo.test", None))
             .unwrap_err();
         match &err {
             Error::MissingApiKey { provider, env_var } => {
@@ -666,9 +667,12 @@ mod tests {
 
     /// An inline key routes a provider whose variable is absent — the point of
     /// carrying one at all.
-    #[test]
-    fn an_inline_key_admits_a_provider_the_environment_cannot() {
-        with_env(&[], || {
+    #[tokio::test]
+    async fn an_inline_key_admits_a_provider_the_environment_cannot() {
+        // Built inside the lock, asserted outside it: `with_env` takes a
+        // synchronous closure, and reading what a credential puts on a request
+        // is now an await.
+        let client = with_env(&[], || {
             let config = ClientConfig {
                 providers: Some(BTreeMap::from([(
                     "openai".to_string(),
@@ -678,12 +682,17 @@ mod tests {
                 )])),
                 ..Default::default()
             };
-            let client = Client::new(config).unwrap();
-            let admitted = client
-                .validate("openai/gpt-5.6", Api::OpenAiCompatChatCompletions)
-                .unwrap();
-            assert_eq!(admitted.api_key, "sk-inline");
+            Client::new(config).unwrap()
         });
+        let admitted = client
+            .validate("openai/gpt-5.6", Api::OpenAiCompatChatCompletions)
+            .unwrap();
+        assert_eq!(
+            crate::auth::testing::applied(admitted.auth, "authorization")
+                .await
+                .as_deref(),
+            Some("Bearer sk-inline")
+        );
     }
 
     /// The compatibility claim at the routing gate: saying nothing leaves the
@@ -788,7 +797,7 @@ mod tests {
             &client.http,
             "demo",
             &server.uri(),
-            "k",
+            &Authenticator::bearer("k".into()),
         )
         .await
         .unwrap();
@@ -842,7 +851,7 @@ mod tests {
             &client.http,
             provider.name(),
             client.base_url(provider),
-            "k",
+            &Authenticator::bearer("k".into()),
         )
         .await
         .unwrap();

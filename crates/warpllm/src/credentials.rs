@@ -12,6 +12,14 @@
 //! providers are looked at — a client that named two of them reads two
 //! variables, not the roster's worth.
 //!
+//! What each provider gets is an [`Authenticator`] — the resolved credential
+//! AND how it goes on the wire — rather than the bare string it used to be.
+//! The two halves are separate on purpose: a SOURCE is where a secret comes
+//! from, which is what the paragraph above is about, and a SCHEME is how it
+//! goes on the request. Only the two together make a provider reachable, and
+//! they vary independently — Bedrock (#24) will take an AWS chain under a
+//! signature, Vertex (#25) an OAuth token under a bearer header.
+//!
 //! Read once, at construction. A snapshot rather than a live read, so the set of
 //! providers a client can reach cannot change under it mid-flight, and so the
 //! answer can be logged at the one moment a caller is set up to see it. The cost
@@ -20,17 +28,18 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::auth::Authenticator;
 use crate::config::ProviderConfig;
 use crate::registry::{self, ProviderSpec};
 
-/// The API keys this process holds, keyed by provider name.
+/// The credentials this process holds, keyed by provider name.
 ///
 /// A `HashMap`, matching the registry's own tables: this answers one question,
-/// "the key for this provider", and answers it on every request. Iteration
-/// order is unspecified and varies run to run, so everything that RENDERS the
-/// set goes through [`Credentials::names`] instead.
+/// "the credential for this provider", and answers it on every request.
+/// Iteration order is unspecified and varies run to run, so everything that
+/// RENDERS the set goes through [`Credentials::names`] instead.
 pub(crate) struct Credentials {
-    keys: HashMap<&'static str, String>,
+    keys: HashMap<&'static str, Authenticator>,
 }
 
 impl Credentials {
@@ -49,17 +58,32 @@ impl Credentials {
     /// provider, so a request routed to it should say so rather than send
     /// `Authorization: Bearer ` upstream and report back whatever the provider
     /// makes of it.
+    ///
+    /// The scheme is chosen HERE, and it is [`Authenticator::bearer`] for
+    /// everything, because every provider on the roster is an OpenAI-compatible
+    /// host that reads `Authorization`. [`Self::key_for`] owns the source and
+    /// says nothing about presentation; this is the seam where the table that
+    /// makes the scheme a real choice goes, with the first provider that is not
+    /// bearer.
     pub(crate) fn resolve(declared: Option<&BTreeMap<String, ProviderConfig>>) -> Self {
         let keys = match declared {
             None => registry::providers()
-                .filter_map(|provider| Some((provider.name(), Self::key_for(provider, None)?)))
+                .filter_map(|provider| {
+                    Some((
+                        provider.name(),
+                        Authenticator::bearer(Self::key_for(provider, None)?),
+                    ))
+                })
                 .collect(),
             Some(declared) => declared
                 .iter()
                 .filter_map(|(name, entry)| {
                     let provider = registry::provider(name)
                         .expect("Client::new refuses a declaration the roster does not hold");
-                    Some((provider.name(), Self::key_for(provider, Some(entry))?))
+                    Some((
+                        provider.name(),
+                        Authenticator::bearer(Self::key_for(provider, Some(entry))?),
+                    ))
                 })
                 .collect(),
         };
@@ -103,11 +127,11 @@ impl Credentials {
         (!key.is_empty()).then_some(key)
     }
 
-    /// This provider's key, or `None` when the environment held none at
+    /// This provider's credential, or `None` when no source held a key at
     /// construction — which is what makes "warpllm cannot reach this provider"
     /// answerable without a request.
-    pub(crate) fn get(&self, provider: &str) -> Option<&str> {
-        self.keys.get(provider).map(String::as_str)
+    pub(crate) fn get(&self, provider: &str) -> Option<&Authenticator> {
+        self.keys.get(provider)
     }
 
     /// The providers a request can be routed to, in name order.
@@ -150,6 +174,11 @@ impl std::fmt::Debug for Credentials {
 /// contributor who exports a third provider's key failing an assertion about
 /// which providers are available — and would quietly add every new provider to
 /// every snapshot as the roster grows.
+///
+/// The closure is SYNCHRONOUS, and the lock is released when it returns. A test
+/// asserting what a credential puts on the wire therefore builds its
+/// [`Credentials`] inside and awaits outside, rather than holding a
+/// process-global lock across an await.
 #[cfg(test)]
 pub(crate) fn with_env<T>(vars: &[(&str, Option<&str>)], body: impl FnOnce() -> T) -> T {
     let mut settings: std::collections::BTreeMap<String, Option<String>> = registry::providers()
@@ -169,29 +198,44 @@ mod tests {
     const OPENAI: &str = "OPENAI_API_KEY";
     const DEEPSEEK: &str = "DEEPSEEK_API_KEY";
 
+    /// The credential this provider would send, read off a real request.
+    ///
+    /// Asserted through the wire rather than against a stored string, because
+    /// holding a key and presenting it are now two claims and only one of them
+    /// is a `String` anyone can compare. Which source the key came from is what
+    /// most of these tests are about; that it arrives as `Bearer …` is the
+    /// other half, and this asserts both at once.
+    async fn sent(credentials: &Credentials, provider: &str) -> Option<String> {
+        crate::auth::testing::applied(credentials.get(provider)?, "authorization").await
+    }
+
     /// A key for one provider makes that provider available and says nothing
     /// about any other — the roster is not the availability list.
-    #[test]
-    fn one_key_admits_one_provider() {
-        with_env(&[(OPENAI, Some("sk-openai")), (DEEPSEEK, None)], || {
-            let credentials = Credentials::resolve(None);
-            assert_eq!(credentials.names(), vec!["openai"]);
-            assert_eq!(credentials.get("openai"), Some("sk-openai"));
-            assert_eq!(credentials.get("deepseek"), None);
+    #[tokio::test]
+    async fn one_key_admits_one_provider() {
+        let credentials = with_env(&[(OPENAI, Some("sk-openai")), (DEEPSEEK, None)], || {
+            Credentials::resolve(None)
         });
+        assert_eq!(credentials.names(), vec!["openai"]);
+        assert_eq!(
+            sent(&credentials, "openai").await.as_deref(),
+            Some("Bearer sk-openai")
+        );
+        assert!(credentials.get("deepseek").is_none());
     }
 
     /// Every provider whose variable is set is available at once, in name
-    /// order.
-    #[test]
-    fn every_set_key_admits_its_provider() {
-        with_env(
+    /// order, each carrying its OWN key.
+    #[tokio::test]
+    async fn every_set_key_admits_its_provider() {
+        let credentials = with_env(
             &[(OPENAI, Some("sk-openai")), (DEEPSEEK, Some("sk-deepseek"))],
-            || {
-                let credentials = Credentials::resolve(None);
-                assert_eq!(credentials.names(), vec!["deepseek", "openai"]);
-                assert_eq!(credentials.get("deepseek"), Some("sk-deepseek"));
-            },
+            || Credentials::resolve(None),
+        );
+        assert_eq!(credentials.names(), vec!["deepseek", "openai"]);
+        assert_eq!(
+            sent(&credentials, "deepseek").await.as_deref(),
+            Some("Bearer sk-deepseek")
         );
     }
 
@@ -203,7 +247,7 @@ mod tests {
         with_env(&[(OPENAI, None), (DEEPSEEK, None)], || {
             let credentials = Credentials::resolve(None);
             assert!(credentials.names().is_empty());
-            assert_eq!(credentials.get("openai"), None);
+            assert!(credentials.get("openai").is_none());
         });
     }
 
@@ -222,7 +266,7 @@ mod tests {
     #[test]
     fn an_unknown_provider_is_never_available() {
         with_env(&[(OPENAI, Some("sk-openai"))], || {
-            assert_eq!(Credentials::resolve(None).get("mistral"), None);
+            assert!(Credentials::resolve(None).get("mistral").is_none());
         });
     }
 
@@ -277,42 +321,50 @@ mod tests {
             || {
                 let credentials = Credentials::resolve(Some(&declare(&[("openai", None)])));
                 assert_eq!(credentials.names(), vec!["openai"]);
-                assert_eq!(credentials.get("deepseek"), None);
+                assert!(credentials.get("deepseek").is_none());
             },
         );
     }
 
     /// Declaring a provider without a key of its own leaves the environment
     /// doing exactly what it did before — declaring is not opting out of it.
-    #[test]
-    fn a_declaration_with_no_key_still_reads_the_environment() {
-        with_env(&[(OPENAI, Some("sk-openai")), (DEEPSEEK, None)], || {
-            let credentials = Credentials::resolve(Some(&declare(&[("openai", None)])));
-            assert_eq!(credentials.get("openai"), Some("sk-openai"));
+    #[tokio::test]
+    async fn a_declaration_with_no_key_still_reads_the_environment() {
+        let credentials = with_env(&[(OPENAI, Some("sk-openai")), (DEEPSEEK, None)], || {
+            Credentials::resolve(Some(&declare(&[("openai", None)])))
         });
+        assert_eq!(
+            sent(&credentials, "openai").await.as_deref(),
+            Some("Bearer sk-openai")
+        );
     }
 
     /// The more specific statement wins. A caller who wrote a key into the
     /// config has no other way to make the ambient environment yield.
-    #[test]
-    fn an_inline_key_wins_over_the_environment() {
-        with_env(&[(OPENAI, Some("sk-from-the-environment"))], || {
-            let credentials =
-                Credentials::resolve(Some(&declare(&[("openai", Some("sk-inline"))])));
-            assert_eq!(credentials.get("openai"), Some("sk-inline"));
+    #[tokio::test]
+    async fn an_inline_key_wins_over_the_environment() {
+        let credentials = with_env(&[(OPENAI, Some("sk-from-the-environment"))], || {
+            Credentials::resolve(Some(&declare(&[("openai", Some("sk-inline"))])))
         });
+        assert_eq!(
+            sent(&credentials, "openai").await.as_deref(),
+            Some("Bearer sk-inline")
+        );
     }
 
     /// `""` is unstated, not a stated nothing — the same judgement the
     /// environment's own empty value gets. A caller writing
     /// `os.environ.get("OPENAI_API_KEY", "")` into their config must not
     /// thereby disable a provider whose key is right there.
-    #[test]
-    fn an_empty_inline_key_falls_back_to_the_environment() {
-        with_env(&[(OPENAI, Some("sk-openai"))], || {
-            let credentials = Credentials::resolve(Some(&declare(&[("openai", Some(""))])));
-            assert_eq!(credentials.get("openai"), Some("sk-openai"));
+    #[tokio::test]
+    async fn an_empty_inline_key_falls_back_to_the_environment() {
+        let credentials = with_env(&[(OPENAI, Some("sk-openai"))], || {
+            Credentials::resolve(Some(&declare(&[("openai", Some(""))])))
         });
+        assert_eq!(
+            sent(&credentials, "openai").await.as_deref(),
+            Some("Bearer sk-openai")
+        );
     }
 
     /// Falling back to nothing is still nothing. Neither source held a key, so

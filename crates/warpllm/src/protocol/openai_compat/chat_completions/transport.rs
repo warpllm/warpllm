@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use crate::auth::Authenticator;
 use crate::error::{Error, Result};
 use crate::http::{SseFrames, network_error, read_response};
 use crate::protocol::openai_compat::chat_completions::types::{
@@ -54,7 +55,7 @@ pub(crate) async fn post(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    api_key: &str,
+    auth: &Authenticator,
     body: &CreateChatCompletionRequest,
 ) -> Result<Outcome> {
     if body.stream == Some(true) {
@@ -62,16 +63,7 @@ pub(crate) async fn post(
             "stream: true asks for chunks; a whole reply cannot carry them".into(),
         ));
     }
-    let response = http
-        .post(format!(
-            "{}/chat/completions",
-            base_url.trim_end_matches('/')
-        ))
-        .bearer_auth(api_key)
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| network_error(provider, e))?;
+    let response = send(http, provider, base_url, auth, body).await?;
 
     let parts = read_response(provider, response).await?;
     if !(200..300).contains(&parts.status) {
@@ -148,7 +140,7 @@ pub(crate) async fn post_stream(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    api_key: &str,
+    auth: &Authenticator,
     body: &CreateChatCompletionRequest,
     read_timeout: Option<Duration>,
 ) -> Result<StreamOutcome> {
@@ -157,16 +149,7 @@ pub(crate) async fn post_stream(
             "a streamed request must carry stream: true".into(),
         ));
     }
-    let response = http
-        .post(format!(
-            "{}/chat/completions",
-            base_url.trim_end_matches('/')
-        ))
-        .bearer_auth(api_key)
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| network_error(provider, e))?;
+    let response = send(http, provider, base_url, auth, body).await?;
 
     if !(200..300).contains(&response.status().as_u16()) {
         let parts = read_response(provider, response).await?;
@@ -186,6 +169,45 @@ pub(crate) async fn post_stream(
         truncated: false,
         read_timeout,
     }))
+}
+
+/// The request both entry points send, differing only in the body's `stream`
+/// — built, authenticated, and executed.
+///
+/// The three steps are one function because the middle one needs the first to
+/// have finished. A credential is applied to a BUILT [`reqwest::Request`] rather
+/// than a builder, so that a signing scheme (#24) can read the method, the URL
+/// and the body it has to sign; `reqwest`'s own `send` would have executed the
+/// request before anything could touch it.
+///
+/// Which header the credential lands in is [`Authenticator`]'s, not this
+/// file's. `Authorization: Bearer …` is what every host on the roster reads,
+/// but it is a fact about those HOSTS rather than about this wire format —
+/// Azure's OpenAI-compatible endpoints read `api-key`, and a self-hosted one
+/// (#22) may read neither — so the spelling belongs to the provider and this
+/// file states only the path.
+async fn send(
+    http: &reqwest::Client,
+    provider: &'static str,
+    base_url: &str,
+    auth: &Authenticator,
+    body: &CreateChatCompletionRequest,
+) -> Result<reqwest::Response> {
+    let request = http
+        .post(format!(
+            "{}/chat/completions",
+            base_url.trim_end_matches('/')
+        ))
+        .json(body)
+        // NOT `Error::Network`: nothing was sent, and nothing was going to be.
+        // A URL that will not parse is a warpllm bug or a misconfigured
+        // `base_url`, and calling it a network error would send someone
+        // looking at the provider's status page.
+        .build()
+        .map_err(|e| Error::Internal(format!("could not build the {provider} request: {e}")))?;
+    http.execute(auth.authenticate(request).await?)
+        .await
+        .map_err(|e| network_error(provider, e))
 }
 
 /// The chunks of one streamed reply, read off the socket as they arrive.
@@ -337,12 +359,19 @@ mod tests {
 
     use super::*;
 
+    /// The credential every call below sends. A bearer token, because that is
+    /// what an OpenAI-compatible host reads — which provider gets which scheme
+    /// is `crate::credentials`', not this module's.
+    fn key() -> Authenticator {
+        Authenticator::bearer("sk-demo".into())
+    }
+
     async fn post_to(server: &MockServer) -> Result<Outcome> {
         post(
             &reqwest::Client::new(),
             "demo",
             &server.uri(),
-            "sk-demo",
+            &key(),
             &CreateChatCompletionRequest::default(),
         )
         .await
@@ -439,7 +468,7 @@ mod tests {
             &reqwest::Client::new(),
             "demo",
             &server.uri(),
-            "sk-demo",
+            &key(),
             &streamed(),
             // Unbounded, which is the default and what every test but the
             // stall one below wants: a mock answers instantly, so a limit
@@ -684,7 +713,7 @@ mod tests {
             &reqwest::Client::new(),
             "demo",
             &format!("http://{addr}"),
-            "sk-demo",
+            &key(),
             &streamed(),
             Some(LIMIT),
         )
@@ -730,7 +759,7 @@ mod tests {
                 &reqwest::Client::new(),
                 "demo",
                 &server.uri(),
-                "sk-demo",
+                &key(),
                 &CreateChatCompletionRequest {
                     stream: body,
                     ..Default::default()
@@ -760,7 +789,7 @@ mod tests {
             &reqwest::Client::new(),
             "demo",
             &server.uri(),
-            "sk-demo",
+            &key(),
             &CreateChatCompletionRequest {
                 stream: Some(true),
                 ..Default::default()
@@ -789,7 +818,7 @@ mod tests {
             &reqwest::Client::new(),
             "demo",
             &format!("{}/", server.uri()),
-            "sk-demo",
+            &key(),
             &CreateChatCompletionRequest::default(),
         )
         .await;

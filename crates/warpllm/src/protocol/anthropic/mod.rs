@@ -9,9 +9,16 @@
 //! around.
 //!
 //! Bedrock (#24) and Vertex (#25) also speak Messages, over different
-//! transports and auth. When they arrive they reuse [`messages::types`] whole
-//! and contribute a transport apiece — which is the reason those two live at
+//! transports. When they arrive they reuse [`messages::types`] whole and
+//! contribute a transport apiece — which is the reason those two live at
 //! different layers here.
+//!
+//! A transport apiece and NOT an auth apiece: what those two also differ in is
+//! the credential, and that is a fact about the provider rather than about this
+//! wire format, so it lives at [`crate::auth`] and a transport is handed one.
+//! Vertex is what makes the distinction load-bearing — one token there serves
+//! both this protocol and Google's own — so a credential filed under either
+//! would have to be built twice.
 //!
 //! SHAPES AND TRANSPORT ONLY. Turning an Anthropic error body into warpllm's
 //! canonical failure form is an ingest conversion and lives with every other

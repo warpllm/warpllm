@@ -1,6 +1,7 @@
 //! The upstream half of a message exchange: gateway types in, gateway types
 //! out.
 
+use crate::auth::Authenticator;
 use crate::error::Result;
 use crate::gateway::anthropic::error::error_from_body;
 use crate::gateway::types;
@@ -29,11 +30,11 @@ pub(crate) async fn exchange(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    api_key: &str,
+    auth: &Authenticator,
     max_output_tokens: Option<u32>,
 ) -> Result<types::ChatResponse> {
     let wire = render_request(request, provider, max_output_tokens)?;
-    match transport::post(http, provider, base_url, api_key, &wire).await? {
+    match transport::post(http, provider, base_url, auth, &wire).await? {
         Outcome::Ok(response) => Ok(ingest_response(response)),
         Outcome::Status {
             status,

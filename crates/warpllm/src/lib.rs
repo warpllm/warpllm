@@ -1,5 +1,6 @@
 //! Core engine for warpllm, a warp-speed, robust AI gateway.
 
+mod auth;
 mod client;
 mod config;
 mod credentials;

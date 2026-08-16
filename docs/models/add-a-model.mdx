@@ -1,0 +1,145 @@
+---
+title: "Add a model or provider"
+description: "Edit one YAML file, cite the provider's docs, and let the tests check your work."
+icon: "plus"
+---
+
+Adding, changing, or removing a routable model is an edit to one file:
+
+```text
+crates/warpllm/src/registry/specs.yaml
+```
+
+It is compiled into the binary with `include_str!` and parsed once on first
+lookup, so there is no runtime configuration to deploy — a roster change ships
+with a release.
+
+## Adding a model to an existing provider
+
+```yaml
+openai:
+  base_url: "https://api.openai.com/v1"
+  env_api_key: OPENAI_API_KEY
+  models:
+    # <https://developers.openai.com/api/docs/models/gpt-5.6-sol>
+    openai/gpt-5.6-sol:
+      supported_apis:
+        - {api: openai_compat_chat_completions}
+        - {api: openai_compat_chat_completions_stream}
+      capabilities:
+        max_input_tokens: 1050000
+        max_output_tokens: 128000
+```
+
+<ResponseField name="supported_apis" type="list" required>
+  Every surface this model serves, each written `- {api: <surface>}`. A model
+  serves exactly what it lists — nothing is inherited from the provider.
+</ResponseField>
+<ResponseField name="model" type="string">
+  The name sent upstream. Defaults to the key's last segment. Set it when
+  warpllm's alias differs from the provider's own name.
+</ResponseField>
+<ResponseField name="capabilities" type="object">
+  `max_input_tokens`, `max_output_tokens`, `max_concurrent_requests` — each
+  optional.
+</ResponseField>
+<ResponseField name="deprecation_date" type="string">
+  `YYYY-MM-DD`. Where a provider publishes both an announcement date and a
+  later access-ends date, record the **second**: a deprecated model still
+  answers, and the day routing to it breaks is the one worth having.
+</ResponseField>
+
+## Adding a provider
+
+```yaml
+providers:
+  newprovider:
+    base_url: "https://api.newprovider.com/v1"   # version prefix in, no trailing slash
+    env_api_key: NEWPROVIDER_API_KEY
+    models:
+      newprovider/some-model:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+```
+
+Then add a matching block to
+[`examples/.env.example`](https://github.com/warpllm/warpllm/blob/main/examples/.env.example)
+**in the same commit**. That file mirrors the roster, and no test catches drift
+between the two.
+
+<Note>
+  `env_api_key` may be omitted if the provider has no key plumbing yet. A
+  request routed there then fails saying exactly that — the remedy is a
+  registry edit, not a shell one.
+</Note>
+
+## Rules the tests enforce
+
+Run `cargo test -p warpllm` before opening a PR; CI runs the same suite.
+
+| Rule | Why |
+| --- | --- |
+| Providers sort ascending; models sort ascending within each | A tidy roster is reviewable |
+| A model key starts with the provider it sits under | `openai/gpt-5.6` under `openai:` |
+| No wildcards | `openai/*` registers a model literally named `*` |
+| Two providers may not share an `env_api_key` | A shared key would authenticate one provider with another's credentials |
+| A model may not list the same surface twice | — |
+
+<Tip>
+  Sort order is byte order, so `-` (0x2D) precedes `.` (0x2E) — the `gpt-5-*`
+  family sorts before `gpt-5.1`.
+</Tip>
+
+## Sourcing the numbers
+
+This is where roster entries go wrong, so the file asks for evidence.
+
+<Steps>
+  <Step title="Cite the provider's docs in a comment">
+    Every recorded figure carries the URL it came from and the date it was
+    checked. Undocumented is not unlimited — omit a limit rather than guess it.
+  </Step>
+  <Step title="Check the DEPRECATIONS page, not the model page">
+    OpenAI's model pages say nothing about a retirement even when one is weeks
+    away. An entry checked only against its model page can look healthy and be
+    dead on arrival.
+  </Step>
+  <Step title="Record the context window, not 'maximum input tokens'">
+    A provider's "maximum input tokens" is usually the window minus its output
+    ceiling. The window is what belongs in `max_input_tokens`, since a
+    completion may spend far fewer output tokens than the ceiling allows.
+  </Step>
+  <Step title="For aggregators, take the narrowest endpoint">
+    Read `/api/v1/models/<slug>/endpoints` and record the smallest figure any
+    endpoint offers — an unpinned request may land on any of them. Do **not**
+    read `top_provider` from `/api/v1/models`: it is one endpoint's numbers
+    dressed up as a summary.
+  </Step>
+</Steps>
+
+## Only list surfaces warpllm implements
+
+A surface warpllm has not built would load fine and then refuse the request.
+
+| Surface | Status |
+| --- | --- |
+| `openai_compat_chat_completions` | Implemented |
+| `openai_compat_chat_completions_stream` | Implemented |
+| `openai_compat_responses` | **Not implemented — do not list it** |
+
+## Update the docs in the same change
+
+The [model roster page](/models/overview) is generated from this file:
+
+```bash
+uv run --with pyyaml docs/scripts/gen_model_roster.py
+```
+
+Commit the regenerated snippets alongside the registry edit. `--check` fails
+instead of rewriting, for CI.
+
+## Next
+
+<Card title="Contribution guide" icon="github" href="https://github.com/warpllm/warpllm/blob/main/CONTRIBUTING.md">
+  Branching, tests, and the CLA.
+</Card>

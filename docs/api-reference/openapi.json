@@ -1,0 +1,605 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "warpllm gateway",
+    "version": "0.4.0",
+    "description": "The OpenAI-compatible HTTP surface of a self-hosted warpllm gateway. Model strings are `provider/model`; the prefix is required. The gateway authenticates upstream with its own provider keys from the environment and ignores the caller's Authorization header.",
+    "license": {
+      "name": "Apache-2.0",
+      "url": "https://github.com/warpllm/warpllm/blob/main/LICENSE"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080",
+      "description": "A gateway running with the default host and port"
+    }
+  ],
+  "paths": {
+    "/v1/chat/completions": {
+      "post": {
+        "operationId": "createChatCompletion",
+        "summary": "Create a chat completion",
+        "description": "Routes one chat completion to the provider named by the model string. `stream: true` returns server-sent events instead of one JSON body.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateChatCompletionRequest" },
+              "examples": {
+                "whole": {
+                  "summary": "One whole reply",
+                  "value": {
+                    "model": "openai/gpt-5-nano",
+                    "messages": [{ "role": "user", "content": "Hello!" }]
+                  }
+                },
+                "streamed": {
+                  "summary": "Streamed",
+                  "value": {
+                    "model": "openai/gpt-5-nano",
+                    "messages": [{ "role": "user", "content": "Count to five." }],
+                    "stream": true,
+                    "stream_options": { "include_usage": true }
+                  }
+                },
+                "tools": {
+                  "summary": "With a tool definition",
+                  "value": {
+                    "model": "openai/gpt-5-nano",
+                    "messages": [{ "role": "user", "content": "Weather in Oslo?" }],
+                    "tools": [
+                      {
+                        "type": "function",
+                        "function": {
+                          "name": "get_weather",
+                          "description": "Current weather for a city.",
+                          "parameters": {
+                            "type": "object",
+                            "properties": { "city": { "type": "string" } },
+                            "required": ["city"]
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The completion, whole or streamed.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CreateChatCompletionResponse" }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Server-sent events. Each `data:` line is a CreateChatCompletionStreamResponse, terminated by `data: [DONE]`. A failure after the 200 is committed arrives as a final event carrying the error envelope, with no `[DONE]` after it."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was malformed, the model string is not on the roster, the prompt exceeds the model's window, or the provider rejected the payload.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } }
+            }
+          },
+          "401": {
+            "description": "No API key for the routed provider, or the provider rejected the one that was sent.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } }
+            }
+          },
+          "403": {
+            "description": "The credential is valid but not entitled to what was asked for.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } }
+            }
+          },
+          "404": {
+            "description": "The provider does not serve the requested model.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } }
+            }
+          },
+          "429": {
+            "description": "Rate limited, or the account's quota is exhausted. Read `code`: `insufficient_quota` is not fixed by waiting.",
+            "headers": {
+              "Retry-After": {
+                "description": "Re-emitted from the upstream when it sent one.",
+                "schema": { "type": "integer" }
+              }
+            },
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } }
+            }
+          },
+          "500": {
+            "description": "warpllm could not set itself up.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } }
+            }
+          },
+          "502": {
+            "description": "The provider was never reached, answered with a body warpllm could not read, or ended a stream early.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } }
+            }
+          },
+          "503": {
+            "description": "The provider is up but shedding load.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } }
+            }
+          },
+          "504": {
+            "description": "The stream went silent for longer than --stream-read-timeout-secs.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Liveness check",
+        "description": "Reports that the process is serving. It sends no upstream traffic, so it says nothing about whether any provider is reachable.",
+        "responses": {
+          "200": {
+            "description": "The gateway is serving.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "version"],
+                  "properties": {
+                    "status": { "type": "string", "const": "ok" },
+                    "version": {
+                      "type": "string",
+                      "description": "The warpllm version this gateway was built from.",
+                      "examples": ["0.4.0"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CreateChatCompletionRequest": {
+        "type": "object",
+        "required": ["model", "messages"],
+        "description": "Fields not listed here are forwarded to the provider untouched.",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "A `provider/model` routing string. The prefix is required; an unlisted name is an error, never a guess.",
+            "examples": ["openai/gpt-5-nano", "deepseek/deepseek-v4-flash", "openrouter/anthropic/claude-sonnet-4"]
+          },
+          "messages": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ChatCompletionRequestMessage" }
+          },
+          "temperature": { "type": ["number", "null"] },
+          "max_tokens": { "type": ["integer", "null"] },
+          "top_p": { "type": ["number", "null"] },
+          "stop": {
+            "oneOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } },
+              { "type": "null" }
+            ]
+          },
+          "stream": {
+            "type": ["boolean", "null"],
+            "description": "`true` returns server-sent events instead of one JSON body."
+          },
+          "stream_options": {
+            "type": ["object", "null"],
+            "properties": {
+              "include_usage": {
+                "type": ["boolean", "null"],
+                "description": "Ask for a final chunk carrying token usage."
+              }
+            }
+          },
+          "tools": {
+            "type": ["array", "null"],
+            "items": { "$ref": "#/components/schemas/ChatCompletionTool" }
+          },
+          "tool_choice": {
+            "description": "`\"auto\"`, `\"none\"`, `\"required\"`, or a named function.",
+            "oneOf": [
+              { "type": "string" },
+              { "$ref": "#/components/schemas/ChatCompletionNamedToolChoice" },
+              { "type": "null" }
+            ]
+          },
+          "response_format": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/ResponseFormatSimple" },
+              { "$ref": "#/components/schemas/ResponseFormatJsonSchema" },
+              { "type": "null" }
+            ]
+          },
+          "reasoning_effort": {
+            "type": ["string", "null"],
+            "description": "Reasoning budget hint for models that accept one."
+          }
+        }
+      },
+      "ChatCompletionRequestMessage": {
+        "type": "object",
+        "required": ["role"],
+        "properties": {
+          "role": {
+            "type": "string",
+            "description": "Provider-defined. `system`, `user`, `assistant`, and `tool` are the usual values.",
+            "examples": ["user"]
+          },
+          "content": {
+            "description": "A string, or an array of content parts. Absent on an assistant turn that carries only `tool_calls`.",
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/ChatCompletionRequestMessageContentPart" }
+              },
+              { "type": "null" }
+            ]
+          },
+          "tool_calls": {
+            "type": ["array", "null"],
+            "items": { "$ref": "#/components/schemas/ChatCompletionMessageToolCall" }
+          },
+          "tool_call_id": {
+            "type": ["string", "null"],
+            "description": "On a `tool` message: which call this answers."
+          }
+        }
+      },
+      "ChatCompletionRequestMessageContentPart": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["type", "text"],
+            "properties": {
+              "type": { "type": "string", "const": "text" },
+              "text": { "type": "string" }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["type", "image_url"],
+            "properties": {
+              "type": { "type": "string", "const": "image_url" },
+              "image_url": {
+                "type": "object",
+                "required": ["url"],
+                "properties": {
+                  "url": { "type": "string" },
+                  "detail": { "type": ["string", "null"] }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["type", "input_audio"],
+            "properties": {
+              "type": { "type": "string", "const": "input_audio" },
+              "input_audio": {
+                "type": "object",
+                "required": ["data", "format"],
+                "properties": {
+                  "data": { "type": "string" },
+                  "format": { "type": "string" }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["type", "file"],
+            "properties": {
+              "type": { "type": "string", "const": "file" },
+              "file": {
+                "type": "object",
+                "properties": {
+                  "file_data": { "type": ["string", "null"] },
+                  "file_id": { "type": ["string", "null"] },
+                  "filename": { "type": ["string", "null"] }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["type", "refusal"],
+            "properties": {
+              "type": { "type": "string", "const": "refusal" },
+              "refusal": { "type": "string" }
+            }
+          }
+        ]
+      },
+      "ChatCompletionTool": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string", "examples": ["function"] },
+          "function": {
+            "type": ["object", "null"],
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string" },
+              "description": { "type": ["string", "null"] },
+              "parameters": {
+                "description": "JSON Schema for the function's arguments.",
+                "type": ["object", "null"]
+              },
+              "strict": { "type": ["boolean", "null"] }
+            }
+          }
+        }
+      },
+      "ChatCompletionNamedToolChoice": {
+        "type": "object",
+        "required": ["type", "function"],
+        "properties": {
+          "type": { "type": "string", "const": "function" },
+          "function": {
+            "type": "object",
+            "required": ["name"],
+            "properties": { "name": { "type": "string" } }
+          }
+        }
+      },
+      "ResponseFormatSimple": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string", "examples": ["json_object", "text"] }
+        }
+      },
+      "ResponseFormatJsonSchema": {
+        "type": "object",
+        "required": ["type", "json_schema"],
+        "properties": {
+          "type": { "type": "string", "const": "json_schema" },
+          "json_schema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string" },
+              "description": { "type": ["string", "null"] },
+              "schema": { "type": ["object", "null"] },
+              "strict": { "type": ["boolean", "null"] }
+            }
+          }
+        }
+      },
+      "CreateChatCompletionResponse": {
+        "type": "object",
+        "required": ["id", "choices", "created", "model", "object"],
+        "properties": {
+          "id": { "type": "string" },
+          "object": { "type": "string", "examples": ["chat.completion"] },
+          "created": { "type": "integer" },
+          "model": {
+            "type": "string",
+            "description": "Your `provider/model` routing string, not the upstream name.",
+            "examples": ["openai/gpt-5-nano"]
+          },
+          "choices": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Choice" }
+          },
+          "usage": { "$ref": "#/components/schemas/CompletionUsage" },
+          "system_fingerprint": { "type": "string" },
+          "service_tier": { "type": ["string", "null"] }
+        }
+      },
+      "Choice": {
+        "type": "object",
+        "required": ["finish_reason", "index", "message"],
+        "properties": {
+          "index": { "type": "integer" },
+          "finish_reason": {
+            "type": "string",
+            "examples": ["stop", "length", "tool_calls", "content_filter"]
+          },
+          "message": { "$ref": "#/components/schemas/ChatCompletionResponseMessage" }
+        }
+      },
+      "ChatCompletionResponseMessage": {
+        "type": "object",
+        "required": ["content", "refusal", "role"],
+        "properties": {
+          "role": { "type": "string", "examples": ["assistant"] },
+          "content": { "type": ["string", "null"] },
+          "refusal": { "type": ["string", "null"] },
+          "tool_calls": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ChatCompletionMessageToolCall" }
+          }
+        }
+      },
+      "ChatCompletionMessageToolCall": {
+        "type": "object",
+        "required": ["id", "type"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string", "examples": ["function", "custom"] },
+          "function": {
+            "type": "object",
+            "required": ["name", "arguments"],
+            "properties": {
+              "name": { "type": "string" },
+              "arguments": {
+                "type": "string",
+                "description": "A JSON string, not an object. Parse it, and treat a parse failure as a normal outcome."
+              }
+            }
+          },
+          "custom": {
+            "type": "object",
+            "required": ["name", "input"],
+            "properties": {
+              "name": { "type": "string" },
+              "input": { "type": "string" }
+            }
+          }
+        }
+      },
+      "CompletionUsage": {
+        "type": "object",
+        "required": ["completion_tokens", "prompt_tokens", "total_tokens"],
+        "properties": {
+          "prompt_tokens": { "type": "integer" },
+          "completion_tokens": { "type": "integer" },
+          "total_tokens": { "type": "integer" },
+          "prompt_tokens_details": {
+            "type": "object",
+            "properties": {
+              "cached_tokens": { "type": "integer" },
+              "cache_write_tokens": { "type": "integer" },
+              "audio_tokens": { "type": "integer" }
+            }
+          },
+          "completion_tokens_details": {
+            "type": "object",
+            "properties": {
+              "reasoning_tokens": { "type": "integer" },
+              "accepted_prediction_tokens": { "type": "integer" },
+              "rejected_prediction_tokens": { "type": "integer" },
+              "audio_tokens": { "type": "integer" }
+            }
+          }
+        }
+      },
+      "CreateChatCompletionStreamResponse": {
+        "type": "object",
+        "required": ["id", "choices", "created", "model", "object"],
+        "description": "One `data:` event of a stream. Identical to a whole reply except that each choice carries `delta` rather than `message`.",
+        "properties": {
+          "id": { "type": "string" },
+          "object": { "type": "string", "examples": ["chat.completion.chunk"] },
+          "created": { "type": "integer" },
+          "model": { "type": "string", "examples": ["openai/gpt-5-nano"] },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["delta", "finish_reason", "index"],
+              "properties": {
+                "index": { "type": "integer" },
+                "finish_reason": {
+                  "type": ["string", "null"],
+                  "description": "`null` until the choice's last chunk."
+                },
+                "delta": {
+                  "type": "object",
+                  "properties": {
+                    "role": { "type": "string" },
+                    "content": { "type": ["string", "null"] },
+                    "refusal": { "type": ["string", "null"] },
+                    "tool_calls": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["index"],
+                        "properties": {
+                          "index": {
+                            "type": "integer",
+                            "description": "Reassemble fragments by this."
+                          },
+                          "id": { "type": "string" },
+                          "type": { "type": "string" },
+                          "function": {
+                            "type": "object",
+                            "properties": {
+                              "name": { "type": "string" },
+                              "arguments": { "type": "string" }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "usage": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/CompletionUsage" },
+              { "type": "null" }
+            ],
+            "description": "Sent on a final chunk when the request set `stream_options.include_usage`."
+          }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": ["error"],
+        "description": "The OpenAI error envelope, plus fields warpllm adds on this surface only. An HTTP caller can ignore a field it does not recognize.",
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["message"],
+            "properties": {
+              "message": { "type": "string" },
+              "type": {
+                "type": ["string", "null"],
+                "description": "OpenAI error family.",
+                "examples": ["invalid_request_error", "rate_limit_error", "insufficient_quota", "server_error"]
+              },
+              "code": {
+                "type": ["string", "null"],
+                "description": "The failure's own slug. The only field separating failures that share a status.",
+                "examples": ["insufficient_quota", "rate_limit_exceeded", "context_length_exceeded"]
+              },
+              "param": { "type": ["string", "null"] },
+              "origin": {
+                "type": "string",
+                "enum": ["gateway", "provider"],
+                "description": "`gateway` means the provider was never reached or never asked, and retrying the identical call changes nothing."
+              },
+              "warpllm_code": {
+                "type": "string",
+                "description": "warpllm's own taxonomy slug. This surface only.",
+                "examples": ["quota_exceeded", "stream_stalled", "invalid_request"]
+              },
+              "provider": {
+                "type": "string",
+                "description": "Which provider answered. Absent when none did.",
+                "examples": ["deepseek"]
+              },
+              "provider_status": {
+                "type": "integer",
+                "description": "The upstream's own status, before normalization.",
+                "examples": [402]
+              },
+              "provider_code": {
+                "type": "string",
+                "description": "The upstream's own code, when it sent one."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

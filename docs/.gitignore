@@ -1,0 +1,4 @@
+# Mintlify CLI cache and local build output
+.mint/
+.mintlify/
+node_modules/

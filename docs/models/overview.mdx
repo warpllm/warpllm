@@ -1,0 +1,131 @@
+---
+title: "Model roster"
+description: "Every model warpllm can route to, with its published limits."
+icon: "cube"
+---
+
+import ModelRoster from '/snippets/model-roster.mdx'
+
+These tables are generated from
+[`crates/warpllm/src/registry/specs.yaml`](https://github.com/warpllm/warpllm/blob/main/crates/warpllm/src/registry/specs.yaml),
+the registry compiled into the shipped binary. What you see here is what
+warpllm will route.
+
+<Info>
+  The roster is **closed**. A name that is not below is an error, not a guess —
+  see [Model routing](/concepts/model-routing).
+</Info>
+
+<Warning>
+  These tables are generated from `main`, so they can be ahead of the package
+  you installed. A provider or model added since the last release routes only
+  once the next release ships — until then the string resolves on a build from
+  source and is rejected by the published packages. The
+  [changelog](https://github.com/warpllm/warpllm/blob/main/CHANGELOG.md) says
+  what landed in which version.
+</Warning>
+
+## Reading the columns
+
+<ResponseField name="Model string" type="what you send">
+  The full `provider/model` value for the request's `model` field.
+</ResponseField>
+<ResponseField name="Sent upstream as" type="what the provider sees">
+  Usually the same as the last segment. It differs when warpllm's routing alias
+  differs from the provider's own name — every OpenRouter entry, for instance,
+  where the provider's identifier is a two-segment slug.
+</ResponseField>
+<ResponseField name="Context window" type="tokens">
+  The provider's published context window, recorded verbatim. Note this is the
+  **window**, not the provider's "maximum input tokens" figure, which is
+  usually the window minus the output ceiling.
+</ResponseField>
+<ResponseField name="Max output" type="tokens">
+  The provider's published output ceiling.
+</ResponseField>
+
+<Warning>
+  A dash means the provider **publishes no figure** — never that the limit is
+  unlimited. The registry omits a number rather than guessing one.
+</Warning>
+
+<ModelRoster />
+
+## About the OpenRouter entries
+
+OpenRouter is an aggregator, so each entry is a curated pick from its catalog
+rather than a catch-all. One slug is not one model on one host: it fans out
+across every provider serving those weights, and they disagree about limits.
+
+The registry records the **narrowest** figure any endpoint offers, because an
+unpinned request may land on any of them. Where the spread is too wide to
+promise anything — `moonshotai/kimi-k2.6` runs across 21 endpoints whose max
+output spans 16,384 to 262,144 — the limit is omitted instead.
+
+`openrouter/auto` is OpenRouter's alias for letting it pick the model per
+request, so it carries no limits at all.
+
+## About the OpenCode Zen entries
+
+Zen re-hosts other people's models, and it is the first provider here that does
+not serve its whole catalog over one protocol — it publishes an endpoint **per
+model**. Only `/chat/completions` is a surface warpllm implements, so that is
+what the `opencode` provider is.
+
+Its GPT, Grok, and Muse models are absent because they sit on the Responses
+API; its Claude and Qwen models speak Anthropic's `/messages`, and its Gemini
+models Google's own shape. None of those have an `api:` here yet, and
+registering them would hand back a model string that resolves and then fails
+upstream on every request.
+
+No entry carries `capabilities`: Zen publishes a price per model and no context
+window, output ceiling, or concurrency figure. Every model is re-hosted, so the
+original provider's numbers are not Zen's to promise.
+
+## What is deliberately absent
+
+The registry leaves out more than it includes, and each omission is recorded
+with a reason in `specs.yaml`. The recurring ones:
+
+<AccordionGroup>
+  <Accordion title="Models on a surface warpllm does not serve" icon="ban">
+    Embeddings, moderation, images, audio, realtime, and legacy completions.
+    Also OpenAI's `-pro` models, which serve the Responses API rather than chat
+    completions.
+  </Accordion>
+  <Accordion title="Models with a near retirement date" icon="calendar-xmark">
+    Registering a name that breaks within the quarter would hand callers a
+    migration. Where a provider names a replacement, the replacement is on the
+    roster instead.
+  </Accordion>
+  <Accordion title="Moving aliases" icon="shuffle">
+    OpenAI's `chat-latest` serves chat completions, but the snapshot underneath
+    it moves — so any limits recorded for it would go stale without the file
+    changing.
+  </Accordion>
+  <Accordion title="Dated snapshots" icon="clock">
+    `gpt-5-2025-08-07` and its kind. The aliases are what callers name.
+  </Accordion>
+</AccordionGroup>
+
+## Keeping this page honest
+
+The tables are regenerated from the registry rather than maintained by hand:
+
+```bash
+uv run --with pyyaml docs/scripts/gen_model_roster.py
+```
+
+Add `--check` to fail instead of rewriting, which is what CI should run so a
+registry change cannot ship without the docs following.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Add a model" icon="plus" href="/models/add-a-model">
+    The registry edit and the rules its tests enforce.
+  </Card>
+  <Card title="Model routing" icon="route" href="/concepts/model-routing">
+    How these strings resolve at request time.
+  </Card>
+</CardGroup>

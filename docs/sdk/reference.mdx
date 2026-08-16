@@ -1,0 +1,805 @@
+---
+title: "SDK reference"
+description: "The full client surface in Python, TypeScript, and Rust, on one page."
+icon: "code"
+---
+
+The routing, translation, and error classification all live in the Rust core.
+The Python and Node packages are thin bindings over the same compiled binary,
+not reimplementations — so behaviour cannot drift between them.
+
+<Tip>
+  **Pick a language once.** Every tabbed block on this page stays in sync, so
+  selecting `Python` below switches the whole reference to Python.
+</Tip>
+
+## Install
+
+<Tabs>
+  <Tab title="Python">
+    ```bash
+    pip install warpllm
+    ```
+
+    Requires Python 3.10 or newer. `WarpLLM` is synchronous; `AsyncWarpLLM` is
+    the `await`-able twin, and both take the same arguments.
+  </Tab>
+
+  <Tab title="TypeScript">
+    ```bash
+    npm install @warpllm/warpllm
+    ```
+
+    Requires Node 20 or newer. Types ship with the package — there is no
+    `@types` install, and they are generated from the same Rust definitions the
+    core uses.
+  </Tab>
+
+  <Tab title="Rust">
+    ```bash
+    cargo add warpllm
+    cargo add tokio --features macros,rt-multi-thread
+    ```
+
+    Requires Rust 1.85 (edition 2024). warpllm ships no async runtime, so a
+    binary using it brings one.
+  </Tab>
+</Tabs>
+
+## Constructing a client
+
+<Tabs>
+  <Tab title="Python">
+    ```python
+    from warpllm import WarpLLM
+
+    client = WarpLLM(
+        base_url=None,             # override every provider's base URL
+        timeout=None,              # seconds; total deadline. Default 600
+        stream_read_timeout=None,  # seconds; longest silence on a stream
+        providers=None,            # narrow this client to named providers
+    )
+    ```
+
+    All four parameters are keyword-only and optional. `AsyncWarpLLM` takes the
+    same four.
+  </Tab>
+
+  <Tab title="TypeScript">
+    ```ts
+    import { WarpLLM } from '@warpllm/warpllm'
+
+    const client = new WarpLLM({
+      baseUrl: undefined,           // override every provider's base URL
+      timeout: undefined,           // SECONDS; total deadline. Default 600
+      streamReadTimeout: undefined, // SECONDS; longest silence on a stream
+      providers: undefined,         // narrow this client to named providers
+    })
+    ```
+
+    <Warning>
+      Both timeouts are in **seconds**, matching warpllm's Rust core. Node's
+      official OpenAI SDK takes milliseconds — a copied `600000` becomes a
+      7-day deadline here.
+    </Warning>
+  </Tab>
+
+  <Tab title="Rust">
+    ```rust
+    use warpllm::{Client, ClientConfig};
+
+    let client = Client::new(ClientConfig::default())?;
+    ```
+
+    ```rust
+    pub struct ClientConfig {
+        pub base_url: Option<String>,
+        pub timeout_secs: Option<u64>,
+        pub stream_read_timeout_secs: Option<u64>,
+        pub providers: Option<BTreeMap<String, ProviderConfig>>,
+    }
+    ```
+
+    <Note>
+      `ClientConfig` is `Default`, and it gained `providers` in 0.4.0 — an
+      exhaustive struct literal from 0.3.x no longer compiles. Add
+      `providers: None`, or use `..Default::default()`.
+    </Note>
+  </Tab>
+</Tabs>
+
+Construction reads the environment once and keeps the providers it can
+authenticate. It never *requires* credentials — a client built where no keys
+exist is valid, and each request then says which variable it wanted.
+
+<Warning>
+  Keys are a **snapshot**. Exporting one after the client is built has no
+  effect on that client, and a rotated key needs a new client. See
+  [Authentication](/get-started/authentication).
+</Warning>
+
+## Configuration options
+
+| Setting | Python | TypeScript | Rust | Default |
+| --- | --- | --- | --- | --- |
+| Base URL override | `base_url` | `baseUrl` | `base_url` | Each provider's own |
+| Total request deadline | `timeout` | `timeout` | `timeout_secs` | 600 seconds |
+| Longest silence on a stream | `stream_read_timeout` | `streamReadTimeout` | `stream_read_timeout_secs` | Unbounded |
+| Providers this client serves | `providers` | `providers` | `providers` | The whole roster |
+
+All timeouts are seconds, in every language. See [Timeouts](/concepts/timeouts).
+
+<Note>
+  `base_url` overrides the routed provider's base URL — a corporate proxy, or a
+  test double. It applies to **every** provider, so a client that sets it
+  should route to one.
+</Note>
+
+### Declaring providers
+
+By default a client serves warpllm's whole roster and reads every provider's
+environment variable. Declaring narrows both at once.
+
+<Tabs>
+  <Tab title="Python">
+    ```python
+    from warpllm import WarpLLM
+
+    client = WarpLLM(providers={
+        "openai": {},                      # serve it, key from the environment
+        "deepseek": {"api_key": "sk-..."}, # serve it, key supplied here
+    })
+    ```
+
+    `ProviderOptions` is a `TypedDict` with one optional `api_key` field.
+  </Tab>
+
+  <Tab title="TypeScript">
+    ```ts
+    import { WarpLLM } from '@warpllm/warpllm'
+
+    const client = new WarpLLM({
+      providers: {
+        openai: {},                       // serve it, key from the environment
+        deepseek: { apiKey: 'sk-...' },   // serve it, key supplied here
+      },
+    })
+    ```
+
+    `ProviderOptions` is exported as a type, with one optional `apiKey` field.
+  </Tab>
+
+  <Tab title="Rust">
+    ```rust
+    use std::collections::BTreeMap;
+
+    use warpllm::{Client, ClientConfig, ProviderConfig};
+
+    let client = Client::new(ClientConfig {
+        providers: Some(BTreeMap::from([
+            ("openai".into(), ProviderConfig::default()),
+            ("deepseek".into(), ProviderConfig { api_key: Some(key) }),
+        ])),
+        ..Default::default()
+    })?;
+    ```
+
+    `ProviderConfig`'s `Debug` prints `<redacted>` rather than an inline key, so
+    a `tracing::debug!(?config)` in caller code cannot leak one.
+  </Tab>
+</Tabs>
+
+It narrows two things:
+
+<Steps>
+  <Step title="What is read">
+    Only the declared providers' environment variables are consulted, so a key
+    exported for something else is not quietly adopted.
+  </Step>
+  <Step title="What is routable">
+    A model under a provider you did not declare is refused at admission with
+    `provider_not_declared`, before any socket opens — so a client serving one
+    provider cannot be talked into billing another by a model string.
+  </Step>
+</Steps>
+
+<Warning>
+  **Absent and empty are different claims.** Omitting `providers` serves the
+  whole roster, which is what every client did before the option existed.
+  Declaring an empty map says "none", and nothing routes.
+</Warning>
+
+An inline key is for callers holding keys somewhere the process environment
+cannot reach — a secret manager, a per-tenant database row. It wins over the
+variable the roster names, and it can authenticate a provider whose roster
+entry names no variable at all. An empty string is treated as unstated, so the
+variable still gets its turn.
+
+A declaration **selects** from the roster; it does not extend it. A provider
+name the roster does not hold fails when the client is built, not at the
+request that happened to route there.
+
+## Chat completions
+
+<Tabs>
+  <Tab title="Python">
+    ```python
+    def chat_completions(
+        self, request: Mapping[str, object]
+    ) -> CreateChatCompletionResponse | ChatCompletionStream
+    ```
+
+    ```python
+    completion = client.chat_completions({
+        "model": "openai/gpt-5-nano",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    })
+
+    print(completion["choices"][0]["message"]["content"])
+    ```
+
+    The request crosses verbatim, so fields warpllm does not model reach the
+    provider untouched. The parameter is a `Mapping`, so any key type-checks.
+
+    `AsyncWarpLLM` has the same method, awaited:
+
+    ```python
+    completion = await client.chat_completions({...})
+    ```
+  </Tab>
+
+  <Tab title="TypeScript">
+    ```ts
+    async chatCompletions<T extends CreateChatCompletionRequest & { stream: true }>(
+      request: T,
+    ): Promise<ChatCompletionStream>
+
+    async chatCompletions<
+      T extends CreateChatCompletionRequest & { stream?: false | null | undefined },
+    >(request: T): Promise<CreateChatCompletionResponse>
+
+    async chatCompletions<T extends CreateChatCompletionRequest>(
+      request: T,
+    ): Promise<CreateChatCompletionResponse | ChatCompletionStream>
+    ```
+
+    ```ts
+    const completion = await client.chatCompletions({
+      model: 'openai/gpt-5-nano',
+      messages: [{ role: 'user', content: 'Hello!' }],
+    })
+
+    console.log(completion.choices[0].message.content)
+    ```
+
+    The method is generic in `T` so a parameter warpllm does not model still
+    type-checks — TypeScript skips excess-property checking when the target is
+    a type parameter, which is what lets `{ ...request, seed: 7 }` compile
+    without a cast.
+  </Tab>
+
+  <Tab title="Rust">
+    ```rust
+    pub async fn chat_completions(
+        &self,
+        request: CreateChatCompletionRequest,
+    ) -> Result<CreateChatCompletionResponse>
+    ```
+
+    ```rust
+    use warpllm::{ChatCompletionRequestMessage, CreateChatCompletionRequest};
+
+    let completion = client
+        .chat_completions(CreateChatCompletionRequest {
+            model: "openai/gpt-5-nano".to_string(),
+            messages: vec![
+                ChatCompletionRequestMessage::new("system", "You are a helpful assistant."),
+                ChatCompletionRequestMessage::new("user", "Hello!"),
+            ],
+            ..Default::default()
+        })
+        .await?;
+
+    let content = completion.choices[0].message.content.as_deref();
+    println!("{}", content.unwrap_or_default());
+    ```
+
+    The struct carries a flattened `unknown_fields` map that round-trips
+    anything warpllm does not name.
+
+    <Warning>
+      Passing `stream: Some(true)` here returns `Error::InvalidInput`, not a
+      stream. Call `chat_completions_stream` instead.
+    </Warning>
+  </Tab>
+</Tabs>
+
+A request is admitted only when **both** halves hold: the roster registers the
+model, and this client holds a key for the provider serving it. They are
+checked in that order — a name nothing registers is a typo, and hearing "set
+`DEEPSEEK_API_KEY`" for `deepseek/typo` would send you after a credential you
+already have.
+
+## Streaming
+
+<Tabs>
+  <Tab title="Python">
+    ```python
+    stream = client.chat_completions({
+        "model": "openai/gpt-5-nano",
+        "messages": [{"role": "user", "content": "Count to five."}],
+        "stream": True,
+    })
+
+    for chunk in stream:
+        print(chunk["choices"][0]["delta"].get("content", ""), end="", flush=True)
+    ```
+
+    `stream=True` returns a `ChatCompletionStream`, matching the official OpenAI
+    SDK's one-method shape. Dispatch is on the **value**, so behaviour is
+    correct wherever a checker cannot resolve the overload.
+
+    <Warning>
+      Static typing here is best-effort: a dict literal carrying keys warpllm
+      does not model matches no `TypedDict`, so a checker may infer the
+      non-streaming return type. Where the annotation has to be right, call
+      `chat_completions_stream(request)` — same behaviour, precisely typed, and
+      it sets `stream` for you.
+    </Warning>
+
+    `AsyncWarpLLM` returns an `AsyncChatCompletionStream` for `async for`. It
+    awaits its own native method rather than borrowing the sync client's:
+    opening a stream is a request whose headers a provider may sit on, and
+    blocking on that inside a coroutine would stop the event loop.
+  </Tab>
+
+  <Tab title="TypeScript">
+    ```ts
+    const stream = await client.chatCompletions({
+      model: 'openai/gpt-5-nano',
+      messages: [{ role: 'user', content: 'Count to five.' }],
+      stream: true,
+    })
+
+    for await (const chunk of stream) {
+      process.stdout.write(chunk.choices[0]?.delta.content ?? '')
+    }
+    ```
+
+    `ChatCompletionStream` is an `AsyncIterable<CreateChatCompletionStreamResponse>`.
+
+    Three overloads, because `stream` decides the return type and a caller may
+    not have told the checker what it is:
+
+    | What you pass | What you get |
+    | --- | --- |
+    | A literal `stream: true` | `ChatCompletionStream` |
+    | Absent, `false`, or `null` | `CreateChatCompletionResponse` |
+    | A `boolean` variable, or a value through a helper | The union |
+
+    Narrowing a union is a nuisance; being handed a completion that is a stream
+    at runtime is a crash on `.choices[0].message`.
+  </Tab>
+
+  <Tab title="Rust">
+    ```rust
+    pub async fn chat_completions_stream(
+        &self,
+        request: CreateChatCompletionRequest,
+    ) -> Result<ChatCompletionStream>
+
+    // on the stream:
+    pub async fn next(&mut self) -> Option<Result<CreateChatCompletionStreamResponse>>
+    ```
+
+    ```rust
+    let mut stream = client
+        .chat_completions_stream(CreateChatCompletionRequest {
+            model: "openai/gpt-5-nano".to_string(),
+            messages: vec![ChatCompletionRequestMessage::new("user", "Count to five.")],
+            ..Default::default()
+        })
+        .await?;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if let Some(Some(content)) = &chunk.choices[0].delta.content {
+            print!("{content}");
+        }
+    }
+    ```
+
+    Streaming is its own method: a whole-reply return type cannot carry chunks.
+    It sets `stream` on your behalf, and the `Result` covers only what can fail
+    **before the first chunk** — once open, failures arrive as items.
+  </Tab>
+</Tabs>
+
+Streaming is its own roster entry, so a model that serves whole replies says
+nothing about whether it serves streamed ones. Both are checked against the
+model's `supported_apis`.
+
+The stream ending cleanly means the reply is **complete**. An upstream that
+stopped early raises `StreamTruncated` after every chunk that did arrive, so a
+truncated answer is never mistaken for a finished one. An error is terminal —
+whatever produced it also ended the stream. See [Streaming](/guides/streaming).
+
+## Errors
+
+<Tabs>
+  <Tab title="Python">
+    ```python
+    from warpllm import (
+        APIError,             # base: everything below, plus anything unrecognized
+        APIConnectionError,   # the provider was never reached
+        APIStatusError,       # a failure an upstream answered with
+        BadRequestError,          # 400
+        AuthenticationError,      # 401
+        PermissionDeniedError,    # 403
+        NotFoundError,            # 404
+        ConflictError,            # 409
+        UnprocessableEntityError, # 422
+        RateLimitError,           # 429
+        InternalServerError,      # 5xx
+    )
+    ```
+
+    The hierarchy is `APIError` → `APIConnectionError`, and `APIError` →
+    `APIStatusError` → each status class. So `except APIStatusError` catches
+    everything an upstream answered while letting a connection failure through.
+
+    ```python
+    e.message      # what went wrong
+    e.status_code  # on APIStatusError and its subclasses only
+    e.code         # the failure's own slug — the field that separates 429s
+    e.type         # OpenAI error family, e.g. "invalid_request_error"
+    e.param        # not modeled yet; always None
+    e.request_id   # the upstream's request id, when it sent one
+    e.headers      # retry-after and x-request-id, when the upstream sent them
+    e.body         # the error object as it came off the wire
+    ```
+
+    ```python
+    from warpllm import RateLimitError
+
+    try:
+        client.chat_completions(request)
+    except RateLimitError as e:
+        # A 429 covers two failures needing opposite handling.
+        if e.code == "insufficient_quota":
+            top_up()
+        else:
+            back_off(e.headers.get("retry-after"))
+    ```
+  </Tab>
+
+  <Tab title="TypeScript">
+    ```ts
+    import {
+      APIError,             // base: everything below, plus anything unrecognized
+      APIConnectionError,   // the provider was never reached
+      BadRequestError,          // 400
+      AuthenticationError,      // 401
+      PermissionDeniedError,    // 403
+      NotFoundError,            // 404
+      ConflictError,            // 409
+      UnprocessableEntityError, // 422
+      RateLimitError,           // 429
+      InternalServerError,      // 5xx
+    } from '@warpllm/warpllm'
+    ```
+
+    <Note>
+      Unlike Python there is no `APIStatusError` intermediate — every class
+      extends `APIError` directly, and `err.status === undefined` is what marks
+      a failure the provider never answered.
+    </Note>
+
+    ```ts
+    err.message    // what went wrong
+    err.status     // undefined when the provider was never reached
+    err.code       // the failure's own slug — the field that separates 429s
+    err.type       // OpenAI error family, e.g. "invalid_request_error"
+    err.param      // not modeled yet
+    err.requestID  // the upstream's request id, when it sent one
+    err.headers    // retry-after and x-request-id, when the upstream sent them
+    err.error      // the error object as it came off the wire
+    ```
+
+    ```ts
+    import { RateLimitError } from '@warpllm/warpllm'
+
+    try {
+      await client.chatCompletions(request)
+    } catch (err) {
+      if (err instanceof RateLimitError) {
+        if (err.code === 'insufficient_quota') await topUp()
+        else await backOff(err.headers?.['retry-after'])
+      } else {
+        throw err
+      }
+    }
+    ```
+  </Tab>
+
+  <Tab title="Rust">
+    ```rust
+    pub enum Error {
+        // warpllm's own
+        InvalidInput(String),
+        InvalidModel { given: String },
+        MissingApiKey { provider: &'static str, env_var: Option<&'static str> },
+        ProviderNotDeclared { provider: &'static str, requested: String },
+        Network { provider: &'static str, source: reqwest::Error },
+        Decode { provider: &'static str, message: String },
+        StreamTruncated { provider: &'static str },
+        StreamStalled { provider: &'static str, timeout: Duration },
+        NotImplemented(&'static str),
+        Internal(String),
+
+        // the provider's, normalized — each carrying a Box<ProviderError>
+        RateLimited(..), QuotaExceeded(..), Overloaded(..), ServerError(..),
+        ContextLengthExceeded(..), ContentFilter(..), Authentication(..),
+        PermissionDenied(..), ModelNotFound(..), InvalidRequest(..), Unknown(..),
+    }
+    ```
+
+    `Error` is `#[non_exhaustive]` — match with a catch-all arm.
+
+    | Method | Gives you |
+    | --- | --- |
+    | `origin()` | `Origin::Gateway` or `Origin::Provider` — whether an upstream ever answered |
+    | `code()` | warpllm's own stable slug, e.g. `quota_exceeded` |
+    | `provider_error()` | `Option<&ProviderError>` — the upstream's status, code, `retry_after`, request id |
+    | `to_openai()` | This failure as an OpenAI-compatible surface reports it |
+
+    ```rust
+    use warpllm::{Error, Origin};
+
+    match client.chat_completions(request).await {
+        Ok(completion) => handle(completion),
+        Err(Error::QuotaExceeded(e)) => top_up(&e),
+        Err(Error::RateLimited(e)) => back_off(e.retry_after),
+        Err(e) if e.origin() == Origin::Gateway => {
+            // Retrying the identical call changes nothing.
+            tracing::error!("warpllm: {e} ({})", e.code());
+        }
+        Err(e) => tracing::error!("provider: {e} ({})", e.code()),
+    }
+    ```
+
+    <Note>
+      `Origin` is deliberately **not** `non_exhaustive`. Two arms is the whole
+      design — every failure is one side or the other.
+    </Note>
+  </Tab>
+</Tabs>
+
+Python and Node raise the classes the official OpenAI SDK raises, selected from
+the same status warpllm rendered. No binding interprets a status on its own.
+See [Errors](/concepts/errors) for the full taxonomy and what is worth
+retrying.
+
+## Types
+
+<Tabs>
+  <Tab title="Python">
+    ```python
+    from warpllm import (
+        ChatCompletionRequestMessage,
+        CreateChatCompletionRequest,
+        CreateChatCompletionResponse,
+        CreateChatCompletionStreamResponse,
+        ProviderOptions,
+    )
+    ```
+
+    They are `TypedDict`s, so they cost nothing at runtime and are optional.
+    `chat_completions` accepts any `Mapping` precisely because warpllm forwards
+    fields it does not model.
+
+    Responses come back as plain `dict`s, so you subscript:
+    `completion["choices"][0]["message"]["content"]`.
+  </Tab>
+
+  <Tab title="TypeScript">
+    ```ts
+    import type {
+      ChatCompletionRequestMessage,
+      CreateChatCompletionRequest,
+      CreateChatCompletionResponse,
+      CreateChatCompletionStreamResponse,
+      ProviderOptions,
+      WarpLLMOptions,
+    } from '@warpllm/warpllm'
+    ```
+
+    Every request and response type is exported, generated from the same Rust
+    definitions the core uses. Responses are plain objects with dot access.
+
+    <Note>
+      The generated declarations carry no index signature, deliberately: adding
+      one would make every `interface` in the official `openai` package
+      unassignable here.
+    </Note>
+  </Tab>
+
+  <Tab title="Rust">
+    Request and response types are re-exported from the crate root. Registry
+    lookups are available too:
+
+    ```rust
+    use warpllm::{Api, fetch_model};
+
+    let (provider, model) = fetch_model("openai/gpt-5-nano")?;
+
+    provider.name();          // "openai"
+    provider.base_url();      // "https://api.openai.com/v1"
+    provider.env_api_key();   // Some("OPENAI_API_KEY")
+
+    model.model();                                   // "gpt-5-nano" — the wire name
+    model.supports_api(Api::OpenAiCompatChatCompletions);
+    model.deprecation_date();                        // Option<&str>
+    model.capabilities().max_input_tokens();         // Option<u32>
+    model.capabilities().max_output_tokens();        // Option<u32>
+    model.capabilities().max_concurrent_requests();  // Option<u32>
+    ```
+
+    `ProviderSpec` and `ModelSpec` are read-only by construction — every field
+    is private and there is no public constructor.
+
+    <Warning>
+      A `None` capability means the registry has **no published figure**. It
+      never means unlimited.
+    </Warning>
+
+    `JsonClient` and `JsonChatStream` take and return JSON strings rather than
+    typed structs. They exist for the FFI bindings; a Rust caller wants
+    `Client`.
+  </Tab>
+</Tabs>
+
+### Absent versus null
+
+Response fields that are both optional and nullable distinguish a key the
+provider omitted from one it sent as `null`.
+
+<Tabs>
+  <Tab title="Python">
+    A missing key versus a `None` value. `chunk["choices"][0]["delta"].get("content")`
+    returns `None` for both — use `in` to tell them apart when it matters.
+  </Tab>
+
+  <Tab title="TypeScript">
+    `undefined` versus `null`. Use `===` rather than a truthiness check when
+    the difference matters.
+  </Tab>
+
+  <Tab title="Rust">
+    `Option<Option<T>>`. The outer layer is "did the provider send the key at
+    all", the inner one "did it send an explicit `null`".
+
+    ```rust
+    match &chunk.choices[0].delta.content {
+        None => {}              // key absent — a role-only or tool-call chunk
+        Some(None) => {}        // explicit null
+        Some(Some(text)) => {}  // content
+    }
+    ```
+
+    Request messages carry the same shape, which is why there is a constructor
+    for the ordinary case:
+
+    ```rust
+    ChatCompletionRequestMessage::new("user", "Hello!")
+    ```
+
+    An assistant turn carrying only `tool_calls` omits `content`, and the
+    legacy `role: "function"` message requires the key while permitting the
+    null — both are real, and a caller writing a prompt wants neither.
+  </Tab>
+</Tabs>
+
+## Version
+
+<Tabs>
+  <Tab title="Python">
+    ```python
+    import warpllm
+
+    warpllm.__version__   # "0.4.0"
+    warpllm.version()     # the same string, from the native binary
+    ```
+  </Tab>
+
+  <Tab title="TypeScript">
+    ```ts
+    import { version } from '@warpllm/warpllm'
+
+    console.log(version()) // "0.4.0"
+    ```
+  </Tab>
+
+  <Tab title="Rust">
+    ```rust
+    println!("{}", warpllm::version()); // "0.4.0"
+    ```
+
+    warpllm emits through [`tracing`](https://docs.rs/tracing) and installs no
+    subscriber of its own, so a library caller sees nothing until it opts in:
+
+    ```rust
+    tracing_subscriber::fmt().with_env_filter("warpllm=info").init();
+    ```
+
+    Client construction then logs which providers the environment
+    authenticated — names only. A key never reaches a log, in full or in part.
+  </Tab>
+</Tabs>
+
+## Shared behaviour
+
+Everything below holds identically in all three:
+
+- Model strings are `provider/model`, matched against a closed roster.
+- API keys are read from the environment **once, when the client is built**.
+- Request fields warpllm does not model are forwarded to the provider untouched.
+- The response's `model` echoes your routing string, not the upstream name.
+- A stream that ends cleanly is a complete reply.
+- There are no built-in retries and no fallback chain yet; both are planned.
+  Rust additionally has an unreleased `BalancedClient` for weighted load
+  balancing — see [Model routing](/concepts/model-routing#spreading-load-retrying-and-failing-over).
+
+## Where the surfaces differ, and why
+
+<AccordionGroup>
+  <Accordion title="Rust splits streaming into its own method" icon="rust">
+    `chat_completions` with `stream: Some(true)` returns `Error::InvalidInput`
+    pointing at `chat_completions_stream`. A whole-reply return type cannot
+    carry chunks, so the entrypoint says where to go rather than quietly
+    serving the wrong shape.
+
+    Python and Node dispatch on the value instead, matching the official OpenAI
+    SDK's one-method shape in each language.
+  </Accordion>
+
+  <Accordion title="Rust exposes warpllm's own error taxonomy" icon="triangle-exclamation">
+    `warpllm::Error` distinguishes `RateLimited` from `QuotaExceeded`, and
+    `origin()` says whether a provider ever answered. The bindings receive the
+    OpenAI *rendering* of that taxonomy instead.
+
+    This is deliberate. A field on an SDK error object is a promise to keep
+    across versions; warpllm's own vocabulary stays Rust-side, where changing
+    it costs a recompile instead of a major version. The
+    [gateway's HTTP envelope](/concepts/errors#the-gateway-envelope) is the one
+    other surface that carries it.
+  </Accordion>
+
+  <Accordion title="Responses are plain data, not wrapper objects" icon="brackets-curly">
+    Rust has already parsed and validated the response. Rebuilding it into
+    Python or JavaScript objects would redo that work to hand back the same
+    fields under the same names.
+
+    Python therefore subscripts (`completion["choices"][0]`) while Node and
+    Rust use dot access.
+  </Accordion>
+
+  <Accordion title="Static typing for streams is best-effort in Python" icon="python">
+    warpllm takes one mapping so unmodeled fields cross untouched, which means
+    the streaming overload has to match the mapping's *type* — and a dict
+    literal carrying extra keys matches no `TypedDict`. Runtime behaviour is
+    exact; where the annotation has to be right, call
+    `chat_completions_stream`.
+  </Accordion>
+</AccordionGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Errors" icon="triangle-exclamation" href="/concepts/errors">
+    The full taxonomy and what is worth retrying.
+  </Card>
+  <Card title="Run the gateway" icon="server" href="/gateway/run">
+    The same core behind an HTTP surface.
+  </Card>
+</CardGroup>

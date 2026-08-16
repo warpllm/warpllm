@@ -1,0 +1,195 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "warpllm",
+  "description": "A warp-speed, robust AI gateway for Rust, Node, and Python applications.",
+  "colors": {
+    "primary": "#7C5CFF",
+    "light": "#A78BFA",
+    "dark": "#5B21B6"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get started",
+            "icon": "rocket",
+            "pages": [
+              "index",
+              "quickstart",
+              "get-started/installation",
+              "get-started/authentication"
+            ]
+          },
+          {
+            "group": "Core concepts",
+            "icon": "book-open",
+            "pages": [
+              "concepts/model-routing",
+              "concepts/requests-and-responses",
+              "concepts/errors",
+              "concepts/timeouts"
+            ]
+          },
+          {
+            "group": "Guides",
+            "icon": "compass",
+            "pages": [
+              "guides/streaming",
+              "guides/tool-calling",
+              "guides/structured-outputs",
+              "guides/migrate-from-openai"
+            ]
+          },
+          {
+            "group": "SDK reference",
+            "icon": "code",
+            "pages": [
+              "sdk/reference"
+            ]
+          },
+          {
+            "group": "Models",
+            "icon": "cube",
+            "pages": [
+              "models/overview",
+              "models/add-a-model"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Gateway",
+        "groups": [
+          {
+            "group": "Self-hosted gateway",
+            "icon": "server",
+            "pages": [
+              "gateway/overview",
+              "gateway/run",
+              "gateway/configuration",
+              "gateway/openai-clients"
+            ]
+          },
+          {
+            "group": "HTTP API",
+            "icon": "brackets-curly",
+            "pages": [
+              "api-reference/introduction",
+              "api-reference/create-chat-completion",
+              "api-reference/health"
+            ]
+          }
+        ]
+      }
+    ],
+    "global": {
+      "anchors": [
+        {
+          "anchor": "GitHub",
+          "href": "https://github.com/warpllm/warpllm",
+          "icon": "github"
+        },
+        {
+          "anchor": "Changelog",
+          "href": "https://github.com/warpllm/warpllm/blob/main/CHANGELOG.md",
+          "icon": "clock-rotate-left"
+        },
+        {
+          "anchor": "Discord",
+          "href": "https://discord.gg/payU7Vzuq5",
+          "icon": "discord"
+        },
+        {
+          "anchor": "Reddit",
+          "href": "https://www.reddit.com/r/warpllm/",
+          "icon": "reddit"
+        }
+      ]
+    }
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Discord",
+        "href": "https://discord.gg/payU7Vzuq5"
+      }
+    ],
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/warpllm/warpllm"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/warpllm/warpllm",
+      "discord": "https://discord.gg/payU7Vzuq5",
+      "reddit": "https://www.reddit.com/r/warpllm/"
+    },
+    "links": [
+      {
+        "header": "Packages",
+        "items": [
+          {
+            "label": "crates.io",
+            "href": "https://crates.io/crates/warpllm"
+          },
+          {
+            "label": "PyPI",
+            "href": "https://pypi.org/project/warpllm/"
+          },
+          {
+            "label": "npm",
+            "href": "https://www.npmjs.com/package/@warpllm/warpllm"
+          }
+        ]
+      },
+      {
+        "header": "Project",
+        "items": [
+          {
+            "label": "Roadmap",
+            "href": "https://github.com/warpllm/warpllm/issues"
+          },
+          {
+            "label": "Contributing",
+            "href": "https://github.com/warpllm/warpllm/blob/main/CONTRIBUTING.md"
+          },
+          {
+            "label": "License",
+            "href": "https://github.com/warpllm/warpllm/blob/main/LICENSE"
+          }
+        ]
+      }
+    ]
+  },
+  "api": {
+    "playground": {
+      "display": "interactive"
+    },
+    "examples": {
+      "languages": [
+        "curl",
+        "python",
+        "javascript"
+      ],
+      "defaults": "required"
+    }
+  },
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "chatgpt",
+      "claude"
+    ]
+  },
+  "search": {
+    "prompt": "Search warpllm docs"
+  },
+  "seo": {
+    "indexing": "navigable"
+  }
+}

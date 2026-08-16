@@ -1,0 +1,148 @@
+---
+title: "Structured outputs"
+description: "Ask for JSON, or for JSON matching a schema you supply."
+icon: "brackets-curly"
+---
+
+`response_format` constrains the shape of the reply. warpllm forwards it and
+returns what the provider produces.
+
+## JSON mode
+
+The loosest form: valid JSON, shape unconstrained.
+
+```json
+{
+  "model": "openai/gpt-5-nano",
+  "messages": [
+    { "role": "system", "content": "Reply with JSON." },
+    { "role": "user", "content": "Oslo's population and country." }
+  ],
+  "response_format": { "type": "json_object" }
+}
+```
+
+<Warning>
+  Providers generally require the word "JSON" to appear somewhere in the
+  messages when `json_object` is set, and reject the request otherwise. That
+  rejection reaches you as a
+  [`BadRequestError`](/concepts/errors) from the provider.
+</Warning>
+
+## JSON Schema
+
+The strict form: the reply conforms to a schema you supply.
+
+<CodeGroup>
+
+```python Python
+completion = client.chat_completions({
+    "model": "openai/gpt-5-nano",
+    "messages": [{"role": "user", "content": "Oslo's population and country."}],
+    "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "city_facts",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "country": {"type": "string"},
+                    "population": {"type": "integer"},
+                },
+                "required": ["city", "country", "population"],
+                "additionalProperties": False,
+            },
+        },
+    },
+})
+
+facts = json.loads(completion["choices"][0]["message"]["content"])
+```
+
+```ts TypeScript
+const completion = await client.chatCompletions({
+  model: 'openai/gpt-5-nano',
+  messages: [{ role: 'user', content: "Oslo's population and country." }],
+  response_format: {
+    type: 'json_schema',
+    json_schema: {
+      name: 'city_facts',
+      strict: true,
+      schema: {
+        type: 'object',
+        properties: {
+          city: { type: 'string' },
+          country: { type: 'string' },
+          population: { type: 'integer' },
+        },
+        required: ['city', 'country', 'population'],
+        additionalProperties: false,
+      },
+    },
+  },
+})
+
+const facts = JSON.parse(completion.choices[0].message.content ?? '{}')
+```
+
+</CodeGroup>
+
+### The json_schema object
+
+<ResponseField name="name" type="string" required>
+  A name for the schema. Providers use it in their own error messages.
+</ResponseField>
+<ResponseField name="schema" type="object">
+  The JSON Schema itself.
+</ResponseField>
+<ResponseField name="strict" type="boolean">
+  Ask the provider to guarantee conformance rather than merely attempt it.
+  Providers that support it usually also constrain what the schema may contain
+  — commonly requiring `additionalProperties: false` and listing every property
+  in `required`.
+</ResponseField>
+<ResponseField name="description" type="string">
+  Optional guidance for the model about what the schema is for.
+</ResponseField>
+
+## Always parse defensively
+
+`content` is a string. Even with `strict: true`, treat parsing as fallible:
+
+- The model may hit `max_tokens` mid-object. Check `finish_reason` — a `length`
+  finish means the JSON is cut off.
+- A refusal populates `message.refusal` and leaves `content` null.
+- Not every provider on the roster enforces `strict` the same way.
+
+```python
+choice = completion["choices"][0]
+
+if choice["message"].get("refusal"):
+    handle_refusal(choice["message"]["refusal"])
+elif choice["finish_reason"] == "length":
+    raise ValueError("reply truncated before the JSON closed")
+else:
+    facts = json.loads(choice["message"]["content"])
+```
+
+## Provider support varies
+
+`response_format` is forwarded, not emulated. A provider that does not
+implement `json_schema` rejects the request rather than degrading to plain
+text, and that rejection reaches you as a `BadRequestError` with the provider's
+own message.
+
+<Tip>
+  For a portable alternative, define the shape as a
+  [tool](/guides/tool-calling) and force it with `tool_choice`. Function
+  parameters are JSON Schema too, and tool support is more widely implemented
+  than `response_format`.
+</Tip>
+
+## Next
+
+<Card title="Tool calling" icon="wrench" href="/guides/tool-calling">
+  The portable route to a shaped answer.
+</Card>

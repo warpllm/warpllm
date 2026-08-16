@@ -1,0 +1,98 @@
+---
+title: "HTTP API"
+sidebarTitle: "Introduction"
+description: "The OpenAI-compatible surface of a self-hosted warpllm gateway."
+icon: "brackets-curly"
+tag: "Preview"
+---
+
+import GatewayPreview from '/snippets/gateway-preview.mdx'
+
+<GatewayPreview />
+
+This reference describes the HTTP surface of a gateway **you run**. There is no
+hosted warpllm API — see [Run the gateway](/gateway/run) to start one.
+
+## Base URL
+
+```text
+http://localhost:8080
+```
+
+That is the default bind (`0.0.0.0:8080`). Chat completions live under `/v1`,
+so an OpenAI client's base URL is `http://localhost:8080/v1`.
+
+## Authentication
+
+<Warning>
+  None, on this surface. The gateway ignores the caller's `Authorization`
+  header — it is never forwarded — and authenticates upstream with its own
+  provider keys from the environment. Whatever key a client sends is unused.
+
+  Because there is no caller authentication, do not expose a gateway to a
+  network you do not control.
+</Warning>
+
+## Endpoints
+
+<CardGroup cols={2}>
+  <Card title="Create a chat completion" icon="message" href="/api-reference/create-chat-completion">
+    `POST /v1/chat/completions` — whole or streamed.
+  </Card>
+  <Card title="Liveness check" icon="heart-pulse" href="/api-reference/health">
+    `GET /health` — status and version.
+  </Card>
+</CardGroup>
+
+## Conventions
+
+<AccordionGroup>
+  <Accordion title="Model strings carry a provider prefix" icon="route">
+    `openai/gpt-5-nano`, not `gpt-5-nano`. The roster is closed — an unlisted
+    name returns 400 rather than being forwarded to an upstream default. See
+    [Model routing](/concepts/model-routing).
+  </Accordion>
+
+  <Accordion title="Unmodeled request fields are forwarded" icon="arrow-right">
+    A field not in the request schema reaches the provider untouched rather
+    than being rejected, so a provider parameter warpllm has not learned yet is
+    still usable.
+  </Accordion>
+
+  <Accordion title="The response echoes your routing string" icon="reply">
+    `model` in every response and every chunk is what you asked for, not the
+    upstream's own name.
+  </Accordion>
+
+  <Accordion title="Errors use the OpenAI envelope, plus extras" icon="triangle-exclamation">
+    So an official SDK raises its own typed exception. warpllm adds `origin`,
+    `warpllm_code`, `provider`, `provider_status`, and `provider_code` —
+    additive fields a client can ignore. See
+    [Errors](/concepts/errors#the-gateway-envelope).
+  </Accordion>
+
+  <Accordion title="There is no /v1/models endpoint" icon="list">
+    The roster is compiled into the binary. The
+    [model roster page](/models/overview) is generated from it.
+  </Accordion>
+</AccordionGroup>
+
+## Status codes
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Success — one JSON body, or a `text/event-stream` |
+| 400 | Malformed request, unlisted model, oversized prompt, or content filtered |
+| 401 | No key for the routed provider, or the provider rejected it |
+| 403 | Valid credential, not entitled |
+| 404 | The provider does not serve that model |
+| 429 | Rate limited **or** quota exhausted — read `code` |
+| 500 | warpllm could not set itself up |
+| 502 | The provider was never reached, answered unreadably, or ended a stream early |
+| 503 | The provider is shedding load |
+| 504 | The stream went silent past `--stream-read-timeout-secs` |
+
+<Note>
+  502 covers the case OpenAI has no spelling for: a client talking to OpenAI
+  directly never sees "the thing behind this gateway did not answer".
+</Note>

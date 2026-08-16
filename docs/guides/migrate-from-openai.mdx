@@ -1,0 +1,169 @@
+---
+title: "Migrating from the OpenAI SDK"
+description: "Two routes off the official SDK: swap the base URL, or swap the client."
+icon: "arrow-right-arrow-left"
+---
+
+warpllm speaks the OpenAI chat-completions shape deliberately, so migration is
+small. Pick the route that matches how much you want to change.
+
+<CardGroup cols={2}>
+  <Card title="Keep your SDK" icon="server" href="/gateway/overview">
+    Point the official OpenAI client at a warpllm gateway. Application code
+    does not change at all.
+  </Card>
+  <Card title="Swap the SDK" icon="code" href="/sdk/reference">
+    Replace the client with warpllm's. One dependency fewer, no extra hop, no
+    service to operate.
+  </Card>
+</CardGroup>
+
+## Route 1 — change the base URL
+
+<Steps>
+  <Step title="Run the gateway with your provider keys">
+    ```bash
+    OPENAI_API_KEY=sk-... warpllm-server --port 8080
+    ```
+  </Step>
+  <Step title="Point your existing client at it">
+    <CodeGroup>
+
+    ```python Python
+    from openai import OpenAI
+
+    client = OpenAI(base_url="http://localhost:8080/v1")
+
+    completion = client.chat.completions.create(
+        model="openai/gpt-5-nano",
+        messages=[{"role": "user", "content": "Hello!"}],
+    )
+    ```
+
+    ```ts TypeScript
+    import OpenAI from 'openai'
+
+    const client = new OpenAI({ baseURL: 'http://localhost:8080/v1' })
+
+    const completion = await client.chat.completions.create({
+      model: 'openai/gpt-5-nano',
+      messages: [{ role: 'user', content: 'Hello!' }],
+    })
+    ```
+
+    </CodeGroup>
+  </Step>
+  <Step title="Prefix your model strings">
+    `gpt-5-nano` becomes `openai/gpt-5-nano`. This is the only change to the
+    request itself, and it is what buys you provider switching.
+  </Step>
+</Steps>
+
+<Warning>
+  The gateway authenticates upstream with its **own** keys and ignores the
+  caller's `Authorization` header entirely — it is never forwarded, so whatever
+  key your SDK sends is simply unused. See
+  [Authentication](/get-started/authentication#gateway-authentication) for what
+  that means for exposing the gateway.
+</Warning>
+
+## Route 2 — swap the client
+
+### Constructing a client
+
+| OpenAI SDK | warpllm |
+| --- | --- |
+| `OpenAI(api_key=...)` | `WarpLLM()` — keys come from the environment, or `providers=` |
+| `OpenAI(timeout=600)` | `WarpLLM(timeout=600)` — seconds, not a timeout object |
+| `AsyncOpenAI()` | `AsyncWarpLLM()` |
+| `new OpenAI({ apiKey })` | `new WarpLLM()` |
+| `new OpenAI({ timeout: 600_000 })` | `new WarpLLM({ timeout: 600 })` — **seconds** |
+
+<Warning>
+  Node's OpenAI SDK takes `timeout` in **milliseconds**; warpllm takes
+  **seconds**, matching its Rust core and its Python binding. A copied `600000`
+  becomes a 7-day deadline.
+</Warning>
+
+### Making a call
+
+| OpenAI SDK | warpllm |
+| --- | --- |
+| `client.chat.completions.create(**request)` | `client.chat_completions(request)` |
+| `await client.chat.completions.create(request)` | `await client.chatCompletions(request)` |
+| Keyword arguments | One request mapping/object |
+| `model="gpt-5-nano"` | `model="openai/gpt-5-nano"` |
+| `completion.choices[0].message.content` | Python: `completion["choices"][0]["message"]["content"]` |
+
+<Note>
+  warpllm takes **one mapping** rather than keyword arguments. That is what
+  lets fields warpllm does not model cross to the provider untouched — see
+  [Requests and responses](/concepts/requests-and-responses).
+</Note>
+
+### Responses are plain data
+
+The OpenAI SDK returns Pydantic models; warpllm returns the JSON shape. In
+Python that means subscripting rather than attribute access. Node and Rust
+already used dot access, so nothing changes there.
+
+```diff
+- content = completion.choices[0].message.content
++ content = completion["choices"][0]["message"]["content"]
+```
+
+### Streaming
+
+```diff
+- stream = client.chat.completions.create(model=..., messages=..., stream=True)
++ stream = client.chat_completions({"model": ..., "messages": ..., "stream": True})
+
+  for chunk in stream:
+-     print(chunk.choices[0].delta.content or "", end="")
++     print(chunk["choices"][0]["delta"].get("content", ""), end="")
+```
+
+See [Streaming](/guides/streaming) for the typed variants and the
+completeness guarantees.
+
+### Errors
+
+The exception classes have the same names and the same dispatch, so `except
+RateLimitError` keeps working. Two differences:
+
+- Python's attribute is `status_code`; Node's is `status`. warpllm matches the
+  official SDK in each language.
+- Node has no `APIStatusError` intermediate — every class extends `APIError`
+  directly, and `err.status === undefined` marks a connection failure.
+
+See [Errors](/concepts/errors) for the full table.
+
+## What does not carry over
+
+warpllm implements the chat-completions surface only. These have no warpllm
+equivalent today:
+
+| OpenAI feature | Status |
+| --- | --- |
+| Responses API | Registered as a surface, not implemented |
+| Embeddings, moderation, images, audio, realtime | Not implemented |
+| Legacy completions | Not implemented |
+| Built-in retries | Not yet — [write your own policy](/concepts/errors#retrying) for now |
+| `n > 1` | Forwarded; chunks of multiple choices interleave by `index` |
+
+<Note>
+  A model whose registry entry does not list the surface you asked for is
+  refused before a request goes out, rather than being sent somewhere it will
+  fail. See [Model routing](/concepts/model-routing#surfaces).
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="SDK reference" icon="code" href="/sdk/reference">
+    The exact surface in each language.
+  </Card>
+  <Card title="Run the gateway" icon="server" href="/gateway/run">
+    Docker, cargo, and the flags.
+  </Card>
+</CardGroup>

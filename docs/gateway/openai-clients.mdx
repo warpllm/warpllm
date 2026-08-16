@@ -1,0 +1,173 @@
+---
+title: "Connecting a client"
+description: "Point the official OpenAI SDKs, curl, or anything OpenAI-compatible at a running gateway."
+icon: "plug"
+tag: "Preview"
+---
+
+import GatewayPreview from '/snippets/gateway-preview.mdx'
+
+<GatewayPreview />
+
+The gateway speaks the OpenAI chat-completions API, so any client that can take
+a base URL works. Two things change: the base URL, and the `provider/` prefix
+on the model string.
+
+## Official OpenAI SDKs
+
+<CodeGroup>
+
+```python Python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1")
+
+completion = client.chat.completions.create(
+    model="openai/gpt-5-nano",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+
+print(completion.choices[0].message.content)
+```
+
+```ts TypeScript
+import OpenAI from 'openai'
+
+const client = new OpenAI({ baseURL: 'http://localhost:8080/v1' })
+
+const completion = await client.chat.completions.create({
+  model: 'openai/gpt-5-nano',
+  messages: [{ role: 'user', content: 'Hello!' }],
+})
+
+console.log(completion.choices[0].message.content)
+```
+
+```bash curl
+curl http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "openai/gpt-5-nano",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+</CodeGroup>
+
+<Warning>
+  The gateway ignores the caller's `Authorization` header entirely — it is
+  never forwarded, and the gateway authenticates upstream with its own provider
+  keys. Whatever key your SDK sends is simply unused. It also performs **no
+  caller authentication** of its own — see
+  [Gateway overview](/gateway/overview#authentication).
+</Warning>
+
+## Streaming
+
+Server-sent events, terminated by `data: [DONE]` — the shape an OpenAI SDK
+already expects.
+
+<CodeGroup>
+
+```python Python
+stream = client.chat.completions.create(
+    model="openai/gpt-5-nano",
+    messages=[{"role": "user", "content": "Count to five."}],
+    stream=True,
+)
+
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+```ts TypeScript
+const stream = await client.chat.completions.create({
+  model: 'openai/gpt-5-nano',
+  messages: [{ role: 'user', content: 'Count to five.' }],
+  stream: true,
+})
+
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? '')
+}
+```
+
+```bash curl
+curl -N http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "openai/gpt-5-nano",
+    "messages": [{"role": "user", "content": "Count to five."}],
+    "stream": true
+  }'
+```
+
+</CodeGroup>
+
+### How a streamed failure arrives
+
+The status is decided **once**, before a byte of the body exists.
+
+| When it fails | What you get |
+| --- | --- |
+| Before the response commits | An ordinary error response — real status, `Retry-After`, the provider's message |
+| After the 200 is committed | The error envelope as the **last event**, and no `[DONE]` |
+
+The missing sentinel is the point: `[DONE]` means the model finished, and
+sending one after a failure would tell a client the answer is complete when it
+is truncated. OpenAI does not send one either.
+
+## Other OpenAI-compatible tools
+
+Anything that accepts an OpenAI base URL should work — LangChain, LlamaIndex,
+Continue, and similar. Two rules:
+
+<Steps>
+  <Step title="Base URL includes /v1">
+    `http://localhost:8080/v1`. Tools that append `/v1` themselves take
+    `http://localhost:8080`.
+  </Step>
+  <Step title="Model strings keep the provider prefix">
+    `openai/gpt-5-nano`, not `gpt-5-nano`. A tool that hardcodes a bare model
+    name will get a 400.
+  </Step>
+</Steps>
+
+<Note>
+  There is no `/v1/models` endpoint, so tools that discover models by listing
+  them will find nothing. Configure the model string by hand; the
+  [roster](/models/overview) is the list.
+</Note>
+
+## Errors
+
+The response body is the standard OpenAI envelope, so your SDK raises its own
+typed exception. warpllm adds fields alongside it that an HTTP caller can read
+and an SDK will ignore:
+
+```json
+{
+  "error": {
+    "message": "deepseek: insufficient balance",
+    "type": "insufficient_quota",
+    "code": "insufficient_quota",
+    "origin": "provider",
+    "warpllm_code": "quota_exceeded",
+    "provider": "deepseek",
+    "provider_status": 402,
+    "provider_code": "insufficient_balance"
+  }
+}
+```
+
+An upstream `Retry-After` is re-emitted as a real HTTP header, not only a body
+field — standard clients and proxies back off on the header and never read the
+JSON.
+
+See [Errors](/concepts/errors#the-gateway-envelope) for the full field list.
+
+## Next
+
+<Card title="HTTP API reference" icon="brackets-curly" href="/api-reference/create-chat-completion">
+  Schemas and an interactive playground.
+</Card>

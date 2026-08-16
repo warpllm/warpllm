@@ -1,0 +1,106 @@
+---
+title: "Gateway overview"
+description: "An OpenAI-compatible HTTP server in front of every provider warpllm routes to."
+icon: "server"
+tag: "Preview"
+---
+
+import GatewayPreview from '/snippets/gateway-preview.mdx'
+
+<GatewayPreview />
+
+The gateway is the same routing core behind an HTTP surface. Point any OpenAI
+SDK's base URL at it and your application code does not change — only the model
+string gains a `provider/` prefix.
+
+<CardGroup cols={2}>
+  <Card title="Run it" icon="play" href="/gateway/run">
+    Docker or cargo, in one command.
+  </Card>
+  <Card title="Configure it" icon="sliders" href="/gateway/configuration">
+    Four flags, and the environment it reads.
+  </Card>
+  <Card title="Connect a client" icon="plug" href="/gateway/openai-clients">
+    Python, Node, and curl against a running gateway.
+  </Card>
+  <Card title="HTTP API" icon="brackets-curly" href="/api-reference/create-chat-completion">
+    The endpoints, with an interactive playground.
+  </Card>
+</CardGroup>
+
+## When to run it rather than embed the SDK
+
+<Columns cols={2}>
+  <Card title="Reach for the gateway" icon="server">
+    - You have code on the OpenAI SDK you would rather not touch
+    - Several services should share one set of provider keys
+    - A language with no warpllm binding needs routing
+    - You want provider keys held in one place instead of every service
+  </Card>
+  <Card title="Reach for the SDK" icon="code">
+    - You are writing Python, Node, or Rust and can change the client
+    - You want no extra network hop
+    - You would rather not operate another service
+  </Card>
+</Columns>
+
+## Endpoints
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/chat/completions` | Chat completions, whole or streamed |
+| `GET` | `/health` | Liveness, with the warpllm version |
+
+That is the whole surface today. There is no `/v1/models` endpoint — the roster
+is compiled in, and the [model roster page](/models/overview) is generated from
+it.
+
+## How a request flows
+
+<Steps>
+  <Step title="The gateway parses the body">
+    A body it cannot parse is answered with an OpenAI-shaped 400 rather than
+    the web framework's own rejection format.
+  </Step>
+  <Step title="stream picks the reply's shape">
+    `stream: true` becomes server-sent events; anything else becomes one status
+    and one JSON body. The two shapes share nothing past this point.
+  </Step>
+  <Step title="The routing core does its work">
+    Same roster, same key resolution, same normalization as the SDK. See
+    [Model routing](/concepts/model-routing).
+  </Step>
+  <Step title="Failures come back in OpenAI's envelope">
+    So an official SDK raises its own typed exception, plus extra fields only
+    an HTTP caller sees. See
+    [the gateway envelope](/concepts/errors#the-gateway-envelope).
+  </Step>
+</Steps>
+
+## Authentication
+
+<Warning>
+  The gateway authenticates upstream with **its own** provider keys, read from
+  its environment. The caller's `Authorization` header is ignored and never
+  forwarded — providers each have their own auth methods, so per-caller
+  passthrough is ruled out by design.
+
+  It ships **no caller authentication of its own**. Bind it to a private
+  interface or put it behind your own auth layer. Do not expose it to a network
+  you do not control.
+</Warning>
+
+## What it logs
+
+The model name and whether the request streamed. Never headers, never bodies —
+they carry credentials and prompts.
+
+```text
+INFO chat completion request model=openai/gpt-5-nano stream=false
+```
+
+## Next
+
+<Card title="Run the gateway" icon="play" href="/gateway/run">
+  Docker, cargo, and a first request.
+</Card>

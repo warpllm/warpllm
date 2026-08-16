@@ -1,0 +1,262 @@
+---
+title: "Requests and responses"
+description: "The chat-completion request shape, what warpllm models, and what it forwards untouched."
+icon: "arrow-right-arrow-left"
+---
+
+warpllm speaks the OpenAI chat-completions shape. Your request crosses to the
+provider verbatim — nothing is renamed on the way in, and nothing is renamed on
+the way back.
+
+## The request
+
+Only `model` and `messages` are required.
+
+<CodeGroup>
+
+```python Python
+completion = client.chat_completions({
+    "model": "openai/gpt-5-nano",
+    "messages": [
+        {"role": "system", "content": "You are terse."},
+        {"role": "user", "content": "Why is the sky blue?"},
+    ],
+    "temperature": 0.2,
+    "max_tokens": 200,
+})
+```
+
+```ts TypeScript
+const completion = await client.chatCompletions({
+  model: 'openai/gpt-5-nano',
+  messages: [
+    { role: 'system', content: 'You are terse.' },
+    { role: 'user', content: 'Why is the sky blue?' },
+  ],
+  temperature: 0.2,
+  max_tokens: 200,
+})
+```
+
+```rust Rust
+use warpllm::{ChatCompletionRequestMessage, CreateChatCompletionRequest};
+
+let completion = client
+    .chat_completions(CreateChatCompletionRequest {
+        model: "openai/gpt-5-nano".to_string(),
+        messages: vec![
+            ChatCompletionRequestMessage::new("system", "You are terse."),
+            ChatCompletionRequestMessage::new("user", "Why is the sky blue?"),
+        ],
+        temperature: Some(Some(0.2)),
+        max_tokens: Some(Some(200)),
+        ..Default::default()
+    })
+    .await?;
+```
+
+</CodeGroup>
+
+### Fields warpllm models
+
+<ResponseField name="model" type="string" required>
+  A `provider/model` routing string. See [Model routing](/concepts/model-routing).
+</ResponseField>
+
+<ResponseField name="messages" type="array" required>
+  Conversation turns. Each message carries `role` and `content`, plus
+  `tool_calls` and `tool_call_id` where the turn is part of a
+  [tool-calling](/guides/tool-calling) exchange. `content` is a string or an
+  array of content parts (text, image, audio, file, refusal).
+</ResponseField>
+
+<ResponseField name="temperature" type="number">
+  Sampling temperature.
+</ResponseField>
+
+<ResponseField name="max_tokens" type="integer">
+  Ceiling on tokens generated for the completion.
+</ResponseField>
+
+<ResponseField name="top_p" type="number">
+  Nucleus sampling cutoff.
+</ResponseField>
+
+<ResponseField name="stop" type="string | string[]">
+  Sequences that end generation.
+</ResponseField>
+
+<ResponseField name="stream" type="boolean">
+  `true` returns chunks instead of one reply. See [Streaming](/guides/streaming).
+</ResponseField>
+
+<ResponseField name="stream_options" type="object">
+  `{ "include_usage": true }` asks for a final usage chunk.
+</ResponseField>
+
+<ResponseField name="tools" type="array">
+  Tool definitions the model may call. See [Tool calling](/guides/tool-calling).
+</ResponseField>
+
+<ResponseField name="tool_choice" type="string | object">
+  Whether and which tool the model must call.
+</ResponseField>
+
+<ResponseField name="response_format" type="object">
+  `{ "type": "json_object" }` or a JSON Schema. See
+  [Structured outputs](/guides/structured-outputs).
+</ResponseField>
+
+<ResponseField name="reasoning_effort" type="string">
+  Reasoning budget hint for models that accept one.
+</ResponseField>
+
+### Fields warpllm does not model
+
+A field absent from that list is **forwarded to the provider untouched** rather
+than rejected. This is deliberate: a provider parameter warpllm has not learned
+yet is still usable today.
+
+<CodeGroup>
+
+```python Python
+client.chat_completions({
+    "model": "openai/gpt-5-nano",
+    "messages": messages,
+    "seed": 7,  # not modeled — forwarded as-is
+})
+```
+
+```ts TypeScript
+await client.chatCompletions({
+  model: 'openai/gpt-5-nano',
+  messages,
+  seed: 7, // not modeled — forwarded as-is
+})
+```
+
+</CodeGroup>
+
+<Note>
+  In Python the request parameter is a `Mapping`, so any key type-checks. In
+  TypeScript `chatCompletions` is generic in the request type, which is what
+  lets `{ ...request, seed: 7 }` compile without a cast. In Rust the struct
+  carries a flattened `unknown_fields` map that round-trips anything it does
+  not name.
+</Note>
+
+<Tip>
+  Rust nests the request fields that are optional **and** nullable, the same
+  way responses do: `temperature`, `max_tokens`, `top_p`, `stop`,
+  `stream_options`, `reasoning_effort`, and a message's `content` are all
+  `Option<Option<_>>`. The outer layer is "send the key at all", the inner one
+  "send it as an explicit `null`".
+
+  For an ordinary prompt, skip both states with the constructor:
+
+  ```rust
+  ChatCompletionRequestMessage::new("user", "Why is the sky blue?")
+  ```
+
+  <Note>
+    `temperature`, `max_tokens`, and `top_p` gained the nested shape after
+    0.4.0. On 0.4.0 they are plain `Option<_>` — write `Some(0.2)` there.
+    Python and TypeScript are unaffected either way.
+  </Note>
+</Tip>
+
+## The response
+
+A non-streamed call returns one whole completion.
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "created": 1770000000,
+  "model": "openai/gpt-5-nano",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "Rayleigh scattering.",
+        "refusal": null
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 18,
+    "completion_tokens": 4,
+    "total_tokens": 22
+  }
+}
+```
+
+<Info>
+  `model` in the response is **warpllm's routing string**, not the upstream
+  name. A reply to `openrouter/anthropic/claude-sonnet-4` says exactly that, so
+  a log line identifies the route you asked for.
+</Info>
+
+### Response fields
+
+<ResponseField name="id" type="string" required />
+<ResponseField name="object" type="string" required />
+<ResponseField name="created" type="integer" required />
+<ResponseField name="model" type="string" required>
+  The `provider/model` string that was routed.
+</ResponseField>
+<ResponseField name="choices" type="array" required>
+  Each carries `index`, `finish_reason`, `message`, and optional `logprobs`.
+  The message carries `content`, `refusal`, `role`, and optional `annotations`,
+  `audio`, `function_call`, and `tool_calls`.
+</ResponseField>
+<ResponseField name="usage" type="object">
+  `prompt_tokens`, `completion_tokens`, `total_tokens`, plus
+  `prompt_tokens_details` (`cached_tokens`, `cache_write_tokens`,
+  `audio_tokens`) and `completion_tokens_details` (`reasoning_tokens`,
+  `accepted_prediction_tokens`, `rejected_prediction_tokens`, `audio_tokens`)
+  where the provider reports them.
+</ResponseField>
+<ResponseField name="system_fingerprint" type="string" />
+<ResponseField name="service_tier" type="string" />
+<ResponseField name="moderation" type="object">
+  Provider moderation results, where the provider returns them.
+</ResponseField>
+
+## Why responses come back as plain data
+
+The bindings hand you the JSON shape rather than a wrapper object. Rust has
+already parsed and validated the response; rebuilding it into Python or
+JavaScript objects would redo that work to return the same fields under the
+same names.
+
+| Language | You get | Typed as |
+| --- | --- | --- |
+| Python | A `dict` | `CreateChatCompletionResponse` (a `TypedDict`) |
+| Node | A plain object | `CreateChatCompletionResponse` (an `interface`) |
+| Rust | A struct | `CreateChatCompletionResponse` |
+
+So Python reads `completion["choices"][0]["message"]["content"]` while Node and
+Rust read `completion.choices[0].message.content`.
+
+<Warning>
+  **Absent is not `null`.** Since 0.3.0, response fields that are both optional
+  and nullable distinguish a key the provider omitted from one it sent as
+  `null`. In Python that is a missing key versus a `None` value; in TypeScript
+  `undefined` versus `null`; in Rust `Option<Option<T>>`. Code written against
+  `0.2.x` that treated the two as one thing needs a look.
+</Warning>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Streaming" icon="water" href="/guides/streaming">
+    The chunk shape and how a stream ends.
+  </Card>
+  <Card title="Errors" icon="triangle-exclamation" href="/concepts/errors">
+    What comes back instead when a request fails.
+  </Card>
+</CardGroup>

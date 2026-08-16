@@ -1,0 +1,157 @@
+---
+title: "Run the gateway"
+description: "Build and start warpllm-server with Docker or cargo, then make a request."
+icon: "play"
+tag: "Preview"
+---
+
+import GatewayPreview from '/snippets/gateway-preview.mdx'
+
+<GatewayPreview />
+
+## Docker
+
+The repository ships a `Dockerfile` that builds a distroless image running as a
+non-root user.
+
+<Steps>
+  <Step title="Build the image">
+    ```bash
+    git clone https://github.com/warpllm/warpllm.git
+    cd warpllm
+    docker build -t warpllm-server .
+    ```
+  </Step>
+  <Step title="Run it with your provider keys">
+    ```bash
+    docker run --rm -p 8080:8080 \
+      -e OPENAI_API_KEY \
+      -e DEEPSEEK_API_KEY \
+      warpllm-server
+    ```
+
+    Defaults bind `0.0.0.0:8080`. Append flags to override:
+
+    ```bash
+    docker run --rm -p 9090:9090 -e OPENAI_API_KEY \
+      warpllm-server --port 9090
+    ```
+  </Step>
+  <Step title="Check it is up">
+    ```bash
+    curl http://localhost:8080/health
+    ```
+
+    ```json
+    { "status": "ok", "version": "0.4.0" }
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The image has no shell and therefore no `HEALTHCHECK` — distroless is
+  deliberate. Point your orchestrator's probe at `GET /health` instead. TLS
+  roots are bundled with rustls, so there is no `ca-certificates` layer either.
+</Note>
+
+## Cargo
+
+```bash
+git clone https://github.com/warpllm/warpllm.git
+cd warpllm
+
+OPENAI_API_KEY=sk-... cargo run --release -p warpllm-server
+```
+
+Requires Rust 1.85 or newer.
+
+## Docker Compose
+
+```yaml
+services:
+  warpllm:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY}
+      MOONSHOT_API_KEY: ${MOONSHOT_API_KEY}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+    command: ["--stream-read-timeout-secs", "90"]
+```
+
+<Warning>
+  Keys are read **once, at startup**. Changing a variable requires a restart.
+</Warning>
+
+## Your first request
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "openai/gpt-5-nano",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+```bash curl (streaming)
+curl -N http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "openai/gpt-5-nano",
+    "messages": [{"role": "user", "content": "Count to five."}],
+    "stream": true
+  }'
+```
+
+</CodeGroup>
+
+No `Authorization` header is needed — the gateway ignores it and uses its own
+provider keys. See [Connecting a client](/gateway/openai-clients) for the
+OpenAI SDKs.
+
+## Deployment notes
+
+<AccordionGroup>
+  <Accordion title="Binding and exposure" icon="lock">
+    The default `--host 0.0.0.0` listens on every interface. Since the gateway
+    has no caller authentication, bind it to a private interface
+    (`--host 127.0.0.1`) or keep it inside a private network and put your own
+    auth in front.
+  </Accordion>
+
+  <Accordion title="Health checks" icon="heart-pulse">
+    `GET /health` returns `200` with `{"status": "ok", "version": "..."}`. It
+    reports that the process is serving, not that any provider is reachable —
+    warpllm sends no upstream traffic to answer it.
+  </Accordion>
+
+  <Accordion title="Timeouts under a proxy" icon="clock">
+    Streams are long-lived server-sent events. A reverse proxy with a short
+    read timeout will cut them off before warpllm does. Set the proxy's timeout
+    above `--timeout-secs`, and disable response buffering for
+    `/v1/chat/completions`.
+  </Accordion>
+
+  <Accordion title="Scaling" icon="arrows-left-right">
+    The gateway holds no per-caller state — every request carries its own
+    conversation — so instances scale horizontally with no coordination.
+  </Accordion>
+</AccordionGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="sliders" href="/gateway/configuration">
+    Every flag and what it defaults to.
+  </Card>
+  <Card title="Connect a client" icon="plug" href="/gateway/openai-clients">
+    Point the official OpenAI SDKs at it.
+  </Card>
+</CardGroup>

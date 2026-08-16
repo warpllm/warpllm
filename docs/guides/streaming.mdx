@@ -1,0 +1,256 @@
+---
+title: "Streaming"
+description: "Consume a reply as it is generated, and tell a complete stream from a truncated one."
+icon: "water"
+---
+
+Set `stream: true` and you get chunks instead of one reply. Every model on the
+[roster](/models/overview) that serves chat completions also serves them
+streamed.
+
+## Consuming a stream
+
+<CodeGroup>
+
+```python Python
+from warpllm import WarpLLM
+
+client = WarpLLM()
+
+stream = client.chat_completions({
+    "model": "openai/gpt-5-nano",
+    "messages": [{"role": "user", "content": "Count to five."}],
+    "stream": True,
+})
+
+for chunk in stream:
+    print(chunk["choices"][0]["delta"].get("content", ""), end="", flush=True)
+```
+
+```python Python (async)
+import asyncio
+
+from warpllm import AsyncWarpLLM
+
+
+async def main() -> None:
+    client = AsyncWarpLLM()
+
+    stream = await client.chat_completions({
+        "model": "openai/gpt-5-nano",
+        "messages": [{"role": "user", "content": "Count to five."}],
+        "stream": True,
+    })
+
+    async for chunk in stream:
+        print(chunk["choices"][0]["delta"].get("content", ""), end="", flush=True)
+
+
+asyncio.run(main())
+```
+
+```ts TypeScript
+import { WarpLLM } from '@warpllm/warpllm'
+
+const client = new WarpLLM()
+
+const stream = await client.chatCompletions({
+  model: 'openai/gpt-5-nano',
+  messages: [{ role: 'user', content: 'Count to five.' }],
+  stream: true,
+})
+
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta.content ?? '')
+}
+```
+
+```rust Rust
+use std::io::Write;
+
+use warpllm::{ChatCompletionRequestMessage, Client, ClientConfig, CreateChatCompletionRequest};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::new(ClientConfig::default())?;
+
+    let mut stream = client
+        .chat_completions_stream(CreateChatCompletionRequest {
+            model: "openai/gpt-5-nano".to_string(),
+            messages: vec![ChatCompletionRequestMessage::new("user", "Count to five.")],
+            ..Default::default()
+        })
+        .await?;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        // `Option<Option<String>>`: the outer layer is "did the provider send
+        // the key at all", the inner one "did it send an explicit null".
+        if let Some(Some(content)) = &chunk.choices[0].delta.content {
+            print!("{content}");
+            std::io::stdout().flush()?;
+        }
+    }
+    Ok(())
+}
+```
+
+</CodeGroup>
+
+## How each language decides
+
+<Tabs>
+  <Tab title="Python">
+    `chat_completions` dispatches on the **value** of `stream`, matching the
+    official OpenAI SDK's one-method shape. Runtime behaviour is exact.
+
+    Static typing is best-effort: a dict literal carrying keys warpllm does not
+    model matches no `TypedDict`, so a checker may infer the non-streaming
+    return type. Where the annotation has to be right, call
+    `chat_completions_stream(request)` — same behaviour, precisely typed, and
+    it sets `stream` for you.
+
+    ```python
+    stream = client.chat_completions_stream({
+        "model": "openai/gpt-5-nano",
+        "messages": messages,
+    })
+    ```
+  </Tab>
+
+  <Tab title="Node">
+    `chatCompletions` has three overloads. A literal `stream: true` returns
+    `ChatCompletionStream`; its absence, `false`, or `null` returns a whole
+    completion; anything else — a `boolean` variable, a value threaded through
+    a helper — is genuinely either and types as the union.
+
+    Narrowing a union is a nuisance; being handed a completion that is a stream
+    at runtime is a crash on `.choices[0].message`. Runtime dispatch is on the
+    value, so behaviour is right even where the overload cannot resolve.
+  </Tab>
+
+  <Tab title="Rust">
+    Streaming is its **own method**. `chat_completions` with `stream: Some(true)`
+    returns `Error::InvalidInput` telling you to call `chat_completions_stream`
+    — a whole-reply return type cannot carry chunks, so the entrypoint says
+    where to go rather than quietly serving the wrong shape.
+
+    `chat_completions_stream` sets `stream` on your behalf; you do not have to.
+  </Tab>
+</Tabs>
+
+## The chunk shape
+
+Each chunk is a `CreateChatCompletionStreamResponse`. The difference from a
+whole reply is `choices[].delta` in place of `choices[].message`.
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion.chunk",
+  "created": 1770000000,
+  "model": "openai/gpt-5-nano",
+  "choices": [
+    {
+      "index": 0,
+      "delta": { "content": "One" },
+      "finish_reason": null
+    }
+  ]
+}
+```
+
+<ResponseField name="choices[].delta.content" type="string">
+  The text fragment. Absent on chunks that carry only a role or tool-call
+  fragment.
+</ResponseField>
+<ResponseField name="choices[].delta.role" type="string">
+  Usually present on the first chunk only.
+</ResponseField>
+<ResponseField name="choices[].delta.tool_calls" type="array">
+  Tool-call fragments, each with an `index` to reassemble by. See
+  [Tool calling](/guides/tool-calling).
+</ResponseField>
+<ResponseField name="choices[].finish_reason" type="string | null">
+  `null` until the final content chunk.
+</ResponseField>
+
+<Info>
+  `model` on every chunk is your `provider/model` routing string, not the
+  upstream name.
+</Info>
+
+## Token usage on a stream
+
+Ask for it explicitly; providers do not send it by default.
+
+```json
+{
+  "model": "openai/gpt-5-nano",
+  "messages": [{ "role": "user", "content": "Count to five." }],
+  "stream": true,
+  "stream_options": { "include_usage": true }
+}
+```
+
+A final chunk then carries `usage` with the same fields a whole reply has.
+
+## Knowing the reply is complete
+
+This is the part worth getting right.
+
+<Steps>
+  <Step title="The stream ending cleanly means the reply is whole">
+    Python raises `StopIteration`, Node's `for await` finishes, Rust's
+    `next()` returns `None`. In every case: the model finished.
+  </Step>
+  <Step title="An upstream that stopped early raises instead">
+    `StreamTruncated` arrives **after** every chunk that did make it, so a
+    truncated answer can never be mistaken for a finished one. Without this,
+    both endings would look identical.
+  </Step>
+  <Step title="An error item is terminal">
+    Whatever produced it also ended the stream. There is nothing left to read,
+    and warpllm sends no completion sentinel after a failure.
+  </Step>
+</Steps>
+
+```python
+from warpllm import APIError
+
+buffer = []
+try:
+    for chunk in stream:
+        buffer.append(chunk["choices"][0]["delta"].get("content", ""))
+except APIError as e:
+    # Terminal. `buffer` holds a partial answer — discard or salvage it,
+    # but do not treat it as complete.
+    log.warning("stream failed after %d chunks: %s", len(buffer), e.message)
+```
+
+<Warning>
+  Set [`stream_read_timeout`](/concepts/timeouts) above the slowest
+  time-to-first-token you expect. The total request timeout cannot tell a slow
+  stream from a wedged one.
+</Warning>
+
+## Through the gateway
+
+The [gateway](/gateway/overview) serves streams as server-sent events, the
+shape an OpenAI SDK expects, terminated by `data: [DONE]`.
+
+A failure that arrives **before** the response commits is an ordinary error
+response with its real status and headers. A failure **after** the 200 is
+committed travels as the last event, carrying the same OpenAI envelope — and no
+`[DONE]` follows it, because the sentinel means the model finished.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Tool calling" icon="wrench" href="/guides/tool-calling">
+    Reassembling streamed tool-call fragments.
+  </Card>
+  <Card title="Timeouts" icon="clock" href="/concepts/timeouts">
+    The gap-based deadline that streams actually need.
+  </Card>
+</CardGroup>

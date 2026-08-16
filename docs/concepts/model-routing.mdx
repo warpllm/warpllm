@@ -1,0 +1,190 @@
+---
+title: "Model routing"
+description: "How provider/model strings resolve, what the registry guarantees, and why unknown names are errors."
+icon: "route"
+---
+
+Every request names a model as `provider/model`. That string is the whole
+routing decision: it picks the provider, its base URL, the environment variable
+holding its key, and the name sent upstream.
+
+```json
+{ "model": "openai/gpt-5-nano" }
+```
+
+<CardGroup cols={3}>
+  <Card title="Provider" icon="building">
+    `openai` — a host, its base URL, and one API-key variable.
+  </Card>
+  <Card title="Model" icon="cube">
+    `gpt-5-nano` — a routable name under that provider.
+  </Card>
+  <Card title="Upstream name" icon="paper-plane">
+    What actually goes on the wire, which may differ from warpllm's alias.
+  </Card>
+</CardGroup>
+
+## The prefix is required
+
+warpllm matches the **whole string** against its registry. A bare `gpt-5-nano`
+does not resolve, and neither does a name the registry has never heard of.
+
+<Warning>
+  An unlisted model is an error, not a guess. warpllm will not forward an
+  unknown name to some upstream default and let you discover the routing on
+  your bill.
+</Warning>
+
+```python
+client.chat_completions({"model": "gpt-5-nano", ...})
+# warpllm.BadRequestError: invalid model string 'gpt-5-nano':
+# no registered model spec
+```
+
+There is no wildcard either. A registry entry of `openai/*` would register a
+model literally named `*`.
+
+## Switching providers
+
+Because the request shape does not change, moving between providers is a string
+edit plus the key that provider needs.
+
+<CodeGroup>
+
+```python Python
+# OpenAI — needs OPENAI_API_KEY
+client.chat_completions({"model": "openai/gpt-5-nano", "messages": messages})
+
+# DeepSeek — needs DEEPSEEK_API_KEY
+client.chat_completions({"model": "deepseek/deepseek-v4-flash", "messages": messages})
+
+# Anthropic via OpenRouter — needs OPENROUTER_API_KEY
+client.chat_completions({"model": "openrouter/anthropic/claude-sonnet-4", "messages": messages})
+```
+
+```ts TypeScript
+// OpenAI — needs OPENAI_API_KEY
+await client.chatCompletions({ model: 'openai/gpt-5-nano', messages })
+
+// DeepSeek — needs DEEPSEEK_API_KEY
+await client.chatCompletions({ model: 'deepseek/deepseek-v4-flash', messages })
+
+// Anthropic via OpenRouter — needs OPENROUTER_API_KEY
+await client.chatCompletions({ model: 'openrouter/anthropic/claude-sonnet-4', messages })
+```
+
+</CodeGroup>
+
+A model name may contain further slashes after the provider prefix —
+`openrouter/anthropic/claude-sonnet-4` is the OpenRouter provider serving the
+`anthropic/claude-sonnet-4` slug.
+
+## What the registry records
+
+The registry lives at
+[`crates/warpllm/src/registry/specs.yaml`](https://github.com/warpllm/warpllm/blob/main/crates/warpllm/src/registry/specs.yaml)
+and is compiled into the binary. Each model entry carries:
+
+<ResponseField name="supported_apis" type="list" required>
+  Every surface the model serves. A model serves exactly what it lists — one it
+  does not list is refused before a request goes out.
+</ResponseField>
+
+<ResponseField name="model" type="string">
+  The name sent upstream. Defaults to the key's last segment; set explicitly
+  when warpllm's alias differs from the provider's own name.
+</ResponseField>
+
+<ResponseField name="capabilities.max_input_tokens" type="integer">
+  The provider's published context window, recorded verbatim.
+</ResponseField>
+
+<ResponseField name="capabilities.max_output_tokens" type="integer">
+  The provider's published output ceiling, where one exists.
+</ResponseField>
+
+<ResponseField name="capabilities.max_concurrent_requests" type="integer">
+  A documented per-model concurrency ceiling, where the provider publishes one.
+</ResponseField>
+
+<ResponseField name="deprecation_date" type="string">
+  `YYYY-MM-DD`, the day the provider stops serving the model, when one has been
+  announced. Nothing acts on it — an entry keeps resolving past its date.
+</ResponseField>
+
+<Note>
+  Every optional field is genuinely optional, and an absent limit means the
+  provider does not publish one — not that the limit is unlimited. warpllm
+  omits a number rather than guessing it.
+</Note>
+
+## Reading capabilities at runtime
+
+Rust callers can look a spec up directly, which is useful for sizing prompts
+against the routed model's window.
+
+```rust
+use warpllm::fetch_model;
+
+let (provider, spec) = fetch_model("openai/gpt-5-nano")?;
+
+println!("{} sends this upstream as {}", provider.name(), spec.model());
+if let Some(window) = spec.capabilities().max_input_tokens() {
+    println!("context window: {window}");
+}
+```
+
+`fetch_model` returns the provider spec and the model spec as a pair, or
+[`Error::InvalidModel`](/concepts/errors) if the string does not resolve.
+
+## Surfaces
+
+A surface name is `<protocol>_<endpoint>`, which is how the registry records
+the wire format a model speaks.
+
+| Surface | Meaning | Status |
+| --- | --- | --- |
+| `openai_compat_chat_completions` | One request, one whole reply | Implemented |
+| `openai_compat_chat_completions_stream` | The same, as server-sent events | Implemented |
+| `openai_compat_responses` | OpenAI's Responses API | Not implemented |
+
+## Spreading load, retrying, and failing over
+
+A plain `Client` routes a request to exactly one model, and a failure comes
+back to you to decide about. There is no retry loop and no fallback chain yet,
+so the error taxonomy is what lets you write your own policy in the meantime —
+see [Errors](/concepts/errors).
+
+**Load balancing has landed on `main`** and is unreleased. `BalancedClient`
+spreads requests across a weighted set of `provider/model` pairs using smooth
+weighted round-robin, rewriting the request's `model` to the candidate it
+picked — so the name you pass acts as a group, and each candidate is a concrete
+route within it.
+
+```rust
+use warpllm::{BalancedClient, Client, ClientConfig};
+
+let client = Client::new(ClientConfig::default())?;
+let balanced = BalancedClient::new(&client, &[
+    ("openai/gpt-5.6", 3),
+    ("deepseek/deepseek-v4-pro", 1),
+])?;
+```
+
+The candidate set is fixed at construction, and each selected candidate still
+goes through the same admission checks a direct call does. It is Rust-only for
+now — neither binding exposes it, and the gateway has no flag for it.
+
+Failover is tracked in [issue #27](https://github.com/warpllm/warpllm/issues/27), load balancing in
+[issue #28](https://github.com/warpllm/warpllm/issues/28).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Model roster" icon="cube" href="/models/overview">
+    Every routable model and its limits.
+  </Card>
+  <Card title="Add a model" icon="plus" href="/models/add-a-model">
+    The registry edit, and the rules its tests enforce.
+  </Card>
+</CardGroup>

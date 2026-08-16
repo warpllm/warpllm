@@ -1,0 +1,125 @@
+---
+title: "Quickstart"
+description: "Install warpllm, export one API key, and make your first routed request."
+icon: "rocket"
+---
+
+import Install from '/snippets/install.mdx'
+
+<Steps>
+  <Step title="Install the package">
+    <Install />
+
+    Requirements: Python 3.10+, Node 20+, or Rust 1.85+. See
+    [Installation](/get-started/installation) for platform details.
+  </Step>
+
+  <Step title="Export a provider key">
+    warpllm reads keys from the environment at request time. Export the one
+    belonging to the provider you are about to route to.
+
+    ```bash
+    export OPENAI_API_KEY=sk-...
+    ```
+
+    Every provider and its variable is listed in
+    [Authentication](/get-started/authentication).
+  </Step>
+
+  <Step title="Send a chat completion">
+    The model string is `provider/model`. The `provider/` prefix is required.
+
+    <CodeGroup>
+
+    ```python Python
+    from warpllm import WarpLLM
+
+    client = WarpLLM()
+
+    completion = client.chat_completions({
+        "model": "openai/gpt-5-nano",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    })
+
+    print(completion["choices"][0]["message"]["content"])
+    ```
+
+    ```ts TypeScript
+    import { WarpLLM } from '@warpllm/warpllm'
+
+    const client = new WarpLLM()
+
+    const completion = await client.chatCompletions({
+      model: 'openai/gpt-5-nano',
+      messages: [{ role: 'user', content: 'Hello!' }],
+    })
+
+    console.log(completion.choices[0].message.content)
+    ```
+
+    ```rust Rust
+    use warpllm::{ChatCompletionRequestMessage, Client, ClientConfig, CreateChatCompletionRequest};
+
+    #[tokio::main]
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        let client = Client::new(ClientConfig::default())?;
+
+        let completion = client
+            .chat_completions(CreateChatCompletionRequest {
+                model: "openai/gpt-5-nano".to_string(),
+                messages: vec![ChatCompletionRequestMessage::new("user", "Hello!")],
+                ..Default::default()
+            })
+            .await?;
+
+        let content = completion.choices[0].message.content.as_deref();
+        println!("{}", content.unwrap_or_default());
+        Ok(())
+    }
+    ```
+
+    </CodeGroup>
+
+    <Note>
+      warpllm ships no async runtime, so a Rust caller brings one:
+      `cargo add tokio --features macros,rt-multi-thread`.
+    </Note>
+  </Step>
+
+  <Step title="Switch providers by changing the string">
+    Nothing else in the call moves. Export the new provider's key and change
+    the model:
+
+    ```diff
+    - "model": "openai/gpt-5-nano",
+    + "model": "deepseek/deepseek-v4-flash",
+    ```
+
+    ```bash
+    export DEEPSEEK_API_KEY=sk-...
+    ```
+  </Step>
+</Steps>
+
+## Runnable examples
+
+The repository carries a commented, runnable version of each snippet above in
+[`examples/`](https://github.com/warpllm/warpllm/tree/main/examples), along
+with an `.env.example` template for the provider keys.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Stream a reply" icon="water" href="/guides/streaming">
+    Set `stream: true` and iterate chunks in any of the three languages.
+  </Card>
+  <Card title="Handle failures" icon="triangle-exclamation" href="/concepts/errors">
+    One error taxonomy across every provider, in OpenAI's vocabulary.
+  </Card>
+  <Card title="Browse the model roster" icon="cube" href="/models/overview">
+    Every routable model, its context window, and its output ceiling.
+  </Card>
+  <Card title="Run the gateway" icon="server" href="/gateway/overview">
+    Keep your existing OpenAI client and change only its base URL.
+  </Card>
+</CardGroup>

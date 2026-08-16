@@ -1,0 +1,126 @@
+---
+title: "Timeouts"
+description: "The total deadline, the stream read timeout, and which one you actually want."
+icon: "clock"
+---
+
+warpllm has two independent deadlines. They bound different things, and for
+streaming workloads only one of them is useful.
+
+<CardGroup cols={2}>
+  <Card title="Request timeout" icon="hourglass-end">
+    A **total** deadline on the whole exchange. Default **600 seconds**,
+    matching the OpenAI SDK.
+  </Card>
+  <Card title="Stream read timeout" icon="wave-pulse">
+    The longest **gap between bytes** warpllm will tolerate on a stream. Resets
+    on every byte. Default **unbounded**.
+  </Card>
+</CardGroup>
+
+## Setting them
+
+<CodeGroup>
+
+```python Python
+from warpllm import WarpLLM
+
+client = WarpLLM(
+    timeout=120,               # seconds; total deadline
+    stream_read_timeout=90,    # seconds; longest silence on a stream
+)
+```
+
+```ts TypeScript
+import { WarpLLM } from '@warpllm/warpllm'
+
+const client = new WarpLLM({
+  timeout: 120,            // seconds; total deadline
+  streamReadTimeout: 90,   // seconds; longest silence on a stream
+})
+```
+
+```rust Rust
+use warpllm::{Client, ClientConfig};
+
+let client = Client::new(ClientConfig {
+    timeout_secs: Some(120),
+    stream_read_timeout_secs: Some(90),
+    ..Default::default()
+})?;
+```
+
+</CodeGroup>
+
+Both are set once, on the client. There is no per-request override today.
+
+## Why a total deadline is not enough for streams
+
+A total deadline cannot tell a stream that is **alive and slow** from one that
+is **wedged**. It bounds a stall only by outliving it — a wedged upstream still
+holds your task for the full 600 seconds.
+
+The stream read timeout bounds the *gap* instead, which is the shape that fits
+a response whose length nobody knows in advance.
+
+<Warning>
+  **The wait before the first chunk is a gap like any other.** A reasoning model
+  can think for minutes before emitting a token. Set
+  `stream_read_timeout` above the slowest **time-to-first-token** you expect,
+  not merely above the gap between chunks. Set it too tight and it fails
+  silently in the worst direction — cutting off a model that was working.
+</Warning>
+
+<Note>
+  Several providers send `:` keepalive comments during a long think. Those
+  count as bytes, so they reset the gap timer.
+</Note>
+
+This is why the stream read timeout is opt-in: no single value is right for
+every deployment, and a wrong one is worse than none.
+
+## Which failure each one produces
+
+| What happened | Failure | Status on the gateway |
+| --- | --- | --- |
+| Total deadline elapsed | `Network` / `APIConnectionError` | 502 |
+| Stream silent past the read timeout | `StreamStalled` | 504 |
+| Stream closed early with no sentinel | `StreamTruncated` | 502 |
+
+`StreamStalled` and `StreamTruncated` are deliberately separate. In the first
+the socket is still open and either the upstream is wedged or your limit is
+tighter than the model's slowest pause. In the second the socket closed. Only
+the caller can tell which remedy applies, and only if it is told which happened.
+
+## Picking values
+
+<Steps>
+  <Step title="Start from your own request deadline">
+    Set `timeout` to whatever your caller-facing deadline is. The 600-second
+    default exists to match the OpenAI SDK, not because it suits your service.
+  </Step>
+  <Step title="Measure time-to-first-token on your slowest model">
+    Reasoning models and long prompts move this number a lot. Take the worst
+    case you have observed, not the median.
+  </Step>
+  <Step title="Set the stream read timeout above that, with headroom">
+    It only has to be tighter than `timeout` to be useful — its job is catching
+    a wedged upstream long before the total deadline would.
+  </Step>
+</Steps>
+
+## On the gateway
+
+The same two knobs are command-line flags:
+
+```bash
+warpllm-server --timeout-secs 120 --stream-read-timeout-secs 90
+```
+
+See [Gateway configuration](/gateway/configuration).
+
+## Next
+
+<Card title="Streaming" icon="water" href="/guides/streaming">
+  Consuming chunks, and telling a complete reply from a truncated one.
+</Card>

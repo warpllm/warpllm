@@ -1,0 +1,109 @@
+---
+title: "Gateway configuration"
+description: "Every flag warpllm-server accepts, and the environment it reads."
+icon: "sliders"
+tag: "Preview"
+---
+
+import GatewayPreview from '/snippets/gateway-preview.mdx'
+import ProviderKeys from '/snippets/provider-keys.mdx'
+
+<GatewayPreview />
+
+Configuration is built-in defaults overridden by command-line flags. There is
+no config file today.
+
+```bash
+warpllm-server --host 127.0.0.1 --port 9090 --timeout-secs 120 \
+  --stream-read-timeout-secs 90
+```
+
+`--flag value` and `--flag=value` both work.
+
+## Flags
+
+<ResponseField name="--host" type="string" default="0.0.0.0">
+  Bind address.
+
+  <Warning>
+    The default listens on every interface, and the gateway has no caller
+    authentication. Use `127.0.0.1` unless something in front of it is handling
+    auth.
+  </Warning>
+</ResponseField>
+
+<ResponseField name="--port" type="u16" default="8080">
+  Listen port.
+</ResponseField>
+
+<ResponseField name="--timeout-secs" type="u64" default="600">
+  Total deadline on an upstream request, in seconds. Matches the OpenAI SDK's
+  default.
+</ResponseField>
+
+<ResponseField name="--stream-read-timeout-secs" type="u64">
+  Seconds a stream may go without a byte before it is abandoned. Unbounded by
+  default.
+
+  <Warning>
+    Must exceed the slowest **time-to-first-token** you expect — the wait
+    before the first chunk is a gap like any other, and a reasoning model can
+    think for minutes before emitting a token. See
+    [Timeouts](/concepts/timeouts).
+  </Warning>
+</ResponseField>
+
+<ResponseField name="--help">
+  Print usage and exit 0.
+</ResponseField>
+
+<ResponseField name="--version">
+  Print the version and exit 0.
+</ResponseField>
+
+Anything else is a parse error: an unknown flag, a missing value, or a value
+the type will not take (`--port eighty`) exits non-zero with a message naming
+the flag.
+
+## Why unbounded by default
+
+No stream read timeout is right for every deployment, and one set too tight
+cuts off a model that paused to think — a failure that looks like a provider
+problem and is not. The flag is opt-in for that reason. Set it once you have
+measured your slowest time-to-first-token.
+
+## Environment
+
+The gateway reads the same variables the SDKs do, one per provider, at startup.
+Set the ones you route to; the rest can stay unset.
+
+<ProviderKeys />
+
+This table is generated from the model registry, so it is exactly what the
+gateway looks for.
+
+<Note>
+  The gateway builds its client with no `base_url` override and no `providers`
+  declaration, so every provider talks to its own API and the whole roster is
+  routable. Narrowing is deliberately not a flag: a key on the command line
+  would sit in `ps` for a benefit the environment already provides.
+</Note>
+
+## What is not configurable yet
+
+| | Status |
+| --- | --- |
+| Caller authentication | None — put your own in front |
+| Per-caller API keys | None — the gateway uses its own provider keys |
+| Narrowing which providers are served | Client-side only; the gateway serves the whole roster |
+| Config file | None — flags only |
+| CORS | Not configured |
+| Rate limiting | None |
+| Load balancing | On `main` as a Rust client, not a gateway flag |
+| Failover, retries, caching | Planned — [#27](https://github.com/warpllm/warpllm/issues/27), [#28](https://github.com/warpllm/warpllm/issues/28) |
+
+## Next
+
+<Card title="Connect a client" icon="plug" href="/gateway/openai-clients">
+  Point the official OpenAI SDKs at a running gateway.
+</Card>

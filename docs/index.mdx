@@ -1,0 +1,114 @@
+---
+title: "warpllm"
+sidebarTitle: "Overview"
+description: "One request shape, many providers. A Rust core compiled for Rust, Node, and Python, plus a self-hosted OpenAI-compatible gateway."
+icon: "house"
+---
+
+warpllm is an AI gateway. You write one request in the OpenAI chat-completions
+shape, name a model as `provider/model`, and warpllm routes it — translating
+where a provider differs and normalizing what comes back, including failures.
+
+The routing core is written once in Rust and compiled for three languages, so
+Python and Node get the same behaviour as Rust rather than a reimplementation
+of it.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install, export one key, and make a request in under five minutes.
+  </Card>
+  <Card title="Model routing" icon="route" href="/concepts/model-routing">
+    How `provider/model` strings resolve, and why an unknown one is an error.
+  </Card>
+  <Card title="SDK reference" icon="code" href="/sdk/reference">
+    The full surface for Python, TypeScript, and Rust.
+  </Card>
+  <Card title="Self-hosted gateway" icon="server" href="/gateway/overview">
+    Point any OpenAI SDK at a warpllm you run yourself.
+  </Card>
+</CardGroup>
+
+## Two ways to integrate
+
+<Tabs>
+  <Tab title="As an SDK">
+    Install the package for your language and call it in-process. No extra hop,
+    no service to operate. Start at the [quickstart](/quickstart).
+  </Tab>
+  <Tab title="As a gateway">
+    Run the OpenAI-compatible HTTP server and point an existing OpenAI client
+    at its base URL. Your application code does not change. See
+    [Self-hosted gateway](/gateway/overview).
+
+    <Note>The gateway is unreleased — see the page for what that means.</Note>
+  </Tab>
+</Tabs>
+
+## What ships today
+
+The published packages are **0.4.0**. warpllm is early, and this table is the
+honest version of what you can build on.
+
+| Capability | Status |
+| --- | --- |
+| Chat completions, non-streaming | Released |
+| Chat completions, streaming | Released |
+| `provider/model` routing strings | Released |
+| OpenAI, DeepSeek, Kimi, OpenRouter, OpenCode Zen | Released |
+| Declaring the providers a client serves | Released |
+| Normalized error taxonomy | Released |
+| Mistral | On `main`, unreleased |
+| OpenAI-compatible HTTP gateway | On `main`, unreleased |
+| Weighted load balancing (Rust only) | On `main`, unreleased |
+| Failover, retries, caching, metrics | Planned |
+
+<Info>
+  0.4.0 is **source-breaking for Rust only**: `ClientConfig` gained a
+  `providers` field, so an exhaustive struct literal no longer compiles — add
+  `providers: None`, or switch to `..Default::default()`. Python and TypeScript
+  are purely additive. Read the
+  [changelog](https://github.com/warpllm/warpllm/blob/main/CHANGELOG.md) before
+  upgrading from `0.3.x`.
+</Info>
+
+## Design decisions worth knowing up front
+
+<AccordionGroup>
+  <Accordion title="Unknown model names are errors, never guesses" icon="shield-check">
+    warpllm matches the whole model string against its registry. A bare
+    `gpt-5-nano`, or any name the registry does not carry, fails before a
+    request goes out — rather than being forwarded to some upstream default and
+    billed. See [Model routing](/concepts/model-routing).
+  </Accordion>
+
+  <Accordion title="Your request crosses verbatim" icon="arrow-right-arrow-left">
+    Request fields are the OpenAI ones, and fields warpllm does not model are
+    forwarded untouched. Nothing is renamed on the way in or out. See
+    [Requests and responses](/concepts/requests-and-responses).
+  </Accordion>
+
+  <Accordion title="Failures are normalized to OpenAI's vocabulary" icon="triangle-exclamation">
+    DeepSeek answers an exhausted balance with a 402; warpllm reports it as
+    OpenAI would — a 429 with `code: "insufficient_quota"` — so one handler
+    covers every provider. See [Errors](/concepts/errors).
+  </Accordion>
+
+  <Accordion title="API keys come from the environment" icon="key">
+    A client reads them once, when it is built, from the variable each
+    provider's registry entry names — so it is never asked up front for a key
+    it can find. A client can also declare the providers it serves, which
+    narrows both what is read and what is routable. See
+    [Authentication](/get-started/authentication).
+  </Accordion>
+</AccordionGroup>
+
+## Get help
+
+<Columns cols={2}>
+  <Card title="Discord" icon="discord" href="https://discord.gg/payU7Vzuq5">
+    Ask questions and follow development.
+  </Card>
+  <Card title="GitHub issues" icon="github" href="https://github.com/warpllm/warpllm/issues">
+    Bugs, feature requests, and the public roadmap.
+  </Card>
+</Columns>

@@ -1,0 +1,113 @@
+---
+title: "Installation"
+description: "Packages, supported runtimes, and prebuilt platform binaries."
+icon: "download"
+---
+
+import Install from '/snippets/install.mdx'
+
+warpllm is one Rust core published three ways. The package you install carries
+a precompiled native binary, so there is no Rust toolchain to set up unless you
+are building from source.
+
+<Install />
+
+## Packages and requirements
+
+| Language | Package | Registry | Minimum runtime |
+| --- | --- | --- | --- |
+| Python | `warpllm` | [PyPI](https://pypi.org/project/warpllm/) | Python 3.10 |
+| Node | `@warpllm/warpllm` | [npm](https://www.npmjs.com/package/@warpllm/warpllm) | Node 20 |
+| Rust | `warpllm` | [crates.io](https://crates.io/crates/warpllm) | Rust 1.85 (edition 2024) |
+
+The published version of all three is **0.4.0**.
+
+## Platform support
+
+The Node package ships prebuilt binaries for these targets; npm installs the
+one matching your machine.
+
+| OS | Architectures |
+| --- | --- |
+| macOS | `x86_64`, `aarch64` |
+| Linux (glibc) | `x86_64`, `aarch64` |
+| Linux (musl) | `x86_64`, `aarch64` |
+| Windows (MSVC) | `x86_64`, `aarch64` |
+
+The Python wheels are built with [maturin](https://www.maturin.rs/) and cover
+CPython on the same platforms.
+
+<Note>
+  The Node package publishes a Node-native binary. There is no browser build in
+  the published package — warpllm holds provider API keys, which do not belong
+  in a browser bundle in any case.
+</Note>
+
+## Runtime notes
+
+<AccordionGroup>
+  <Accordion title="Rust: bring your own async runtime" icon="rust">
+    `chat_completions` is `async` and warpllm deliberately ships no runtime, so
+    a binary using it picks one:
+
+    ```bash
+    cargo add tokio --features macros,rt-multi-thread
+    ```
+  </Accordion>
+
+  <Accordion title="Python: sync and async clients" icon="python">
+    `WarpLLM` is synchronous; `AsyncWarpLLM` is the `await`-able twin. Both are
+    exported from the top-level `warpllm` package and take the same
+    constructor arguments.
+  </Accordion>
+
+  <Accordion title="Node: ESM and TypeScript types" icon="node-js">
+    Types ship with the package (`dist/index.d.ts`) — no `@types` install. The
+    request and response types are generated from the same Rust definitions the
+    core uses, so they cannot drift from what the binary accepts.
+  </Accordion>
+</AccordionGroup>
+
+## Verify the install
+
+<CodeGroup>
+
+```python Python
+import warpllm
+
+print(warpllm.__version__)
+```
+
+```ts TypeScript
+import { version } from '@warpllm/warpllm'
+
+console.log(version())
+```
+
+```rust Rust
+fn main() {
+    println!("{}", warpllm::version());
+}
+```
+
+</CodeGroup>
+
+## Building from source
+
+Clone the repository and build the workspace. This is also how you run the
+[unreleased gateway](/gateway/run).
+
+```bash
+git clone https://github.com/warpllm/warpllm.git
+cd warpllm
+cargo build --release
+```
+
+The [contribution guide](https://github.com/warpllm/warpllm/blob/main/CONTRIBUTING.md)
+covers the binding builds (`maturin`, `napi`) and the test suite.
+
+## Next
+
+<Card title="Authentication" icon="key" href="/get-started/authentication">
+  Which environment variable each provider reads, and when warpllm reads it.
+</Card>

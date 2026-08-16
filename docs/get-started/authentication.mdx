@@ -1,0 +1,204 @@
+---
+title: "Authentication"
+description: "How warpllm finds provider API keys, and which variable each provider reads."
+icon: "key"
+---
+
+import ProviderKeys from '/snippets/provider-keys.mdx'
+
+warpllm authenticates to each provider with that provider's own key, read from
+an environment variable. There is no warpllm account, no warpllm API key, and
+nothing to sign up for.
+
+## Which variable each provider reads
+
+<ProviderKeys />
+
+This table is generated from the model registry, so it is exactly what the
+shipped binary looks for. Adding a provider is
+[a registry edit](/models/add-a-model).
+
+## When keys are read
+
+**Once, when the client is constructed.** Building a client sweeps the
+environment for every variable the registry names and keeps the providers it
+can authenticate. Each request then looks up the key for the provider its model
+string routed to.
+
+<Warning>
+  Exporting a key **after** constructing a client has no effect on that client.
+  Set the environment before you build one — at process start, in your
+  container's environment block, or by sourcing a `.env` before the import that
+  constructs the client.
+</Warning>
+
+Three consequences worth planning around:
+
+<Steps>
+  <Step title="You only set the keys you use">
+    Construction never *requires* a key. A client built in an environment with
+    no keys at all is valid; each request then says which variable it wanted.
+    Routing only to `openai/…` models means `OPENAI_API_KEY` is the only
+    variable that has to exist.
+  </Step>
+  <Step title="An empty value counts as absent">
+    A variable set to the empty string is treated as no key, rather than
+    sending `Authorization: Bearer ` upstream and reporting whatever the
+    provider makes of it.
+  </Step>
+  <Step title="A missing key fails before any network call">
+    warpllm raises immediately, naming the variable to set, rather than sending
+    an unauthenticated request and surfacing the provider's 401. It arrives as
+    a 401 `AuthenticationError` with `code: "invalid_api_key"` — see
+    [Errors](/concepts/errors).
+  </Step>
+</Steps>
+
+<Note>
+  Two providers may never share a variable — the registry's tests reject it.
+  A shared key would silently authenticate one provider with another's
+  credentials.
+</Note>
+
+## Setting the variables
+
+warpllm reads the process environment directly and loads no `.env` file itself,
+so a `.env` on disk is inert until something sources it.
+
+<CodeGroup>
+
+```bash Shell
+export OPENAI_API_KEY=sk-...
+export DEEPSEEK_API_KEY=sk-...
+```
+
+```bash Source a .env
+set -a
+source .env
+set +a
+```
+
+```yaml Docker Compose
+services:
+  app:
+    image: your-app
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+```
+
+</CodeGroup>
+
+The repository ships an
+[`examples/.env.example`](https://github.com/warpllm/warpllm/blob/main/examples/.env.example)
+template to copy.
+
+## Narrowing a client to the providers it serves
+
+By default a client serves the whole roster and reads every variable above.
+Declaring the providers you mean narrows both at once — and lets you supply a
+key directly, for callers keeping theirs somewhere the process environment
+cannot reach.
+
+<CodeGroup>
+
+```python Python
+from warpllm import WarpLLM
+
+client = WarpLLM(providers={
+    "openai": {},                       # serve it, key from OPENAI_API_KEY
+    "deepseek": {"api_key": secret},    # serve it, key supplied here
+})
+```
+
+```ts TypeScript
+import { WarpLLM } from '@warpllm/warpllm'
+
+const client = new WarpLLM({
+  providers: {
+    openai: {},                    // serve it, key from OPENAI_API_KEY
+    deepseek: { apiKey: secret },  // serve it, key supplied here
+  },
+})
+```
+
+```rust Rust
+use std::collections::BTreeMap;
+
+use warpllm::{Client, ClientConfig, ProviderConfig};
+
+let client = Client::new(ClientConfig {
+    providers: Some(BTreeMap::from([
+        ("openai".into(), ProviderConfig::default()),
+        ("deepseek".into(), ProviderConfig { api_key: Some(secret) }),
+    ])),
+    ..Default::default()
+})?;
+```
+
+</CodeGroup>
+
+<Columns cols={2}>
+  <Card title="Narrows what is read" icon="eye-slash">
+    Only the declared providers' variables are consulted, so a key exported for
+    something else is not quietly adopted.
+  </Card>
+  <Card title="Narrows what is routable" icon="road-barrier">
+    A model under a provider you did not declare is refused at admission with
+    `provider_not_declared`, before any socket opens — so a client serving one
+    provider cannot be talked into billing another by a model string.
+  </Card>
+</Columns>
+
+<Warning>
+  **Absent and empty are different claims.** Omitting `providers` serves the
+  whole roster, which is what every client did before the option existed.
+  Declaring an empty map says "none", and nothing routes.
+</Warning>
+
+An inline key wins over the variable the roster names, and can authenticate a
+provider whose roster entry names no variable at all. An empty string is
+treated as unstated, so the variable still gets its turn — that matters at the
+bindings' boundary, where `os.environ.get("OPENAI_API_KEY", "")` would
+otherwise disable a provider whose key is sitting right there.
+
+A declaration **selects** from the roster; it does not extend it. There is no
+`base_url` or `models` to write here — adding a provider warpllm does not ship
+is a registry change, not a configuration one, and a name the roster does not
+hold fails when the client is built.
+
+<Note>
+  Inline keys never reach a log. `ProviderConfig`'s `Debug` prints
+  `<redacted>`, so a `tracing::debug!(?config)` in caller code cannot leak one.
+</Note>
+
+## Gateway authentication
+
+The [self-hosted gateway](/gateway/overview) works the same way: it holds the
+provider keys in its own environment and authenticates upstream with them.
+
+<Warning>
+  The gateway **ignores the caller's `Authorization` header** and never
+  forwards it — providers each have their own auth methods, so per-caller
+  passthrough is ruled out by design. A client may send whatever key it likes;
+  it is simply unused.
+
+  The gateway ships no caller authentication of its own. Do not expose it to a
+  network you do not control — put it behind your own auth layer, or bind it to
+  a private interface with `--host`.
+</Warning>
+
+## Key handling
+
+- Keys are read from the environment and used to sign the upstream request.
+  warpllm persists nothing to disk.
+- The gateway never logs request headers or bodies; they carry credentials and
+  prompts. It logs the model name and whether the request streamed.
+- Error messages surface the *name* of a missing variable, never the value of
+  one that is set.
+
+## Next
+
+<Card title="Model routing" icon="route" href="/concepts/model-routing">
+  How a `provider/model` string picks the provider whose key gets used.
+</Card>

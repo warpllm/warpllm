@@ -1,0 +1,299 @@
+---
+title: "Errors"
+description: "One failure taxonomy across every provider, spoken in OpenAI's vocabulary."
+icon: "triangle-exclamation"
+---
+
+warpllm classifies a failure once and renders it the way OpenAI would have
+reported it. DeepSeek answers an exhausted balance with a 402; you see a 429
+with `code: "insufficient_quota"`. One handler covers every provider.
+
+<Info>
+  Normalizing, not forwarding. A failure warpllm **classified** is reported in
+  OpenAI's terms. A failure it did **not** classify keeps the upstream's own
+  answer — inventing one would be a guess in normalization's clothing.
+</Info>
+
+## The two questions worth asking
+
+<Columns cols={2}>
+  <Card title="Who failed?" icon="signs-post">
+    **Gateway** — warpllm, its configuration, or the call into it. The provider
+    was never reached or never asked. Retrying the identical call changes
+    nothing.
+
+    **Provider** — an upstream answered, and its answer was a failure.
+  </Card>
+  <Card title="Can waiting fix it?" icon="clock">
+    A 429 covers a rate limit *and* an exhausted quota. Backing off clears the
+    first and never clears the second. Only `code` tells them apart.
+  </Card>
+</Columns>
+
+## Catching errors
+
+<CodeGroup>
+
+```python Python
+from warpllm import WarpLLM, RateLimitError, APIConnectionError, APIStatusError
+
+client = WarpLLM()
+
+try:
+    completion = client.chat_completions({"model": model, "messages": messages})
+except RateLimitError as e:
+    # Waiting fixes one of the two failures a 429 covers, never the other.
+    if e.code == "insufficient_quota":
+        top_up()
+    else:
+        back_off(e.headers.get("retry-after"))
+except APIConnectionError:
+    # No status and no body: the provider was never reached.
+    retry_with_backoff()
+except APIStatusError as e:
+    log.error("upstream %s: %s", e.status_code, e.message)
+```
+
+```ts TypeScript
+import { WarpLLM, RateLimitError, APIConnectionError, APIError } from '@warpllm/warpllm'
+
+const client = new WarpLLM()
+
+try {
+  const completion = await client.chatCompletions({ model, messages })
+} catch (err) {
+  if (err instanceof RateLimitError) {
+    if (err.code === 'insufficient_quota') await topUp()
+    else await backOff(err.headers?.['retry-after'])
+  } else if (err instanceof APIConnectionError) {
+    await retryWithBackoff()
+  } else if (err instanceof APIError) {
+    log.error(`upstream ${err.status}: ${err.message}`)
+  } else {
+    throw err
+  }
+}
+```
+
+```rust Rust
+use warpllm::{Error, Origin};
+
+match client.chat_completions(request).await {
+    Ok(completion) => handle(completion),
+    Err(Error::QuotaExceeded(e)) => top_up(&e),
+    Err(Error::RateLimited(e)) => back_off(e.retry_after),
+    Err(e) if e.origin() == Origin::Gateway => {
+        // Never reached the provider; retrying the same call changes nothing.
+        log::error!("warpllm: {e} ({})", e.code());
+    }
+    Err(e) => log::error!("provider: {e} ({})", e.code()),
+}
+```
+
+</CodeGroup>
+
+## Error classes in the SDKs
+
+Python and Node raise the classes the official OpenAI SDK raises, selected from
+the same status warpllm rendered. No binding interprets a status on its own.
+
+| Status | Python | Node |
+| --- | --- | --- |
+| — (never reached) | `APIConnectionError` | `APIConnectionError` |
+| 400 | `BadRequestError` | `BadRequestError` |
+| 401 | `AuthenticationError` | `AuthenticationError` |
+| 403 | `PermissionDeniedError` | `PermissionDeniedError` |
+| 404 | `NotFoundError` | `NotFoundError` |
+| 409 | `ConflictError` | `ConflictError` |
+| 422 | `UnprocessableEntityError` | `UnprocessableEntityError` |
+| 429 | `RateLimitError` | `RateLimitError` |
+| 5xx | `InternalServerError` | `InternalServerError` |
+| anything else | `APIStatusError` | `APIError` |
+
+<Note>
+  Python inserts `APIStatusError` between `APIError` and the status-specific
+  classes, so `except APIStatusError` catches everything an upstream answered
+  while letting `APIConnectionError` through. Node has no such intermediate:
+  every class extends `APIError` directly, and `err.status === undefined`
+  distinguishes a connection failure.
+</Note>
+
+### Attributes on a caught error
+
+<CodeGroup>
+
+```python Python
+e.message      # what went wrong
+e.status_code  # only on APIStatusError and its subclasses
+e.code         # the failure's own slug — the field that separates 429s
+e.type         # OpenAI error family, e.g. "invalid_request_error"
+e.param        # not modeled yet; always None
+e.request_id   # the upstream's request id, when it sent one
+e.headers      # retry-after and x-request-id, when the upstream sent them
+e.body         # the error object as it came off the wire
+```
+
+```ts TypeScript
+err.message    // what went wrong
+err.status     // undefined when the provider was never reached
+err.code       // the failure's own slug — the field that separates 429s
+err.type       // OpenAI error family, e.g. "invalid_request_error"
+err.param      // not modeled yet
+err.requestID  // the upstream's request id, when it sent one
+err.headers    // retry-after and x-request-id, when the upstream sent them
+err.error      // the error object as it came off the wire
+```
+
+</CodeGroup>
+
+## The full taxonomy
+
+Rust exposes warpllm's own enum; the bindings receive the OpenAI rendering of
+it. `warpllm_code` appears verbatim on the [gateway's HTTP
+envelope](#the-gateway-envelope) and nowhere else.
+
+### warpllm's own failures (`origin: gateway`)
+
+| Rust variant | `warpllm_code` | Status | `code` | Means |
+| --- | --- | --- | --- | --- |
+| `InvalidInput` | `invalid_request` | 400 | `invalid_request` | The call into warpllm was wrong |
+| `InvalidModel` | `invalid_request` | 400 | `invalid_request` | The model string is not on the roster |
+| `MissingApiKey` | `missing_api_key` | 401 | `invalid_api_key` | No key for the routed provider |
+| `ProviderNotDeclared` | `provider_not_declared` | 400 | `provider_not_declared` | The client did not declare the routed provider |
+| `Network` | `connection_error` | — | `connection_error` | The provider was never reached |
+| `Decode` | `decode_error` | 502 | `decode_error` | The provider's success body was unreadable |
+| `StreamTruncated` | `stream_truncated` | 502 | `stream_truncated` | The stream ended before it finished |
+| `StreamStalled` | `stream_stalled` | 504 | `stream_stalled` | The stream went silent past the read timeout |
+| `NotImplemented` | `not_implemented` | 501 | `not_implemented` | A surface warpllm does not serve yet |
+| `Internal` | `internal_error` | 500 | `internal_error` | warpllm could not set itself up |
+
+### The provider's failures, normalized (`origin: provider`)
+
+| Rust variant | `warpllm_code` | Status | `code` | Means |
+| --- | --- | --- | --- | --- |
+| `RateLimited` | `rate_limited` | 429 | `rate_limit_exceeded` | Too fast. Back off |
+| `QuotaExceeded` | `quota_exceeded` | 429 | `insufficient_quota` | Out of credit. Backing off will not help |
+| `Overloaded` | `overloaded` | 503 | `server_error` | The provider is shedding load |
+| `ServerError` | `provider_server_error` | upstream's | upstream's | An unattributed 5xx |
+| `ContextLengthExceeded` | `context_length_exceeded` | 400 | `context_length_exceeded` | Prompt exceeds the model's window |
+| `ContentFilter` | `content_filter` | 400 | `content_filter` | Refused on safety grounds |
+| `Authentication` | `authentication` | 401 | `invalid_api_key` | The credential is missing or invalid |
+| `PermissionDenied` | `permission_denied` | 403 | upstream's | Valid credential, not entitled |
+| `ModelNotFound` | `model_not_found` | 404 | `model_not_found` | The provider does not serve that model |
+| `InvalidRequest` | `provider_invalid_request` | 400 | upstream's | The provider rejected the payload |
+| `Unknown` | `provider_unknown` | upstream's | upstream's | Unclassified. Read the body and decide |
+
+<Warning>
+  `InvalidModel` and `ModelNotFound` are different failures. The first fires
+  before any request goes out — warpllm's roster does not carry the name. The
+  second is the provider saying it does not serve a model warpllm *does* carry,
+  which usually means the roster needs an edit.
+
+  The same split applies to `MissingApiKey` (no key at all, no request sent)
+  versus `Authentication` (a key was sent and rejected).
+
+  `ProviderNotDeclared` is a third neighbour, and only a client that
+  [declared its providers](/get-started/authentication#narrowing-a-client-to-the-providers-it-serves)
+  can produce it. It is deliberately **not** reported as a missing credential:
+  telling you to export a key for a provider you chose not to serve would be
+  exactly the wrong advice. What is wrong is the declaration, or the model
+  string aimed at it. It is 400 rather than 404, which on a gateway would read
+  as "no such endpoint".
+</Warning>
+
+## Retrying
+
+warpllm does not retry for you **yet**, so today the policy is yours to write.
+The taxonomy exists to make that possible: every failure below says whether
+waiting can fix it.
+
+<Note>
+  A retry loop and a fallback chain are planned, not ruled out — an untested
+  retry policy shipped as a public contract is worse than none, so they land
+  once they are worked out rather than early. Failover is tracked in
+  [issue #27](https://github.com/warpllm/warpllm/issues/27). Weighted load balancing has already landed on
+  `main`; see
+  [Model routing](/concepts/model-routing#spreading-load-retrying-and-failing-over).
+</Note>
+
+| Failure | Retry the same call? |
+| --- | --- |
+| `RateLimited` | Yes, after `retry-after` |
+| `Overloaded`, `ServerError` | Yes, with backoff |
+| `Network`, `StreamStalled`, `StreamTruncated` | Yes, with backoff |
+| `QuotaExceeded` | No — someone has to pay |
+| `Authentication`, `PermissionDenied`, `MissingApiKey` | No — fix the credential |
+| `ProviderNotDeclared` | No — fix the client's `providers`, or the model string |
+| `InvalidInput`, `InvalidModel`, `InvalidRequest`, `ContextLengthExceeded` | No — fix the request |
+| `ContentFilter` | No — the model refused |
+| `Unknown` | Read the body and decide |
+
+When an upstream sends `Retry-After`, warpllm preserves it: as a `retry-after`
+entry in the SDK error's `headers`, and as a real HTTP header on the gateway's
+response.
+
+## Errors during a stream
+
+Once a stream is open, a failure arrives as an item on it rather than as a
+return value, and it is **terminal** — whatever produced it also ended the
+stream.
+
+The one distinction to keep: a stream that stops cleanly is a complete reply. A
+stream that stops early raises `StreamTruncated` after every chunk that did
+arrive, so you never mistake a cut-off answer for a finished one. See
+[Streaming](/guides/streaming).
+
+## The gateway envelope
+
+The [HTTP gateway](/gateway/overview) sends the standard OpenAI error body, so
+an official SDK pointed at it raises its own typed exception. warpllm adds
+fields on this surface only — an HTTP caller can ignore a field it does not
+recognize, which is not true of an attribute on an SDK error object.
+
+```json
+{
+  "error": {
+    "message": "deepseek: insufficient balance",
+    "type": "insufficient_quota",
+    "code": "insufficient_quota",
+    "origin": "provider",
+    "warpllm_code": "quota_exceeded",
+    "provider": "deepseek",
+    "provider_status": 402,
+    "provider_code": "insufficient_balance"
+  }
+}
+```
+
+<ResponseField name="origin" type="string">
+  `"gateway"` or `"provider"` — who the failure came from.
+</ResponseField>
+<ResponseField name="warpllm_code" type="string">
+  warpllm's own taxonomy slug, from the tables above.
+</ResponseField>
+<ResponseField name="provider" type="string">
+  Which provider answered. Absent when none did.
+</ResponseField>
+<ResponseField name="provider_status" type="integer">
+  The upstream's own status, before normalization.
+</ResponseField>
+<ResponseField name="provider_code" type="string">
+  The upstream's own code, when it sent one.
+</ResponseField>
+
+<Note>
+  A failure warpllm never reached a provider for has no OpenAI spelling — no
+  client talking to OpenAI directly ever sees one. The gateway answers **502**,
+  which is what a gateway says when the thing behind it did not answer.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Timeouts" icon="clock" href="/concepts/timeouts">
+    The two deadlines, and which failure each one produces.
+  </Card>
+  <Card title="Streaming" icon="water" href="/guides/streaming">
+    How a stream ends, and how to tell complete from truncated.
+  </Card>
+</CardGroup>

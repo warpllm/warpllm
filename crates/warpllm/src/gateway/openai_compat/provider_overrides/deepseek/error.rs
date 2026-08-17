@@ -17,7 +17,11 @@ impl ErrorMapper for DeepSeek {
     /// A status rule and not a `code` one because DeepSeek sends no code with
     /// it, which is exactly why the protocol baseline cannot classify this
     /// and DeepSeek has to say so itself.
-    fn from_status(&self, status: u16) -> Option<Classified> {
+    ///
+    /// The `type` half of this lookup is unused: DeepSeek documents its
+    /// failures as bare statuses and sends no family alongside them, so 402 is
+    /// genuinely the only signal there is to read.
+    fn from_status_and_type(&self, status: u16, _error_type: Option<&str>) -> Option<Classified> {
         (status == 402).then_some(Error::QuotaExceeded as Classified)
     }
 }
@@ -28,7 +32,9 @@ mod tests {
 
     #[test]
     fn a_402_is_an_exhausted_balance_not_a_bad_request() {
-        let classified = DeepSeek.from_status(402).expect("402 is DeepSeek's");
+        let classified = DeepSeek
+            .from_status_and_type(402, None)
+            .expect("402 is DeepSeek's");
         assert!(matches!(
             classified(Box::new(crate::gateway::types::ProviderError {
                 provider: "deepseek",
@@ -49,13 +55,17 @@ mod tests {
     #[test]
     fn no_other_status_is_claimed() {
         for status in [400, 401, 403, 404, 429, 500, 503] {
-            assert!(DeepSeek.from_status(status).is_none(), "{status}");
+            assert!(
+                DeepSeek.from_status_and_type(status, None).is_none(),
+                "{status}"
+            );
         }
     }
 
-    /// DeepSeek overrides ONE of the three tiers. `from_code` and `from_type`
-    /// are not implemented at all, so they take the trait's `None` default
-    /// and every spelling on those tiers falls through to the protocol.
+    /// DeepSeek claims a status and nothing else. `from_code` is not
+    /// implemented at all, so it takes the trait's `None` default — and the
+    /// `type` half of `from_status_and_type` is ignored, so every family falls
+    /// through to the protocol under a status DeepSeek does not claim.
     ///
     /// Asserted against the protocol's whole published vocabulary rather than
     /// a sample: an override added here later would fail this test loudly,
@@ -83,7 +93,14 @@ mod tests {
             "invalid_request_error",
             "api_error",
         ] {
-            assert!(DeepSeek.from_type(error_type).is_none(), "{error_type}");
+            // Under 400, which DeepSeek's own status rule does not claim, so
+            // the family is all there is left for it to answer on.
+            assert!(
+                DeepSeek
+                    .from_status_and_type(400, Some(error_type))
+                    .is_none(),
+                "{error_type}"
+            );
         }
     }
 

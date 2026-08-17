@@ -8,19 +8,20 @@
 //! Sibling of [`api`](super::api) rather than a child of one of its surfaces:
 //! the envelope is protocol-wide, shared by every endpoint Anthropic serves.
 //!
-//! # Two signals, not three
+//! # One lookup, not two
 //!
-//! [`ErrorMapper`] offers `from_code`, `from_status` and `from_type`, and this
-//! protocol implements only the last two. Anthropic sends **no `code`** — the
+//! [`ErrorMapper`] offers `from_code` and `from_status_and_type`, and this
+//! protocol implements only the second. Anthropic sends **no `code`** — the
 //! envelope is `{type, message}` and nothing else — so a distinction OpenAI
 //! draws with a slug has to be drawn from the status here or not at all.
 //!
 //! That is not a gap to work around. `classify` asks the strongest signal
-//! first, and with the strongest one absent the ordering does more work than it
-//! does next door: `invalid_request_error` is Anthropic's documented catch-all
-//! for "other 4XX status codes not listed", so reading the family before the
-//! status would report a 402 billing failure as a malformed request. The status
-//! table below is deliberately the wider of the two.
+//! first, and with the strongest one absent everything rests on how the one
+//! lookup below orders its own arms: `invalid_request_error` is Anthropic's
+//! documented catch-all for "other 4XX status codes not listed", so reading the
+//! family before the status would report a 402 billing failure as a malformed
+//! request. The status arms come first for that reason, and they are
+//! deliberately the wider set.
 
 use std::time::Duration;
 
@@ -83,8 +84,9 @@ pub(super) struct Anthropic;
 
 impl ErrorMapper for Anthropic {
     /// Anthropic publishes one status per failure and a matching `type` for
-    /// each, so the status table is complete rather than the residue it is on a
-    /// protocol with per-failure codes.
+    /// each, so the status arms are a complete table rather than the residue
+    /// they are on a protocol with per-failure codes — and they are read
+    /// FIRST, for the reason this module's docs give.
     ///
     /// **529** is the one that has to be here. It is Anthropic's own overload
     /// status, outside any range `classify`'s residual reads — 5xx there stops
@@ -124,46 +126,44 @@ impl ErrorMapper for Anthropic {
     /// second look. Delineating them then means using what warpllm SENT — it
     /// knows whether the request carried a file reference — never what
     /// Anthropic wrote back.
-    fn from_status(&self, status: u16) -> Option<Classified> {
-        Some(match status {
-            401 => Error::Authentication,
-            402 => Error::QuotaExceeded,
-            403 => Error::PermissionDenied,
-            404 => Error::ModelNotFound,
-            413 => Error::ContextLengthExceeded,
-            429 => Error::RateLimited,
-            529 => Error::Overloaded,
-            _ => return None,
-        })
-    }
-
-    /// The `type` family — the weaker of the two signals this protocol has, and
-    /// the one that only decides a failure whose status said nothing.
+    ///
+    /// ---
+    ///
+    /// The `type` arms are the weaker of the two signals this protocol has,
+    /// and only decide a failure whose status said nothing.
     ///
     /// In practice that is a mid-stream `error` event, which arrives with no
     /// status at all because the HTTP exchange already answered 200. Every
-    /// family below is reachable that way, which is why the table mirrors the
-    /// status one rather than stopping at the families a 4xx can carry.
-    fn from_type(&self, error_type: &str) -> Option<Classified> {
-        Some(match error_type {
-            "authentication_error" => Error::Authentication,
-            "billing_error" => Error::QuotaExceeded,
-            "permission_error" => Error::PermissionDenied,
-            "not_found_error" => Error::ModelNotFound,
-            "request_too_large" => Error::ContextLengthExceeded,
-            "rate_limit_error" => Error::RateLimited,
-            "overloaded_error" => Error::Overloaded,
+    /// family below is reachable that way, which is why they mirror the status
+    /// arms rather than stopping at the families a 4xx can carry.
+    fn from_status_and_type(&self, status: u16, error_type: Option<&str>) -> Option<Classified> {
+        Some(match (status, error_type) {
+            (401, _) => Error::Authentication,
+            (402, _) => Error::QuotaExceeded,
+            (403, _) => Error::PermissionDenied,
+            (404, _) => Error::ModelNotFound,
+            (413, _) => Error::ContextLengthExceeded,
+            (429, _) => Error::RateLimited,
+            (529, _) => Error::Overloaded,
+
+            (_, Some("authentication_error")) => Error::Authentication,
+            (_, Some("billing_error")) => Error::QuotaExceeded,
+            (_, Some("permission_error")) => Error::PermissionDenied,
+            (_, Some("not_found_error")) => Error::ModelNotFound,
+            (_, Some("request_too_large")) => Error::ContextLengthExceeded,
+            (_, Some("rate_limit_error")) => Error::RateLimited,
+            (_, Some("overloaded_error")) => Error::Overloaded,
             // A 504 from Anthropic's own edge. NOT `Error::StreamStalled`,
             // however closely the words match: that variant is warpllm
             // reporting that IT stopped waiting, carries the timeout it
             // enforced, and holds no provider evidence — so it cannot even be
             // constructed here. An upstream that timed out and said so is an
             // unattributed 5xx, which is what `ServerError` means.
-            "api_error" | "timeout_error" => Error::ServerError,
+            (_, Some("api_error" | "timeout_error")) => Error::ServerError,
             // Anthropic's catch-all, and the reason it is read LAST: it is
             // documented as covering "other 4XX status codes not listed",
             // which makes it the family that means least.
-            "invalid_request_error" => Error::InvalidRequest,
+            (_, Some("invalid_request_error")) => Error::InvalidRequest,
             // `conflict_error` (409) is deliberately absent, and it is the one
             // family here that falls all the way through to `Error::Unknown` —
             // `classify`'s residual reads 400 and 422, not the whole 4xx range.

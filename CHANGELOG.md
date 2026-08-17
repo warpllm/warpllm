@@ -8,6 +8,40 @@ Versions follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a breaking change bumps the MINOR number: `0.1.x` and `0.2.x` are
 incompatible, and `^0.1` will not upgrade you into one.
 
+## [Unreleased]
+
+### Fixed
+
+- **An OpenCode Zen account out of credit was reported as an authentication
+  failure**, sending the caller to check an API key that was fine. It now
+  classifies as `quota_exceeded`, which is what the failure is — and on the
+  OpenAI-compatible surface that means HTTP 429 `insufficient_quota` rather
+  than 401 `invalid_api_key`.
+
+  Zen reports credit exhaustion at **HTTP 401**, not the 402 that would have
+  been readable, with a family of its own and no `code` at all:
+
+  ```json
+  {"type":"error","error":{"type":"CreditsError","message":"No payment method. Add a payment method here: …/billing"}}
+  ```
+
+  The status cannot decide this on its own, because Zen answers a genuinely
+  bad key with that same 401 and a different family — `AuthError` — so a rule
+  reading 401 would be wrong in one direction or the other whichever way it
+  went. Only the two signals together separate them.
+
+  The classifier could not express that. It ranked every status above every
+  `type`, so `openai_compat`'s reading of a bare 401 answered first and no
+  provider rule written on a family was ever consulted. The two lookups are
+  now one, `ErrorMapper::from_status_and_type`, and which of the two signals
+  is stronger is each vocabulary's own call rather than a fixed order imposed
+  on all of them — `openai_compat` and `anthropic` both still read the status
+  first, and say why.
+
+  No other provider reclassifies: nothing on the roster mapped a `type` of its
+  own, so every existing failure resolves exactly as before. `ErrorMapper` is
+  internal, so no package's API changes.
+
 ## [0.4.0] - 2026-08-16
 
 Two additions and one source-break. A client can now declare the providers it

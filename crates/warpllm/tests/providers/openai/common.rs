@@ -12,6 +12,7 @@ use wiremock::MockServer;
 pub const OPENAI_KEY: &str = "sk-test-openai";
 pub const DEEPSEEK_KEY: &str = "sk-test-deepseek";
 pub const OPENROUTER_KEY: &str = "sk-test-openrouter";
+pub const OPENCODE_KEY: &str = "sk-test-opencode";
 
 /// Client with the base URL pointed at the mock server. It carries no key —
 /// the client reads the environment as it is BUILT, resolving every provider
@@ -57,6 +58,10 @@ pub fn with_deepseek_key<F: Future<Output = ()>>(body: F) {
 
 pub fn with_openrouter_key<F: Future<Output = ()>>(body: F) {
     with_env_key("OPENROUTER_API_KEY", OPENROUTER_KEY, body);
+}
+
+pub fn with_opencode_key<F: Future<Output = ()>>(body: F) {
+    with_env_key("OPENCODE_API_KEY", OPENCODE_KEY, body);
 }
 
 pub fn request(model: &str) -> CreateChatCompletionRequest {

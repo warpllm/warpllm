@@ -31,21 +31,32 @@ use crate::gateway::types::ProviderError;
 /// be a second level reintroduced one module over.
 pub(crate) type Classified = fn(Box<ProviderError>) -> Error;
 
-/// What a set of error spellings MEANS, as three independent lookups.
+/// What a set of error spellings MEANS, as two lookups.
 ///
 /// Implemented twice over for any given exchange: once by the protocol, for
 /// the vocabulary its whole ecosystem shares, and once by the provider, for
 /// what only it does. [`classify`] interleaves them.
 ///
-/// THREE METHODS, NOT ONE, and that is the whole design. A single
-/// `classify`-shaped hook would let a provider's rule outrank every protocol
-/// rule regardless of strength — so a provider that maps a bare status would
-/// beat the protocol reading an explicit `code`, and a failure the provider
-/// NAMED would lose to a guess about its status. Splitting the hook by signal
-/// makes the strength ordering something [`classify`] enforces rather than
-/// something each implementor has to remember.
+/// TWO METHODS, NOT ONE, and the split that remains is the one [`classify`]
+/// can enforce without knowing any vocabulary. A `code` is the upstream NAMING
+/// its own failure, and no reading of the envelope around it — from the
+/// provider or from anyone — should outrank that. A single `classify`-shaped
+/// hook would lose exactly that guarantee: a provider mapping a bare status
+/// would beat the protocol reading an explicit slug.
 ///
-/// Every method defaults to `None`, so an implementor writes only the lookups
+/// TWO METHODS, NOT THREE, and that is the other half. Status and `type` were
+/// once separate hooks ranked status-over-type, which made the ranking
+/// [`classify`]'s to impose on every protocol at once — and made a provider's
+/// `type` structurally unable to outrank its protocol's status, however
+/// decisive that `type` was. OpenCode Zen is where that broke: it reports
+/// credit exhaustion as `CreditsError` at HTTP 401, the same status it uses
+/// for a genuinely bad key, so neither signal decides alone and no rule
+/// written on one of them could ever have been right. Which of the two is
+/// stronger is a property of a particular vocabulary, not of HTTP, so it
+/// belongs to the mapper holding both — where the arms of one `match` state it
+/// in reading order.
+///
+/// Both methods default to `None`, so an implementor writes only the lookups
 /// it actually has.
 // `from_*` taking `&self` trips `clippy::wrong_self_convention`, which reads
 // the prefix as a constructor. These are lookups on a mapper — "what does this
@@ -59,16 +70,14 @@ pub(crate) trait ErrorMapper: Sync {
         None
     }
 
-    /// An HTTP status that means one thing on this protocol or from this
-    /// provider. Weaker than a `code`: a status is warpllm reading a number,
-    /// a code is the upstream saying what happened.
-    fn from_status(&self, _status: u16) -> Option<Classified> {
-        None
-    }
-
-    /// The provider's `type` — a failure FAMILY. Weakest of the three,
-    /// because a family covers several failures that need different remedies.
-    fn from_type(&self, _error_type: &str) -> Option<Classified> {
+    /// The rest of the envelope: the HTTP status, and the `type` family the
+    /// body named beside it. Weaker than a `code`, which is why it is asked
+    /// second — but weaker only as a pair, because within it the two signals
+    /// have no fixed order to enforce.
+    ///
+    /// `error_type` is `Option` because plenty of backends send a bare status
+    /// with no envelope at all; the status is always there to read.
+    fn from_status_and_type(&self, _status: u16, _error_type: Option<&str>) -> Option<Classified> {
         None
     }
 }
@@ -81,12 +90,18 @@ impl ErrorMapper for MatchesProtocol {}
 /// Resolves one failure against a provider and the protocol it speaks,
 /// strongest signal first.
 ///
-/// The tier order lives HERE, once, rather than in each protocol: which
-/// signal outranks which is a property of HTTP error envelopes in general,
-/// not of any one wire format. Within a tier the provider is asked first,
-/// since it is the more specific authority on its own spellings — but a tier
-/// is never skipped, so a provider's status rule cannot outrank the
-/// protocol's reading of an explicit `code`.
+/// The tier order lives HERE, once, rather than in each protocol: that a
+/// named `code` outranks the envelope around it is a property of HTTP error
+/// envelopes in general, not of any one wire format. Within a tier the
+/// provider is asked first, since it is the more specific authority on its own
+/// spellings — but a tier is never skipped, so a provider's reading of a
+/// status or a family cannot outrank the protocol's reading of an explicit
+/// `code`.
+///
+/// Four lookups, and nothing finer. Ranking a status against a `type` needs to
+/// know what a particular vocabulary spells them with, which is precisely what
+/// this function refuses to know — so that call sits inside each
+/// [`ErrorMapper`] instead.
 ///
 /// The residual is pure HTTP semantics and belongs to no vocabulary: a 4xx
 /// nobody recognized is still a client error, and a 5xx is still the server's.
@@ -100,10 +115,8 @@ pub(crate) fn classify(
 ) -> Classified {
     code.and_then(|code| provider.from_code(code))
         .or_else(|| code.and_then(|code| protocol.from_code(code)))
-        .or_else(|| provider.from_status(status))
-        .or_else(|| protocol.from_status(status))
-        .or_else(|| error_type.and_then(|family| provider.from_type(family)))
-        .or_else(|| error_type.and_then(|family| protocol.from_type(family)))
+        .or_else(|| provider.from_status_and_type(status, error_type))
+        .or_else(|| protocol.from_status_and_type(status, error_type))
         .unwrap_or(match status {
             400 | 422 => Error::InvalidRequest,
             500..=599 => Error::ServerError,
@@ -115,27 +128,44 @@ pub(crate) fn classify(
 mod tests {
     use super::*;
 
-    /// A protocol that answers on every tier, so a provider rule can be shown
-    /// to win or lose against each one independently.
+    /// A protocol that answers on both tiers, and on each signal within the
+    /// second, so a provider rule can be shown to win or lose against each one
+    /// independently.
     struct Protocol;
 
     impl ErrorMapper for Protocol {
         fn from_code(&self, code: &str) -> Option<Classified> {
             (code == "known_code").then_some(Error::ContentFilter as Classified)
         }
-        fn from_status(&self, status: u16) -> Option<Classified> {
-            (status == 429).then_some(Error::RateLimited as Classified)
-        }
-        fn from_type(&self, error_type: &str) -> Option<Classified> {
-            (error_type == "known_type").then_some(Error::ServerError as Classified)
+        fn from_status_and_type(
+            &self,
+            status: u16,
+            error_type: Option<&str>,
+        ) -> Option<Classified> {
+            Some(match (status, error_type) {
+                (429, _) => Error::RateLimited,
+                (_, Some("known_type")) => Error::ServerError,
+                _ => return None,
+            })
         }
     }
 
-    struct ProviderStatus;
+    /// A provider that reads the envelope both ways: a status the protocol
+    /// says nothing about, and a family the protocol would otherwise never be
+    /// asked for because its own status rule fires first.
+    struct ProviderEnvelope;
 
-    impl ErrorMapper for ProviderStatus {
-        fn from_status(&self, status: u16) -> Option<Classified> {
-            (status == 402).then_some(Error::QuotaExceeded as Classified)
+    impl ErrorMapper for ProviderEnvelope {
+        fn from_status_and_type(
+            &self,
+            status: u16,
+            error_type: Option<&str>,
+        ) -> Option<Classified> {
+            Some(match (status, error_type) {
+                (402, _) => Error::QuotaExceeded,
+                (_, Some("provider_type")) => Error::ContextLengthExceeded,
+                _ => return None,
+            })
         }
     }
 
@@ -177,30 +207,42 @@ mod tests {
     /// Within a tier the provider is the more specific authority and wins.
     #[test]
     fn a_provider_rule_beats_the_protocol_at_the_same_tier() {
-        assert_eq!(code_of(&ProviderStatus, 402, None, None), "quota_exceeded");
+        assert_eq!(
+            code_of(&ProviderEnvelope, 402, None, None),
+            "quota_exceeded"
+        );
     }
 
-    /// THE case the split hook exists for. A provider status rule must NOT
-    /// outrank the protocol reading an explicit `code`: the upstream named
-    /// its own failure, and a rule about its status numbers is a weaker
-    /// signal than that. A single `classify` hook would get this backwards.
+    /// THE case the remaining split exists for. A provider's reading of the
+    /// envelope must NOT outrank the protocol reading an explicit `code`: the
+    /// upstream named its own failure, and a rule about status numbers or
+    /// families is a weaker signal than that. A single `classify` hook would
+    /// get this backwards.
     #[test]
-    fn a_provider_status_rule_does_not_outrank_a_protocol_code() {
+    fn a_provider_envelope_rule_does_not_outrank_a_protocol_code() {
         assert_eq!(
-            code_of(&ProviderStatus, 402, None, Some("known_code")),
+            code_of(&ProviderEnvelope, 402, None, Some("known_code")),
             "content_filter",
             "a status guess outranked the failure the provider named"
         );
     }
 
-    /// ...and it DOES outrank the protocol's weaker tiers, or a provider
-    /// could never correct a family its protocol reads differently.
+    /// What merging the two envelope lookups BOUGHT, and the shape issue #66
+    /// reported: a provider names a failure with a `type`, under a status its
+    /// protocol already claims. While status and family were separate tiers
+    /// this was unreachable — every status outranked every family, so the
+    /// protocol's reading of 429 answered and the provider's rule could not be
+    /// consulted no matter what it said.
     #[test]
-    fn a_provider_status_rule_outranks_a_protocol_type() {
+    fn a_provider_family_outranks_a_protocol_status() {
         assert_eq!(
-            code_of(&ProviderStatus, 402, Some("known_type"), None),
-            "quota_exceeded"
+            code_of(&ProviderEnvelope, 429, Some("provider_type"), None),
+            "context_length_exceeded",
+            "the protocol's status answered a failure the provider had named"
         );
+        // ...and with nothing from the provider to read, that same status is
+        // still the protocol's to answer.
+        assert_eq!(code_of(&ProviderEnvelope, 429, None, None), "rate_limited");
     }
 
     /// Nothing recognized anywhere: HTTP semantics answer, and only where

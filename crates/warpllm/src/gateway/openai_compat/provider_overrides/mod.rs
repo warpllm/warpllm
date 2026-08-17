@@ -7,9 +7,9 @@
 //! adding a faithful backend to the roster is a YAML edit and no Rust at all.
 //!
 //! One directory per provider, one module inside it per thing that provider
-//! does differently — `deepseek/error.rs` maps its error codes, statuses and
-//! types, and a second divergence would land beside it rather than widening
-//! it.
+//! does differently — `deepseek/error.rs` reads what a status of its own
+//! means, `opencode/error.rs` a family of its own, and a second divergence
+//! would land beside either rather than widening it.
 //!
 //! There is deliberately no `openai/`. OpenAI's spellings ARE the
 //! `openai_compat` baseline, so an empty impl for symmetry would be a
@@ -22,6 +22,7 @@
 //! does this spelling mean", never "where do I find it".
 
 mod deepseek;
+mod opencode;
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -40,10 +41,16 @@ use crate::gateway::error::{ErrorMapper, MatchesProtocol};
 /// [`registry`](crate::registry) uses for the roster itself: built once on
 /// first use, read-only forever after.
 static OVERRIDES: LazyLock<HashMap<&'static str, &'static dyn ErrorMapper>> = LazyLock::new(|| {
-    HashMap::from([(
-        "deepseek",
-        &deepseek::error::DeepSeek as &'static dyn ErrorMapper,
-    )])
+    HashMap::from([
+        (
+            "deepseek",
+            &deepseek::error::DeepSeek as &'static dyn ErrorMapper,
+        ),
+        (
+            "opencode",
+            &opencode::error::OpenCode as &'static dyn ErrorMapper,
+        ),
+    ])
 });
 
 /// The provider's own error mapping, or [`MatchesProtocol`] if it has none.
@@ -81,7 +88,11 @@ mod tests {
     fn an_unlisted_provider_gets_nothing_of_its_own() {
         let mapper = error_mapper("openai");
         assert!(mapper.from_code("insufficient_quota").is_none());
-        assert!(mapper.from_status(402).is_none());
-        assert!(mapper.from_type("api_error").is_none());
+        assert!(mapper.from_status_and_type(402, None).is_none());
+        assert!(
+            mapper
+                .from_status_and_type(500, Some("api_error"))
+                .is_none()
+        );
     }
 }

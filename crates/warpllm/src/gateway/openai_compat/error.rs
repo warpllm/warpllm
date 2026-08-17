@@ -108,37 +108,36 @@ impl ErrorMapper for OpenAiCompat {
         })
     }
 
-    /// Only the statuses that mean ONE thing on this protocol.
+    /// The envelope short of a `code`: a status, and the `type` family beside
+    /// it. ON THIS PROTOCOL the status is the stronger of the two, and the
+    /// arms below say so by being read first.
     ///
-    /// 404 is deliberately absent: it may name a model, a proxy route, or the
-    /// endpoint itself, so it needs envelope evidence before becoming
+    /// `invalid_request_error` is why. It is OpenAI's CATCH-ALL, sent for a
+    /// bad API key (401), an unknown model (404), and a genuinely malformed
+    /// body alike, so reading it over an unambiguous 401 would report a
+    /// credential failure as a bad request and send a caller to fix a payload
+    /// that was fine. Note that this is a claim about OPENAI'S FAMILIES, not
+    /// about HTTP — a provider whose `type` names one failure each is entitled
+    /// to the opposite order, and `opencode` next door takes it.
+    ///
+    /// Only the statuses that mean ONE thing on this protocol are listed. 404
+    /// is deliberately absent: it may name a model, a proxy route, or the
+    /// endpoint itself, so it needs the family below before becoming
     /// [`Error::ModelNotFound`]. 402 is absent because it is not this
     /// protocol's — DeepSeek documents it, and states it itself.
-    fn from_status(&self, status: u16) -> Option<Classified> {
-        Some(match status {
-            401 => Error::Authentication,
-            403 => Error::PermissionDenied,
-            429 => Error::RateLimited,
-            503 => Error::Overloaded,
-            _ => return None,
-        })
-    }
-
-    /// The `type` family, weakest of the three — and the tier that explains
-    /// why the split matters. `invalid_request_error` is OpenAI's CATCH-ALL,
-    /// sent for a bad API key (401), an unknown model (404), and a genuinely
-    /// malformed body alike. Reading it over an unambiguous 401 would report
-    /// a credential failure as a bad request and send a caller to fix their
-    /// payload, which is why a decisive status is asked first.
-    fn from_type(&self, error_type: &str) -> Option<Classified> {
-        Some(match error_type {
-            "rate_limit_error" => Error::RateLimited,
-            "overloaded_error" => Error::Overloaded,
-            "authentication_error" => Error::Authentication,
-            "permission_error" => Error::PermissionDenied,
-            "not_found_error" => Error::ModelNotFound,
-            "invalid_request_error" => Error::InvalidRequest,
-            "api_error" => Error::ServerError,
+    fn from_status_and_type(&self, status: u16, error_type: Option<&str>) -> Option<Classified> {
+        Some(match (status, error_type) {
+            (401, _) => Error::Authentication,
+            (403, _) => Error::PermissionDenied,
+            (429, _) => Error::RateLimited,
+            (503, _) => Error::Overloaded,
+            (_, Some("rate_limit_error")) => Error::RateLimited,
+            (_, Some("overloaded_error")) => Error::Overloaded,
+            (_, Some("authentication_error")) => Error::Authentication,
+            (_, Some("permission_error")) => Error::PermissionDenied,
+            (_, Some("not_found_error")) => Error::ModelNotFound,
+            (_, Some("invalid_request_error")) => Error::InvalidRequest,
+            (_, Some("api_error")) => Error::ServerError,
             _ => return None,
         })
     }

@@ -220,7 +220,14 @@ mod tests {
         let registry = load::load(yaml).unwrap();
         assert_eq!(
             providers(&registry),
-            vec!["deepseek", "kimi", "mistral", "openai", "opencode", "openrouter"]
+            vec![
+                "deepseek",
+                "kimi",
+                "mistral",
+                "openai",
+                "opencode",
+                "openrouter"
+            ]
         );
         assert_eq!(
             keys(&registry),

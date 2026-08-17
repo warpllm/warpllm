@@ -13,6 +13,9 @@ mod deepseek_chat_completions;
 #[path = "providers/deepseek/config_env.rs"]
 mod deepseek_config_env;
 
+#[path = "providers/opencode/config_env.rs"]
+mod opencode_config_env;
+
 #[path = "providers/openrouter/config_env.rs"]
 mod openrouter_config_env;
 

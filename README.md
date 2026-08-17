@@ -95,11 +95,41 @@ the provider needs and change the model string. Nothing else moves.
 | `openai/gpt-5-nano` | `OPENAI_API_KEY` |
 | `deepseek/deepseek-v4-flash` | `DEEPSEEK_API_KEY` |
 | `kimi/kimi-k3` | `MOONSHOT_API_KEY` |
+| `opencode/glm-5.2` | `OPENCODE_API_KEY` |
 | `openrouter/anthropic/claude-sonnet-4` | `OPENROUTER_API_KEY` |
 
 The `provider/` prefix is required. warpllm matches the whole string against its
 roster, so a bare `gpt-5-nano` — or any name it doesn't know — is an error
 rather than a guess at an upstream default.
+
+### Narrowing a client to the providers it serves
+
+By default a client serves the whole roster and reads every provider's variable.
+Declare the ones you mean and it reads no others, routes to no others, and takes
+a key directly for the callers who keep theirs somewhere the environment can't
+reach:
+
+```python
+WarpLLM(providers={"openai": {}, "deepseek": {"api_key": "sk-..."}})
+```
+
+```ts
+new WarpLLM({ providers: { openai: {}, deepseek: { apiKey: 'sk-...' } } })
+```
+
+```rust
+ClientConfig {
+    providers: Some(BTreeMap::from([
+        ("openai".into(), ProviderConfig::default()),
+        ("deepseek".into(), ProviderConfig { api_key: Some(key) }),
+    ])),
+    ..Default::default()
+}
+```
+
+An empty entry means "serve this one, key from the environment". A request for a
+model under a provider you didn't declare is refused before any upstream call,
+and a provider name the roster doesn't hold fails when the client is built.
 
 Runnable versions of all three, with comments, are in
 [`examples/`](examples/).
@@ -119,22 +149,24 @@ This project is to lay out the most resilient open source productionization laye
 ## Status
 
 > [!IMPORTANT]
-> The published packages are **0.3.1**, which adds streaming — from the Rust
-> core, both SDKs, and the HTTP gateway — alongside the Kimi provider and the
-> rest of OpenAI's chat-completion roster. It is a **breaking** release:
-> response fields that are optional *and* nullable now tell an absent key from
-> an explicit `null`, so their type changed in all three languages. See the
-> [changelog](CHANGELOG.md) before upgrading from `0.2.x`.
+> The published packages are **0.4.0**, which adds the OpenCode Zen provider
+> and lets a client declare the providers it serves. It is **source-breaking
+> for Rust only**: `ClientConfig` gained a field, so an exhaustive struct
+> literal no longer compiles — add `providers: None`, or switch to
+> `..Default::default()`. Python and TypeScript are purely additive. See the
+> [changelog](CHANGELOG.md) before upgrading from `0.3.x`.
 >
 > The OpenAI-compatible HTTP gateway has landed on `main` but is **not
 > released yet**.
 
-| | Released (0.3.1) | On `main` |
+| | Released (0.4.0) | On `main` |
 | --- | --- | --- |
 | OpenAI chat completions, non-streaming | Yes | Yes |
 | `provider/model` routing strings | Provider registry | Provider registry |
 | DeepSeek, OpenRouter | Yes | Yes |
 | Kimi | Yes | Yes |
+| OpenCode Zen | Yes | Yes |
+| Declaring the providers a client serves | Yes | Yes |
 | OpenAI-compatible HTTP gateway | — | Unreleased |
 | Streaming | Yes | Yes |
 | Failover, load balancing, caching, metrics | — | — |

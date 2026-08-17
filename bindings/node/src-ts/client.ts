@@ -7,6 +7,16 @@ import type {
   CreateChatCompletionStreamResponse,
 } from './generated/types.js'
 
+/** One declared provider. `{}` means: serve it, key from the environment. */
+export interface ProviderOptions {
+  /**
+   * This provider's API key, in place of the environment variable its registry
+   * entry names. For callers holding keys somewhere this process's environment
+   * cannot reach; it wins over that variable when both have one.
+   */
+  apiKey?: string
+}
+
 /** Constructor options. Mirrors Rust's `ClientConfig`. */
 export interface WarpLLMOptions {
   baseUrl?: string
@@ -22,6 +32,17 @@ export interface WarpLLMOptions {
    * gap between chunks — the wait before the first chunk is a gap too.
    */
   streamReadTimeout?: number
+  /**
+   * Providers this client serves, keyed by registry name (`openai`,
+   * `deepseek`, …). ABSENT — not empty — means every provider on warpllm's
+   * roster, which is what every client did before this option existed.
+   *
+   * Declaring narrows what is read as well as what is routed: only the named
+   * providers' environment variables are consulted, and a model under a
+   * provider not listed here is refused before any request goes out. A name
+   * the registry does not hold throws from the constructor.
+   */
+  providers?: Record<string, ProviderOptions>
 }
 
 /**
@@ -39,6 +60,18 @@ export class WarpLLM {
           base_url: options.baseUrl,
           timeout_secs: options.timeout,
           stream_read_timeout_secs: options.streamReadTimeout,
+          // Entries are rebuilt rather than passed through, because the key
+          // inside one is renamed too. `undefined` when absent, so
+          // `JSON.stringify` drops it and Rust sees "no declaration" — while
+          // `{}` survives as `{}`, which is the different claim it is.
+          providers:
+            options.providers &&
+            Object.fromEntries(
+              Object.entries(options.providers).map(([name, entry]) => [
+                name,
+                { api_key: entry.apiKey },
+              ]),
+            ),
         }),
       )
     } catch (err) {

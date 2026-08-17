@@ -52,6 +52,7 @@ async fn spawn_app(upstream_uri: &str) -> String {
         base_url: Some(upstream_uri.to_string()),
         timeout_secs: Some(5),
         stream_read_timeout_secs: None,
+        providers: None,
     })
     .unwrap();
     let app = router(AppState {

@@ -23,6 +23,7 @@ pub fn client_for(server: &MockServer) -> Client {
         base_url: Some(server.uri()),
         timeout_secs: Some(5),
         stream_read_timeout_secs: None,
+        providers: None,
     })
     .unwrap()
 }

@@ -23,7 +23,8 @@ use crate::protocol::openai_compat::chat_completions::types::{
 use crate::types::Protocol;
 
 use super::response::{
-    ingest_usage, plain, render_usage, take_nullable_string, take_string, take_typed,
+    ingest_usage, plain, render_finish_reason, render_usage, take_nullable_string, take_string,
+    take_typed,
 };
 use crate::gateway::openai_compat::{merged_ext, namespaced, role_from_wire, role_to_wire};
 
@@ -268,11 +269,31 @@ fn render_stream_choice(
         .unwrap_or(position as u64) as u32;
     StreamChoice {
         delta: render_delta(&completion.delta, provider),
-        finish_reason: completion.finish_reason_raw.clone(),
+        finish_reason: render_delta_finish_reason(completion),
         index,
         logprobs: take_typed(&mut unknown_fields, "logprobs"),
         unknown_fields,
     }
+}
+
+/// [`render_finish_reason`] for a chunk, where the field is absent on every
+/// chunk of a choice but the last.
+///
+/// A chunk needs the same translation a whole reply does, and for a sharper
+/// reason: a streamed call and its unstreamed twin must END THE SAME WAY. If
+/// only the whole-reply renderer spoke this protocol's vocabulary, the same
+/// request to the same model would report `tool_calls` unstreamed and
+/// `tool_use` streamed, and a caller branching on it would take a different
+/// path for no reason it could see.
+fn render_delta_finish_reason(completion: &types::CompletionDelta) -> Option<String> {
+    let raw = completion.finish_reason_raw.as_deref()?;
+    // The pair is documented to be absent and present together. `Other` is what
+    // a raw string this crate does not recognize reads as anyway, so it is the
+    // inert answer if they ever came apart — the helper echoes `raw` for it.
+    Some(render_finish_reason(
+        raw,
+        completion.finish_reason.unwrap_or(FinishReason::Other),
+    ))
 }
 
 fn render_delta(delta: &types::MessageDelta, provider: &str) -> ChatCompletionStreamResponseDelta {
@@ -343,6 +364,79 @@ mod tests {
 
     fn parse(body: Value) -> CreateChatCompletionStreamResponse {
         serde_json::from_value(body).unwrap()
+    }
+
+    fn ending_chunk(raw: &str, reason: FinishReason) -> types::ChatResponseChunk {
+        types::ChatResponseChunk {
+            id: "chunk-1".into(),
+            model: "claude-opus-5".into(),
+            created: None,
+            completions: vec![types::CompletionDelta {
+                delta: types::MessageDelta::default(),
+                finish_reason: Some(reason),
+                finish_reason_raw: Some(raw.to_string()),
+                ext: types::ProviderExt::new(),
+            }],
+            usage: None,
+            ext: types::ProviderExt::new(),
+            source: None,
+        }
+    }
+
+    /// A chunk that came in on ANOTHER protocol must end in this one's
+    /// vocabulary, exactly as a whole reply does — and for a sharper reason:
+    /// the streamed and unstreamed forms of one request must end the same way,
+    /// or a caller branching on `finish_reason` takes a different path for a
+    /// difference it cannot see.
+    #[test]
+    fn a_foreign_finish_reason_is_rendered_in_this_protocols_words() {
+        let rows = [
+            ("tool_use", FinishReason::ToolCalls, "tool_calls"),
+            ("end_turn", FinishReason::Stop, "stop"),
+            ("max_tokens", FinishReason::Length, "length"),
+            ("refusal", FinishReason::ContentFilter, "content_filter"),
+        ];
+        for (raw, reason, expected) in rows {
+            let wire = render_chunk(&ending_chunk(raw, reason), "anthropic");
+            assert_eq!(
+                wire.choices[0].finish_reason.as_deref(),
+                Some(expected),
+                "{raw}"
+            );
+        }
+    }
+
+    /// ...and the two really do agree, which is the property the shared helper
+    /// exists for. Comparing them directly is what would catch one renderer
+    /// being changed without the other.
+    #[test]
+    fn a_chunk_and_a_whole_reply_end_the_same_way() {
+        for (raw, reason) in [
+            ("tool_use", FinishReason::ToolCalls),
+            ("end_turn", FinishReason::Stop),
+            ("stop", FinishReason::Stop),
+            ("function_call", FinishReason::Other),
+        ] {
+            let chunk = render_chunk(&ending_chunk(raw, reason), "anthropic");
+            assert_eq!(
+                chunk.choices[0].finish_reason,
+                Some(super::super::response::render_finish_reason(raw, reason)),
+                "{raw}"
+            );
+        }
+    }
+
+    /// Every chunk of a choice but the last carries no finish reason at all,
+    /// and must not grow one.
+    #[test]
+    fn a_chunk_that_does_not_end_a_choice_carries_no_finish_reason() {
+        let mut chunk = ending_chunk("stop", FinishReason::Stop);
+        chunk.completions[0].finish_reason = None;
+        chunk.completions[0].finish_reason_raw = None;
+        assert_eq!(
+            render_chunk(&chunk, "anthropic").choices[0].finish_reason,
+            None
+        );
     }
 
     fn round_trip(body: Value, provider: &str) {

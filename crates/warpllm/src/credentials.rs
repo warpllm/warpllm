@@ -2,10 +2,15 @@
 //!
 //! The roster says which providers exist and which environment variable each
 //! reads its key from. This turns that into the shorter list that matters to a
-//! running client: the providers whose variable is actually set. A model may be
-//! registered and still be unreachable, because the key for its provider is not
-//! in this environment — and the two are different failures with different
-//! remedies.
+//! running client: the providers a key was found for. A model may be registered
+//! and still be unreachable, because the key for its provider is not in this
+//! environment — and the two are different failures with different remedies.
+//!
+//! Two sources, in that order of specificity: a key written into
+//! [`ClientConfig::providers`](crate::ClientConfig::providers), and the
+//! environment variable the roster names. The declaration also bounds WHICH
+//! providers are looked at — a client that named two of them reads two
+//! variables, not the roster's worth.
 //!
 //! Read once, at construction. A snapshot rather than a live read, so the set of
 //! providers a client can reach cannot change under it mid-flight, and so the
@@ -13,9 +18,10 @@
 //! is the other side of that coin: a key exported after the client was built is
 //! not picked up, and a rotated key needs a new client.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use crate::registry;
+use crate::config::ProviderConfig;
+use crate::registry::{self, ProviderSpec};
 
 /// The API keys this process holds, keyed by provider name.
 ///
@@ -28,36 +34,73 @@ pub(crate) struct Credentials {
 }
 
 impl Credentials {
-    /// Reads every roster provider's key out of the environment.
+    /// The keys this client holds, from the declaration and the environment.
     ///
-    /// A provider is included only if the roster names a variable for it AND
-    /// that variable holds a non-empty value. Both exclusions are the same
-    /// judgement: warpllm has no key for this provider, so a request routed to
-    /// it should say so rather than send `Authorization: Bearer ` upstream and
-    /// report back whatever the provider makes of it.
+    /// `declared` absent means no opinion: every roster provider, each from its
+    /// own variable, which is what this did before a declaration was possible.
+    /// `Some` means THIS AND NO MORE — and iterating the DECLARATION rather
+    /// than the roster is what makes that literal. A version that swept the
+    /// whole environment and filtered afterwards would produce the same map
+    /// while still reading variables the caller withheld, which is the opposite
+    /// of what declaring one provider asks for.
     ///
-    /// The environment is the only source. [`crate::ClientConfig`] deliberately
-    /// carries no key, so there is nothing here to merge or override.
-    pub(crate) fn from_env() -> Self {
-        let credentials = Self {
-            keys: registry::providers()
-                .filter_map(|provider| {
-                    let key = std::env::var(provider.env_api_key()?).ok()?;
-                    (!key.is_empty()).then_some((provider.name(), key))
+    /// A provider is included only if some source held a NON-EMPTY key. The
+    /// judgement is the same for both sources: warpllm has no key for this
+    /// provider, so a request routed to it should say so rather than send
+    /// `Authorization: Bearer ` upstream and report back whatever the provider
+    /// makes of it.
+    pub(crate) fn resolve(declared: Option<&BTreeMap<String, ProviderConfig>>) -> Self {
+        let keys = match declared {
+            None => registry::providers()
+                .filter_map(|provider| Some((provider.name(), Self::key_for(provider, None)?)))
+                .collect(),
+            Some(declared) => declared
+                .iter()
+                .filter_map(|(name, entry)| {
+                    let provider = registry::provider(name)
+                        .expect("Client::new refuses a declaration the roster does not hold");
+                    Some((provider.name(), Self::key_for(provider, Some(entry))?))
                 })
                 .collect(),
         };
+        let credentials = Self { keys };
 
         // The names only. A key never reaches a log, in full or in part.
         if credentials.keys.is_empty() {
             tracing::warn!(
-                "no provider API keys found in the environment; every request \
-                 will fail until one is set"
+                "no provider API keys found; every request will fail until one is \
+                 set in the environment or declared under `providers`"
             );
         } else {
             tracing::info!(providers = ?credentials.names(), "providers available");
         }
         credentials
+    }
+
+    /// One provider's key, or `None` when no source held a non-empty one.
+    ///
+    /// Precedence is inline over environment: a key written into the config is
+    /// the more specific statement, and a caller who has one cannot make the
+    /// ambient environment yield.
+    ///
+    /// An EMPTY inline key is treated as UNSTATED rather than as a stated
+    /// nothing, so the environment still gets its turn — see
+    /// [`ProviderConfig::api_key`] for why that boundary case is the one worth
+    /// designing for.
+    ///
+    /// Takes the SPEC rather than a name so it can be tested against providers
+    /// the shipped roster does not have — one naming no `env_api_key` at all
+    /// most of all, which is the case an inline key exists to serve and which
+    /// nothing in `specs.yaml` expresses today.
+    fn key_for(provider: &ProviderSpec, declared: Option<&ProviderConfig>) -> Option<String> {
+        if let Some(inline) = declared
+            .and_then(|entry| entry.api_key.as_deref())
+            .filter(|key| !key.is_empty())
+        {
+            return Some(inline.to_string());
+        }
+        let key = std::env::var(provider.env_api_key()?).ok()?;
+        (!key.is_empty()).then_some(key)
     }
 
     /// This provider's key, or `None` when the environment held none at
@@ -95,10 +138,12 @@ impl std::fmt::Debug for Credentials {
 ///
 /// EVERY test in this binary that builds a [`Credentials`] — which now means
 /// every test that builds a [`crate::Client`] — has to go through this, even
-/// the ones setting nothing. Env mutation is process-global and `unsafe` since
-/// edition 2024 precisely because one test writing a variable while another
-/// reads it is a data race, and only a shared lock rules that out. An empty
-/// `vars` is the "reads the environment, sets nothing" case.
+/// the ones setting nothing, and even the ones supplying every key inline. Env
+/// mutation is process-global and `unsafe` since edition 2024 precisely because
+/// one test writing a variable while another reads it is a data race, and only
+/// a shared lock rules that out. An empty `vars` is the "reads the environment,
+/// sets nothing" case; an all-inline declaration still reads it for any
+/// provider whose entry supplied no key.
 ///
 /// Clearing the whole roster first is what keeps the AMBIENT environment out of
 /// the result. Naming only the variables a test cares about would leave a
@@ -129,7 +174,7 @@ mod tests {
     #[test]
     fn one_key_admits_one_provider() {
         with_env(&[(OPENAI, Some("sk-openai")), (DEEPSEEK, None)], || {
-            let credentials = Credentials::from_env();
+            let credentials = Credentials::resolve(None);
             assert_eq!(credentials.names(), vec!["openai"]);
             assert_eq!(credentials.get("openai"), Some("sk-openai"));
             assert_eq!(credentials.get("deepseek"), None);
@@ -143,7 +188,7 @@ mod tests {
         with_env(
             &[(OPENAI, Some("sk-openai")), (DEEPSEEK, Some("sk-deepseek"))],
             || {
-                let credentials = Credentials::from_env();
+                let credentials = Credentials::resolve(None);
                 assert_eq!(credentials.names(), vec!["deepseek", "openai"]);
                 assert_eq!(credentials.get("deepseek"), Some("sk-deepseek"));
             },
@@ -156,7 +201,7 @@ mod tests {
     #[test]
     fn an_empty_environment_yields_no_providers() {
         with_env(&[(OPENAI, None), (DEEPSEEK, None)], || {
-            let credentials = Credentials::from_env();
+            let credentials = Credentials::resolve(None);
             assert!(credentials.names().is_empty());
             assert_eq!(credentials.get("openai"), None);
         });
@@ -168,7 +213,7 @@ mod tests {
     #[test]
     fn an_empty_value_is_not_a_key() {
         with_env(&[(OPENAI, Some("")), (DEEPSEEK, None)], || {
-            assert!(Credentials::from_env().names().is_empty());
+            assert!(Credentials::resolve(None).names().is_empty());
         });
     }
 
@@ -177,21 +222,165 @@ mod tests {
     #[test]
     fn an_unknown_provider_is_never_available() {
         with_env(&[(OPENAI, Some("sk-openai"))], || {
-            assert_eq!(Credentials::from_env().get("mistral"), None);
+            assert_eq!(Credentials::resolve(None).get("mistral"), None);
         });
     }
 
     /// Debug is what a panic or a `tracing` field would print. It must name the
-    /// providers and none of their keys.
+    /// providers and none of their keys, whichever source they came from.
     #[test]
     fn debug_redacts_the_keys() {
         with_env(
             &[(OPENAI, Some("sk-secret-value")), (DEEPSEEK, None)],
             || {
-                let rendered = format!("{:?}", Credentials::from_env());
+                let rendered = format!("{:?}", Credentials::resolve(None));
                 assert!(rendered.contains("openai"), "{rendered}");
                 assert!(!rendered.contains("sk-secret-value"), "{rendered}");
+
+                let inline = format!(
+                    "{:?}",
+                    Credentials::resolve(Some(&declare(&[
+                        ("deepseek", Some("sk-inline-secret"),)
+                    ])))
+                );
+                assert!(inline.contains("deepseek"), "{inline}");
+                assert!(!inline.contains("sk-inline-secret"), "{inline}");
             },
         );
+    }
+
+    // ------------------------------------------------------- declared clients
+
+    /// Builds a declaration. `None` is an entry with no key of its own, which
+    /// is the ordinary case: serve this provider, read its variable.
+    fn declare(entries: &[(&str, Option<&str>)]) -> BTreeMap<String, ProviderConfig> {
+        entries
+            .iter()
+            .map(|(name, key)| {
+                (
+                    (*name).to_string(),
+                    ProviderConfig {
+                        api_key: key.map(str::to_string),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The claim the whole field rests on: a provider the caller did not name
+    /// is not consulted, even when its variable is sitting right there. A key
+    /// exported for something else is not quietly adopted.
+    #[test]
+    fn an_undeclared_providers_variable_is_never_read() {
+        with_env(
+            &[(OPENAI, Some("sk-openai")), (DEEPSEEK, Some("sk-deepseek"))],
+            || {
+                let credentials = Credentials::resolve(Some(&declare(&[("openai", None)])));
+                assert_eq!(credentials.names(), vec!["openai"]);
+                assert_eq!(credentials.get("deepseek"), None);
+            },
+        );
+    }
+
+    /// Declaring a provider without a key of its own leaves the environment
+    /// doing exactly what it did before — declaring is not opting out of it.
+    #[test]
+    fn a_declaration_with_no_key_still_reads_the_environment() {
+        with_env(&[(OPENAI, Some("sk-openai")), (DEEPSEEK, None)], || {
+            let credentials = Credentials::resolve(Some(&declare(&[("openai", None)])));
+            assert_eq!(credentials.get("openai"), Some("sk-openai"));
+        });
+    }
+
+    /// The more specific statement wins. A caller who wrote a key into the
+    /// config has no other way to make the ambient environment yield.
+    #[test]
+    fn an_inline_key_wins_over_the_environment() {
+        with_env(&[(OPENAI, Some("sk-from-the-environment"))], || {
+            let credentials =
+                Credentials::resolve(Some(&declare(&[("openai", Some("sk-inline"))])));
+            assert_eq!(credentials.get("openai"), Some("sk-inline"));
+        });
+    }
+
+    /// `""` is unstated, not a stated nothing — the same judgement the
+    /// environment's own empty value gets. A caller writing
+    /// `os.environ.get("OPENAI_API_KEY", "")` into their config must not
+    /// thereby disable a provider whose key is right there.
+    #[test]
+    fn an_empty_inline_key_falls_back_to_the_environment() {
+        with_env(&[(OPENAI, Some("sk-openai"))], || {
+            let credentials = Credentials::resolve(Some(&declare(&[("openai", Some(""))])));
+            assert_eq!(credentials.get("openai"), Some("sk-openai"));
+        });
+    }
+
+    /// Falling back to nothing is still nothing. Neither source held a key, so
+    /// the provider is unavailable rather than authenticated with `""`.
+    #[test]
+    fn an_empty_inline_key_with_no_variable_set_is_no_key() {
+        with_env(&[(OPENAI, None)], || {
+            assert!(
+                Credentials::resolve(Some(&declare(&[("openai", Some(""))])))
+                    .names()
+                    .is_empty()
+            );
+        });
+    }
+
+    /// Declaring nothing reaches nothing. Legal, and distinct from declaring
+    /// nothing at all — which is the next test.
+    #[test]
+    fn an_empty_declaration_authenticates_nothing() {
+        with_env(&[(OPENAI, Some("sk-openai"))], || {
+            assert!(
+                Credentials::resolve(Some(&BTreeMap::new()))
+                    .names()
+                    .is_empty()
+            );
+        });
+    }
+
+    /// The compatibility claim: an absent declaration behaves exactly as this
+    /// did before the field existed.
+    #[test]
+    fn an_absent_declaration_reads_the_whole_roster() {
+        with_env(
+            &[(OPENAI, Some("sk-openai")), (DEEPSEEK, Some("sk-deepseek"))],
+            || {
+                assert_eq!(
+                    Credentials::resolve(None).names(),
+                    vec!["deepseek", "openai"]
+                );
+            },
+        );
+    }
+
+    /// The capability an inline key adds rather than narrows: a provider whose
+    /// roster entry names no variable had no key source at all, and now has
+    /// one. Nothing in `specs.yaml` expresses this today, which is why
+    /// `key_for` takes a spec — the case has to be built to be tested.
+    #[test]
+    fn an_inline_key_authenticates_a_provider_the_roster_gives_no_variable() {
+        let spec = ProviderSpec {
+            name: "keyless".into(),
+            base_url: "https://api.keyless.test/v1".into(),
+            env_api_key: None,
+        };
+        with_env(&[], || {
+            assert_eq!(
+                Credentials::key_for(
+                    &spec,
+                    Some(&ProviderConfig {
+                        api_key: Some("sk-inline".into()),
+                    }),
+                )
+                .as_deref(),
+                Some("sk-inline")
+            );
+            // Without one it is still unauthenticatable, and the request-time
+            // error names the roster rather than a variable nothing reads.
+            assert_eq!(Credentials::key_for(&spec, None), None);
+        });
     }
 }

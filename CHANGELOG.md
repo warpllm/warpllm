@@ -8,6 +8,93 @@ Versions follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a breaking change bumps the MINOR number: `0.1.x` and `0.2.x` are
 incompatible, and `^0.1` will not upgrade you into one.
 
+## [0.4.0] - 2026-08-16
+
+Two additions and one source-break. A client can now declare the providers it
+serves — narrowing both which environment variables are read and which models
+are routable — and OpenCode Zen joins the roster as `opencode`.
+
+The break is Rust-only and one line to fix: `ClientConfig` gained a field, so an
+exhaustive struct literal no longer compiles. Python and TypeScript are purely
+additive, and a Rust caller already using `..Default::default()` is unaffected.
+That is what moves the MINOR number rather than the patch, per the versioning
+note at the top of this file — `^0.3` will not upgrade you into it.
+
+### Added
+
+- A client can declare the providers it serves. `ClientConfig.providers` in
+  Rust, `providers=` in Python, `providers:` in TypeScript — a map keyed by
+  registry name, each entry optionally carrying an `api_key`.
+
+  ```python
+  WarpLLM(providers={"openai": {}, "deepseek": {"api_key": "sk-..."}})
+  ```
+
+  It narrows two things at once. Only the declared providers' environment
+  variables are read, so a key exported for something else is not quietly
+  adopted; and only the declared providers are routable, so a request for a
+  model under one you did not name is refused before any upstream call, with a
+  new `provider_not_declared` error rather than the missing-credential error
+  that would have sent you after a key you deliberately withheld.
+
+  An inline `api_key` is for callers holding keys somewhere the process
+  environment cannot reach — a secret manager, a per-tenant database row. It
+  wins over the variable the roster names, and it can authenticate a provider
+  whose roster entry names no variable at all, which was previously impossible.
+
+  A provider name the roster does not hold fails when the client is built, not
+  at the request that happened to route there.
+
+- **OpenCode Zen**, a new `opencode` provider reached at `opencode.ai/zen/v1`
+  with `OPENCODE_API_KEY`, serving sixteen models: `deepseek-v4-pro` and
+  `-flash`, `glm-5.1` and `glm-5.2`, `minimax-m2.7` and `m3`, Kimi K2.6
+  through K3, Zen's own `big-pickle`, and the six `-free` models it bills at
+  nothing during their evaluation window.
+
+  Zen is the first provider here that does not serve its whole catalog over one
+  protocol. It publishes an endpoint PER MODEL — `/chat/completions`,
+  `/responses`, `/messages`, or Google's `/models/<id>` — and only the first is
+  a surface warpllm implements, so that is what this provider is.
+
+  **Zen's GPT models are deliberately absent**, and so are Grok and Muse: all
+  twenty-four sit on `/responses`, the Responses API, which warpllm does not
+  implement yet. Registering them would hand back a model string that resolves
+  and then fails upstream on every request, so they wait for that surface —
+  the same reason `openai/gpt-5-pro` has never been on the roster. Zen's Claude
+  and Qwen models (`/messages`) and its Gemini models (`/models/<id>`) are out
+  for the same kind of reason: neither protocol has an `api:` here at all.
+
+  `glm-5`, `kimi-k2.5` and `minimax-m2.5` are absent although Zen serves all
+  three on chat completions and still returns them from `GET /zen/v1/models`:
+  its DEPRECATED MODELS section retired them on 2026-05-14, 2026-08-05 and
+  2026-08-05, every date already past. The live successors — `glm-5.2`,
+  `kimi-k3`, `minimax-m3` — are on the roster instead.
+
+  Nothing states an endpoint but that docs table, so a Zen model added to the
+  wrong one would lint clean and bill for a request that reaches nothing.
+  `no_opencode_entry_sits_on_a_surface_warpllm_cannot_reach` is the gate, and
+  it matches on family prefix so a name Zen adds later is caught without the
+  test being edited.
+
+  No `capabilities` on any entry: Zen publishes a price per model and no
+  context window, output ceiling, or concurrency figure. Every model is
+  re-hosted, so the original provider's numbers are not Zen's to promise.
+
+  The streaming surface was registered on inference — Zen documents no request
+  parameter at all, and prescribes `@ai-sdk/openai-compatible` as the client
+  for exactly these models — and then checked against the live endpoint, which
+  returns OpenAI-compatible SSE chunks that survive the whole warpllm path.
+  `live_stream.rs` carries a Zen row so it stays checked.
+
+### Changed
+
+- **Source-breaking for Rust only.** `ClientConfig` gained a field, so an
+  exhaustive struct literal no longer compiles; add `providers: None` or switch
+  to `..Default::default()`. Nothing else changes: a client that leaves
+  `providers` alone behaves exactly as before, reading the whole roster's
+  variables and routing to all of it. Python and TypeScript are purely
+  additive — the new argument is optional in both.
+
 ## [0.3.1] - 2026-08-13
 
 Nothing in any of the three packages changed. 0.3.0 reached crates.io and PyPI

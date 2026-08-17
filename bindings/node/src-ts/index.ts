@@ -1,6 +1,6 @@
 export { version } from '../index.js'
 export { ChatCompletionStream, WarpLLM } from './client.js'
-export type { WarpLLMOptions } from './client.js'
+export type { ProviderOptions, WarpLLMOptions } from './client.js'
 export {
   APIConnectionError,
   APIError,

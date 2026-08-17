@@ -4,6 +4,7 @@ from ._client import (
     AsyncChatCompletionStream,
     AsyncWarpLLM,
     ChatCompletionStream,
+    ProviderOptions,
     WarpLLM,
 )
 from ._exceptions import (
@@ -45,6 +46,7 @@ __all__ = [
     "InternalServerError",
     "NotFoundError",
     "PermissionDeniedError",
+    "ProviderOptions",
     "RateLimitError",
     "UnprocessableEntityError",
     "WarpLLM",

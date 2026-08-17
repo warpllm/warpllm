@@ -274,12 +274,50 @@ fn render_choice(completion: &types::Completion, position: usize, provider: &str
         .and_then(|v| v.as_u64())
         .unwrap_or(position as u64) as u32;
     Choice {
-        finish_reason: completion.finish_reason_raw.clone(),
+        finish_reason: render_finish_reason(
+            &completion.finish_reason_raw,
+            completion.finish_reason,
+        ),
         index,
         logprobs: take_typed(&mut unknown_fields, "logprobs"),
         message: render_message(&completion.message, provider),
         unknown_fields,
     }
+}
+
+/// The finish reason as THIS protocol spells it.
+///
+/// `finish_reason_raw` is authoritative — it is what the provider actually said
+/// — but only where this protocol shares the vocabulary it was said in. Once a
+/// second protocol can reach a caller here, it no longer always does: Anthropic
+/// says `tool_use` for what OpenAI calls `tool_calls`, and echoing it would
+/// hand an OpenAI client a value its own enum does not contain, which every
+/// official SDK reads as unrecognized.
+///
+/// So the raw string wins when reading it back yields the same meaning, and the
+/// gateway's enum wins when it does not. Same-protocol replies always take the
+/// first branch, which is what keeps their round trip byte-exact — including
+/// spellings this crate does not model, like the legacy `function_call`.
+///
+/// Shared with [`stream`](super::stream) rather than restated there: a chunk's
+/// finish reason and a whole reply's are the same field arriving at different
+/// times, and two copies of this rule could answer differently for one exchange
+/// — a streamed call would end in a word its unstreamed twin never uses.
+pub(super) fn render_finish_reason(raw: &str, reason: FinishReason) -> String {
+    if FinishReason::from_raw(raw) == reason {
+        return raw.to_string();
+    }
+    match reason {
+        FinishReason::Stop => "stop",
+        FinishReason::Length => "length",
+        FinishReason::ToolCalls => "tool_calls",
+        FinishReason::ContentFilter => "content_filter",
+        // Unreachable: `from_raw` maps everything it does not recognize to
+        // `Other`, so an `Other` completion always agrees with its raw string
+        // above. Echoing it is the answer that branch would have given anyway.
+        FinishReason::Other => raw,
+    }
+    .to_string()
 }
 
 fn render_message(message: &types::Message, provider: &str) -> ChatCompletionResponseMessage {
@@ -320,6 +358,20 @@ fn render_message(message: &types::Message, provider: &str) -> ChatCompletionRes
             // dropping the block loses nothing. Media and tool results have
             // no rendering on this protocol at all; they can only arise
             // cross-protocol, which warpllm does not do yet.
+            //
+            // THAT LAST SENTENCE EXPIRES WITH THE ANTHROPIC DISPATCH, and the
+            // casualty is specific enough to name: Anthropic requires a run of
+            // its own signed `thinking` blocks to come back UNTOUCHED alongside
+            // tool results. Ingest preserves the signature and the retained
+            // wire content, but neither reaches a caller here — the block is
+            // dropped, and `Protocol::may_read` correctly denies this renderer
+            // the `anthropic` bag — so a caller has nothing to echo, and the
+            // next request renders a `tool_use` turn with no `thinking` before
+            // it. Anthropic rejects that. Whoever wires the dispatch either
+            // carries the blocks in a caller-visible form that round trips with
+            // the signature intact, or refuses thinking for cross-protocol tool
+            // conversations. Dropping silently is the one option that is not
+            // available.
             _ => {}
         }
     }
@@ -433,6 +485,39 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// A reply that came in on ANOTHER protocol must leave in this one's
+    /// vocabulary. Anthropic says `tool_use`; an OpenAI client's own enum has
+    /// no such value, and every official SDK reads it as unrecognized — so the
+    /// raw echo that is right for a same-protocol reply is wrong here.
+    #[test]
+    fn a_foreign_finish_reason_is_rendered_in_this_protocols_words() {
+        let rows = [
+            ("tool_use", FinishReason::ToolCalls, "tool_calls"),
+            ("end_turn", FinishReason::Stop, "stop"),
+            ("max_tokens", FinishReason::Length, "length"),
+            ("refusal", FinishReason::ContentFilter, "content_filter"),
+        ];
+        for (raw, reason, expected) in rows {
+            assert_eq!(render_finish_reason(raw, reason), expected, "{raw}");
+        }
+    }
+
+    /// ...and a reply that came in on THIS protocol keeps its exact spelling,
+    /// including one this crate does not model. That is what keeps the
+    /// same-protocol round trip byte-exact.
+    #[test]
+    fn a_native_finish_reason_keeps_its_exact_spelling() {
+        for raw in [
+            "stop",
+            "length",
+            "tool_calls",
+            "content_filter",
+            "function_call",
+        ] {
+            assert_eq!(render_finish_reason(raw, FinishReason::from_raw(raw)), raw);
+        }
+    }
 
     fn parse(body: Value) -> CreateChatCompletionResponse {
         serde_json::from_value(body).unwrap()

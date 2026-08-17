@@ -1,0 +1,20 @@
+{
+  "id": "msg_01Nq8vTzLmXpQr4WyZa2Bc3D",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "one\ntwo\n"
+    }
+  ],
+  "model": "claude-haiku-4-5",
+  "stop_reason": "stop_sequence",
+  "stop_sequence": "three",
+  "usage": {
+    "input_tokens": 33,
+    "output_tokens": 8,
+    "cache_creation_input_tokens": null,
+    "cache_read_input_tokens": null
+  }
+}

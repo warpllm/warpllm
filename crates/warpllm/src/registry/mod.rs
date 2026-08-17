@@ -102,16 +102,19 @@ pub(crate) fn providers() -> impl Iterator<Item = &'static ProviderSpec> {
     REGISTRY.providers.values()
 }
 
-/// Whether the roster holds a provider under this exact name.
+/// The roster's row for this provider, by bare name.
 ///
-/// Test-only, and that is the point: nothing at runtime should reach a
-/// provider by bare name — [`fetch_model`] hands back the spec. This exists
-/// so a table keyed by provider name, like the per-provider error overrides,
-/// can be checked against the roster rather than silently never matching
-/// after a rename.
-#[cfg(test)]
-pub(crate) fn is_registered(provider: &str) -> bool {
-    REGISTRY.providers.contains_key(provider)
+/// The one lookup that starts from a provider rather than from a model.
+/// [`fetch_model`] is still how a REQUEST reaches a provider — nothing routes
+/// on a bare name, and no guess is made from one. This answers the other
+/// question: a client declaring which providers it serves names them directly,
+/// and the declaration has to be checked against the roster that will serve it.
+///
+/// Not public, for the reason [`providers`] is not: the shipped list would
+/// become an API that could not gain an entry without a semver argument. A
+/// caller states a name and hears whether it worked.
+pub(crate) fn provider(name: &str) -> Option<&'static ProviderSpec> {
+    REGISTRY.providers.get(name)
 }
 
 /// The model row filed under `model_str`, and the provider row it names.
@@ -217,7 +220,7 @@ mod tests {
         let registry = load::load(yaml).unwrap();
         assert_eq!(
             providers(&registry),
-            vec!["deepseek", "kimi", "mistral", "openai", "openrouter"]
+            vec!["deepseek", "kimi", "mistral", "openai", "opencode", "openrouter"]
         );
         assert_eq!(
             keys(&registry),
@@ -250,6 +253,22 @@ mod tests {
                 "openai/gpt-5.6-sol",
                 "openai/gpt-5.6-terra",
                 "openai/o3",
+                "opencode/big-pickle",
+                "opencode/deepseek-v4-flash",
+                "opencode/deepseek-v4-flash-free",
+                "opencode/deepseek-v4-pro",
+                "opencode/glm-5.1",
+                "opencode/glm-5.2",
+                "opencode/hy3-free",
+                "opencode/kimi-k2.6",
+                "opencode/kimi-k2.7-code",
+                "opencode/kimi-k3",
+                "opencode/laguna-s-2.1-free",
+                "opencode/mimo-v2.5-free",
+                "opencode/minimax-m2.7",
+                "opencode/minimax-m3",
+                "opencode/nemotron-3-ultra-free",
+                "opencode/nemotron-3.5-lightning-free",
                 "openrouter/anthropic/claude-opus-4",
                 "openrouter/anthropic/claude-sonnet-4",
                 "openrouter/auto",
@@ -288,6 +307,33 @@ mod tests {
         assert_eq!(provider.env_api_key(), Some("OPENROUTER_API_KEY"));
         assert!(model.supports_api(Api::OpenAiCompatChatCompletions));
         assert_eq!(model.model(), "anthropic/claude-sonnet-4");
+    }
+
+    /// Every provider the roster holds is reachable by its bare name, and
+    /// hands back the same row `fetch_model` routes through — one roster, not
+    /// two ways of reading it.
+    #[test]
+    fn every_roster_name_resolves_to_its_own_spec() {
+        // Qualified: this module's `providers` is shadowed in here by the
+        // `testing` helper of the same name, which reads a fixture registry.
+        for spec in super::providers() {
+            let found = provider(spec.name()).expect("a roster name resolves");
+            assert!(
+                std::ptr::eq(found, spec),
+                "`{}` got a second copy of its provider row",
+                spec.name()
+            );
+        }
+    }
+
+    /// A bare name is matched as exactly as a model key is: no case folding,
+    /// no prefix, no guess. A declaration naming `OpenAI` is a typo and has to
+    /// hear so.
+    #[test]
+    fn a_name_the_roster_does_not_hold_resolves_to_nothing() {
+        for unheld in ["openia", "OpenAI", "openai/", "", "*"] {
+            assert!(provider(unheld).is_none(), "`{unheld}`");
+        }
     }
 
     /// OpenRouter's slugs are two segments (`anthropic/claude-sonnet-4`), and
@@ -412,6 +458,43 @@ mod tests {
             assert!(msg.contains(model_str), "{msg}");
             assert!(msg.contains("no registered model spec"), "{msg}");
         }
+    }
+
+    /// OpenCode Zen is the one provider on the roster serving its catalog
+    /// across FOUR protocols, and only one of them is a surface warpllm has.
+    /// Zen states the endpoint per model and nowhere else — there is nothing
+    /// in a request or a response that says which one a name sits on — so a
+    /// `/responses` or `/messages` model added here would load, lint, pass
+    /// `every_shipped_model_serves_exactly_the_implemented_surfaces`, and then
+    /// send a live, billed request to an endpoint that does not serve it.
+    ///
+    /// This is the only gate on that. It is a prefix check rather than a list
+    /// of the 40-odd names, so a model Zen adds to a family it already serves
+    /// elsewhere is caught without this test being edited.
+    #[test]
+    fn no_opencode_entry_sits_on_a_surface_warpllm_cannot_reach() {
+        // `/zen/v1/responses`: every GPT, plus Grok and Muse.
+        // `/zen/v1/messages`: Claude and Qwen.
+        // `/zen/v1/models/<id>`: Gemini.
+        let elsewhere = ["gpt-", "grok-", "muse-", "claude-", "qwen", "gemini-"];
+        for key in REGISTRY.models.keys() {
+            let Some(name) = key.strip_prefix("opencode/") else {
+                continue;
+            };
+            for prefix in elsewhere {
+                assert!(
+                    !name.starts_with(prefix),
+                    "`{key}`: OpenCode Zen serves `{prefix}…` models on an endpoint \
+                     other than /chat/completions, so this entry would route a paid \
+                     request nowhere. Check the endpoint column of \
+                     <https://opencode.ai/docs/zen/> before registering a Zen model."
+                );
+            }
+        }
+        // The registry is still closed to them by name, the same as any
+        // unlisted model.
+        assert!(fetch_model("opencode/gpt-5-nano").is_err());
+        assert!(fetch_model("opencode/claude-opus-5").is_err());
     }
 
     /// A slash-containing name needs an entry of its own, and the registry

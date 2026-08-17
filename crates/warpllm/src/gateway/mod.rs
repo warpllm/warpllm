@@ -22,6 +22,14 @@
 //! the wire shapes instead would make `protocol` depend on the gateway and
 //! leave a per-provider adapter nowhere clean to sit.
 
+// Nothing routes to Anthropic yet: `client.rs` picks an exchange by the routed
+// model's surface, and no surface names this protocol until the registry and
+// the dispatch land. Being unreachable is what makes these conversions safe to
+// land ahead of that — but it also means every item here reads as dead. Drop
+// this attribute on the change that wires the client; it should stop being
+// needed there.
+#[allow(dead_code)]
+pub(crate) mod anthropic;
 pub(crate) mod error;
 pub(crate) mod openai_compat;
 pub(crate) mod types;

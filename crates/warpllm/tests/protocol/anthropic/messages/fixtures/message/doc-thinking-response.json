@@ -1,0 +1,30 @@
+{
+  "id": "msg_01T2xY9mKpQrStUvWxYz",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "I need to find the GCD of 1071 and 462 using the Euclidean algorithm.\n\n1071 = 2 × 462 + 147",
+      "signature": "EqQBCgIYAhIM1gbcDa9GJwZA2b3hGgxBdjrkzLoky3dl1pkiMOYds"
+    },
+    {
+      "type": "redacted_thinking",
+      "data": "EroBCkYIAxgCKkBaVFTvNRvcJyGVOZTs2sMDPGRLzCA5nOFTqLHRhBEfCnV0aGlz"
+    },
+    {
+      "type": "text",
+      "text": "The greatest common divisor of 1071 and 462 is 21."
+    }
+  ],
+  "model": "claude-opus-5",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 45,
+    "output_tokens": 312,
+    "output_tokens_details": {
+      "thinking_tokens": 264
+    }
+  }
+}

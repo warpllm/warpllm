@@ -25,17 +25,37 @@ if TYPE_CHECKING:
     )
 
 
+class ProviderOptions(TypedDict, total=False):
+    """One declared provider. `{}` means: serve it, key from the environment.
+
+    `api_key` is for callers holding keys somewhere this process's environment
+    cannot reach -- a secret manager, a per-tenant record. It wins over the
+    variable the provider's registry entry names.
+    """
+
+    api_key: str
+
+
 def _native_client(
     base_url: str | None,
     timeout: int | None,
     stream_read_timeout: int | None,
+    providers: Mapping[str, ProviderOptions] | None,
 ) -> _NativeClient:
     config = {
         "base_url": base_url,
         "timeout_secs": timeout,
         "stream_read_timeout_secs": stream_read_timeout,
+        # `dict()`, because the parameter is a `Mapping` and `json.dumps`
+        # serializes only a real one -- the same materialization every request
+        # on this boundary already does. `dict({})` is still `{}`, so the
+        # distinction below survives it.
+        "providers": None if providers is None else dict(providers),
     }
     try:
+        # `is not None`, not truthiness: `providers={}` is a declaration of
+        # none and has to survive, while `providers=None` is no declaration at
+        # all and has to be dropped. Rust reads the difference.
         return _NativeClient(
             json.dumps({k: v for k, v in config.items() if v is not None})
         )
@@ -121,6 +141,7 @@ class WarpLLM:
         base_url: str | None = None,
         timeout: int | None = None,
         stream_read_timeout: int | None = None,
+        providers: Mapping[str, ProviderOptions] | None = None,
     ) -> None:
         """`stream_read_timeout` bounds how long a stream may go without a
         single byte; unset means never.
@@ -129,8 +150,19 @@ class WarpLLM:
         wedged one. This bounds the GAP instead and resets on every byte. Set
         it above the slowest time-to-first-token you expect, not merely above
         the gap between chunks -- the wait before the first chunk is a gap too.
+
+        `providers` narrows this client to the providers it names, keyed by
+        registry name: `{"openai": {}, "deepseek": {"api_key": "sk-..."}}`.
+        OMITTING it -- not passing an empty dict -- serves warpllm's whole
+        roster, which is what every client did before this argument existed.
+        Declaring narrows what is READ as well as what is routed: only the
+        named providers' environment variables are consulted, and a request
+        for a model under a provider not listed raises before reaching any
+        upstream. A name the registry does not hold raises here, not later.
         """
-        self._native = _native_client(base_url, timeout, stream_read_timeout)
+        self._native = _native_client(
+            base_url, timeout, stream_read_timeout, providers
+        )
 
     # Signatures 1 and 2 overlap on purpose: a `_StreamingRequest` IS a
     # `Mapping[str, object]`, so mypy warns that a value could match both. That
@@ -212,6 +244,7 @@ class AsyncWarpLLM:
         base_url: str | None = None,
         timeout: int | None = None,
         stream_read_timeout: int | None = None,
+        providers: Mapping[str, ProviderOptions] | None = None,
     ) -> None:
         """`stream_read_timeout` bounds how long a stream may go without a
         single byte; unset means never.
@@ -220,8 +253,13 @@ class AsyncWarpLLM:
         wedged one. This bounds the GAP instead and resets on every byte. Set
         it above the slowest time-to-first-token you expect, not merely above
         the gap between chunks -- the wait before the first chunk is a gap too.
+
+        `providers` narrows this client to the providers it names; see
+        `WarpLLM.__init__`.
         """
-        self._native = _native_client(base_url, timeout, stream_read_timeout)
+        self._native = _native_client(
+            base_url, timeout, stream_read_timeout, providers
+        )
 
     # Overlapping on purpose; see `WarpLLM.chat_completions`.
     @overload

@@ -29,9 +29,19 @@ use crate::types::Protocol;
 /// namespace first (the target speaks it), overlaid by the provider's own
 /// namespace. Other providers' namespaces are ignored — a field meant for
 /// one provider never leaks into another.
+///
+/// And neither does another PROTOCOL's, which is a different claim and needs
+/// [`Protocol::may_read`] to hold: a provider is allowed to share its name with
+/// the protocol it defines, so a bag keyed `"anthropic"` may hold either
+/// Anthropic passthrough or Anthropic's own retained wire fields, and this
+/// renderer cannot tell them apart. Reading it would flatten a retained
+/// `content` block ARRAY in beside this protocol's typed `content` string.
 pub(crate) fn merged_ext(ext: &ProviderExt, provider: &str) -> UnknownFields {
     let mut merged = UnknownFields::new();
     for namespace in [Protocol::OpenAiCompat.as_str(), provider] {
+        if !Protocol::OpenAiCompat.may_read(namespace) {
+            continue;
+        }
         if let Some(Value::Object(fields)) = ext.get(namespace) {
             for (key, value) in fields {
                 merged.insert(key.clone(), value.clone());
@@ -112,6 +122,40 @@ mod tests {
         assert!(
             merged.get("mistral_only").is_none(),
             "another provider's namespace leaked into this render"
+        );
+    }
+
+    /// The collision that made [`Protocol::may_read`] necessary. A provider
+    /// named for a protocol addresses that protocol's bag, and this renderer
+    /// cannot distinguish the two — so it must read neither.
+    ///
+    /// The failure this prevents is not a dropped field: Anthropic retains its
+    /// whole wire `content` ARRAY under that key, `render_message` never pops
+    /// `content`, and `unknown_fields` is `#[serde(flatten)]`. Reading it emits
+    /// TWO `content` keys in one OpenAI message object — the typed string and
+    /// the block array — which most clients resolve last-wins.
+    #[test]
+    fn a_provider_named_for_another_protocol_does_not_leak_its_bag() {
+        let mut ext = ProviderExt::new();
+        ext.insert(
+            Protocol::Anthropic.as_str().into(),
+            json!({"content": [{"type": "text", "text": "hi"}], "stop_sequence": null}),
+        );
+        ext.insert(
+            Protocol::OpenAiCompat.as_str().into(),
+            json!({"system_fingerprint": "fp_1"}),
+        );
+
+        let merged = merged_ext(&ext, Protocol::Anthropic.as_str());
+        assert!(
+            merged.get("content").is_none(),
+            "Anthropic's retained content array reached an OpenAI render"
+        );
+        assert!(merged.get("stop_sequence").is_none());
+        assert_eq!(
+            merged["system_fingerprint"],
+            json!("fp_1"),
+            "this protocol's own bag must still be read"
         );
     }
 

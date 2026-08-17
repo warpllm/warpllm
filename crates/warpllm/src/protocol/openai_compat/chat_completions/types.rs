@@ -22,14 +22,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Catch-all for fields OpenAI introduces that this crate does not model yet.
-///
-/// Every request and response struct carries a `#[serde(flatten)]`
-/// `unknown_fields` of this type, so a field added upstream still reaches
-/// clients (and an unmodeled request parameter still reaches the provider)
-/// instead of being silently dropped — clients can adopt new API fields
-/// before this crate ships explicit support for them.
-pub type UnknownFields = serde_json::Map<String, serde_json::Value>;
+pub use crate::protocol::UnknownFields;
+use crate::protocol::present_or_null;
 
 // Codegen policy: Rust and Serde are the contract. Codegen-only attributes may
 // enable derives or compensate for representation details a generator cannot
@@ -37,44 +31,12 @@ pub type UnknownFields = serde_json::Map<String, serde_json::Value>;
 // const values, ranges, or other constraints that are absent from the Rust
 // field type; OpenAI-compatible providers extend these values independently.
 
-// Optionality is spelled three ways here, one per state the wire can be in,
-// and which one a field gets follows the upstream spec rather than taste:
-// - required: a plain field.
-// - required but nullable, like a message's `content`: an `Option` that always
-//   serializes, `null` when there is none.
-// - optional AND nullable, like `usage` and `logprobs`: `Option<Option<_>>`,
-//   read through [`present_or_null`]. Absent and `null` are different bytes,
-//   and a provider sends both — OpenAI streams `"logprobs": null` on every
-//   chunk and DeepSeek omits the key outright — so warpllm holds the
-//   difference rather than normalizing it. Absent stays absent; `null` stays
-//   `null`.
-//
-// That third kind is what makes these shapes a superset of OpenAI's rather
-// than merely a permissive reader of them: everything the vendor can put on
-// the wire, warpllm can hold AND hand back unchanged. Narrowing one to a plain
-// `Option` would still ACCEPT a provider's null and would still be lossless in
-// meaning, but the null would come back out as an absent key and the generated
-// TypeScript would stop admitting a value OpenAI's own types allow.
-//
-// The codegen attributes on that third kind say it in each generator's terms:
-// `ts(optional)` unwraps the outer `Option` only, so TypeScript keeps the
-// inner `| null`, and `x-nullable-when-present` tells `warpllm-codegen` to
-// leave the null branch a serialized schema otherwise drops from an omittable
-// field.
-
-/// Deserializes an optional, nullable field: `None` when the key was absent,
-/// `Some(None)` when it was present and `null`.
-///
-/// Serde's own `Option` collapses the two — a nested `Option<Option<T>>` reads
-/// an explicit `null` as `None`, the same value a missing key produces — so
-/// the outer layer only means "the key was there" with this in front of it.
-fn present_or_null<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: serde::Deserializer<'de>,
-{
-    Option::deserialize(deserializer).map(Some)
-}
+// Optionality is spelled three ways here — see [`present_or_null`] and the
+// rule stated with it in `crate::protocol`. The codegen attributes on the
+// third kind say that rule in each generator's terms: `ts(optional)` unwraps
+// the outer `Option` only, so TypeScript keeps the inner `| null`, and
+// `x-nullable-when-present` tells `warpllm-codegen` to leave the null branch a
+// serialized schema otherwise drops from an omittable field.
 
 // ---------------------------------------------------------------------------
 // Response — the `chat.completion` object

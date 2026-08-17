@@ -31,6 +31,7 @@ use warpllm::protocol::anthropic::messages::types::{
 use crate::assert_fixtures_round_trip;
 
 mod losslessness;
+mod reassembly;
 
 fn fixtures(shape: &str) -> String {
     format!(

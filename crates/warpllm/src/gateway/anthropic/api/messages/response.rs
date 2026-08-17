@@ -136,7 +136,11 @@ pub(crate) fn ingest_response(response: Message) -> types::ChatResponse {
 /// spellings and shares not one of these. `finish_reason_raw` stays
 /// authoritative on render, so this only has to be right for callers matching
 /// on the enum.
-fn finish_reason(stop_reason: Option<&str>) -> FinishReason {
+///
+/// Shared with `stream.rs` rather than copied: the streamed and unstreamed
+/// forms of one request must end the same way, and two copies of this table
+/// could answer differently.
+pub(super) fn finish_reason(stop_reason: Option<&str>) -> FinishReason {
     match stop_reason {
         Some("end_turn" | "stop_sequence") => FinishReason::Stop,
         // Both ran out of room: one hit the caller's ceiling, the other the
@@ -622,6 +626,25 @@ fn from_fields<T: DeserializeOwned + Default>(fields: UnknownFields) -> T {
 pub(super) fn take_string(fields: &mut UnknownFields, key: &str) -> Option<String> {
     match fields.remove(key) {
         Some(Value::String(value)) => Some(value),
+        _ => None,
+    }
+}
+
+/// A THREE-STATE string out of residue: absent stays absent, an explicit null
+/// comes back as one.
+///
+/// [`take_typed`] cannot do this job, which is the reason this exists. Asked for
+/// an `Option<String>` it reads a stored `null` as an absent outer option — so
+/// the two states it is meant to tell apart come back identical, and an absent
+/// key round trips as an explicit null.
+pub(super) fn take_nullable_string(
+    fields: &mut UnknownFields,
+    key: &str,
+) -> Option<Option<String>> {
+    match fields.remove(key) {
+        Some(Value::String(value)) => Some(Some(value)),
+        Some(Value::Null) => Some(None),
+        // Absent, or corrupted past its wire type: drop the field.
         _ => None,
     }
 }

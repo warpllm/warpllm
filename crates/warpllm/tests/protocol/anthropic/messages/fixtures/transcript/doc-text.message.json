@@ -1,0 +1,18 @@
+{
+  "id": "msg_014p7gG3wDgGV9EUtLvnow3U",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-20250514",
+  "content": [
+    {
+      "type": "text",
+      "text": "Hello!"
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 25,
+    "output_tokens": 15
+  }
+}

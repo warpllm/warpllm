@@ -1,0 +1,26 @@
+{
+  "id": "msg_01Aq9w938a90dw8q",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-20250514",
+  "content": [
+    {
+      "type": "text",
+      "text": "Let me check."
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_01T1x1fJ34qAmk2tNTrN7Up6",
+      "name": "get_weather",
+      "input": {
+        "location": "San Francisco, CA"
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 472,
+    "output_tokens": 89
+  }
+}

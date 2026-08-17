@@ -8,7 +8,17 @@ Versions follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a breaking change bumps the MINOR number: `0.1.x` and `0.2.x` are
 incompatible, and `^0.1` will not upgrade you into one.
 
-## [Unreleased]
+## [0.4.0] - 2026-08-16
+
+Two additions and one source-break. A client can now declare the providers it
+serves — narrowing both which environment variables are read and which models
+are routable — and OpenCode Zen joins the roster as `opencode`.
+
+The break is Rust-only and one line to fix: `ClientConfig` gained a field, so an
+exhaustive struct literal no longer compiles. Python and TypeScript are purely
+additive, and a Rust caller already using `..Default::default()` is unaffected.
+That is what moves the MINOR number rather than the patch, per the versioning
+note at the top of this file — `^0.3` will not upgrade you into it.
 
 ### Added
 

@@ -105,12 +105,6 @@ pub(crate) async fn post(
 
 // ---------------------------------------------------------------------------
 // Streaming.
-//
-// Everything below here is still unreachable: the conversions that call `post`
-// have landed, and the ones that read events have not. Each item carries its
-// own `allow` rather than the module carrying one, so that a NON-streaming item
-// going dead is still a warning — and so that deleting these is exactly the
-// change that wires the stream up.
 // ---------------------------------------------------------------------------
 
 /// [`Outcome`] for a streamed request. Same contract: a non-2xx is DATA, and
@@ -121,7 +115,6 @@ pub(crate) async fn post(
 /// past the headers, so the status decision is made before the first event and
 /// never again.
 #[derive(Debug)]
-#[allow(dead_code)] // staged: read once the stream conversions land
 pub(crate) enum StreamOutcome {
     Ok(EventStream),
     /// The status, raw body, and header evidence, verbatim — see
@@ -147,7 +140,6 @@ pub(crate) enum StreamOutcome {
 /// applied here rather than on the [`reqwest::Client`] because reqwest's own
 /// `read_timeout` is builder-scoped: setting it there would bind every
 /// non-streamed request too, or cost a second connection pool to avoid that.
-#[allow(dead_code)] // staged: read once the stream conversions land
 pub(crate) async fn post_stream(
     http: &reqwest::Client,
     provider: &'static str,
@@ -241,7 +233,6 @@ async fn send(
 /// caller here is a loop, and a loop needs no combinators, no pinning, and no
 /// dependency.
 #[derive(Debug)]
-#[allow(dead_code)] // staged: read once the stream conversions land
 pub(crate) struct EventStream {
     response: reqwest::Response,
     provider: &'static str,
@@ -272,7 +263,6 @@ pub(crate) struct EventStream {
 /// follows one. A reader that kept waiting would sit until the socket closed
 /// and then report a truncation, burying the reason the provider actually
 /// gave.
-#[allow(dead_code)] // staged: read once the stream conversions land
 fn ends_the_stream(event: &MessageStreamEvent) -> bool {
     matches!(
         event,
@@ -280,7 +270,6 @@ fn ends_the_stream(event: &MessageStreamEvent) -> bool {
     )
 }
 
-#[allow(dead_code)] // staged: read once the stream conversions land
 impl EventStream {
     /// The next event, or `None` once the stream ends.
     ///

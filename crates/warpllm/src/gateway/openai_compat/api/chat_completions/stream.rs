@@ -296,6 +296,27 @@ fn render_delta_finish_reason(completion: &types::CompletionDelta) -> Option<Str
     ))
 }
 
+/// A tool call's `kind` in THIS protocol's vocabulary.
+///
+/// The same rule [`render_finish_reason`] states, applied to the other field
+/// where the two protocols disagree on a word: Anthropic calls a tool call
+/// `tool_use`, and this wire's `type` has no such value — every official SDK
+/// reads it as unrecognized, and a client matching on `"function"` silently
+/// drops the call.
+///
+/// `None` stays `None`, which is load-bearing rather than incidental: the type
+/// arrives on the fragment that OPENS a call and is absent on the rest, so a
+/// form that supplied a default here would put a key on the wire the provider
+/// never sent. An unrecognized word echoes — this protocol has `custom` tools
+/// too, and inventing `function` for a word that might be one is worse than
+/// passing through what a future SDK may well know.
+fn render_tool_call_kind(kind: Option<&str>) -> Option<String> {
+    Some(match kind? {
+        "tool_use" => "function".to_string(),
+        known => known.to_string(),
+    })
+}
+
 fn render_delta(delta: &types::MessageDelta, provider: &str) -> ChatCompletionStreamResponseDelta {
     let mut unknown_fields = merged_ext(&delta.ext, provider);
     let role = match unknown_fields.remove("role") {
@@ -321,7 +342,7 @@ fn render_delta(delta: &types::MessageDelta, provider: &str) -> ChatCompletionSt
                     name: name.clone(),
                     unknown_fields: UnknownFields::new(),
                 }),
-                r#type: kind.clone(),
+                r#type: render_tool_call_kind(kind.as_deref()),
                 unknown_fields: UnknownFields::new(),
             }),
             ContentDelta::Unknown(value) => {
@@ -566,6 +587,71 @@ mod tests {
             &empty.completions[0].delta.content[0],
             ContentDelta::Text { text } if text.is_empty()
         ));
+    }
+
+    /// The vocabulary rule [`render_finish_reason`] states, on the other field
+    /// the two protocols spell differently. Anthropic's `tool_use` has no
+    /// meaning in this wire's `type`, so echoing it hands a client a value its
+    /// own SDK reads as unrecognized and drops.
+    ///
+    /// The `None` row is the one that would be easiest to get wrong: a
+    /// continuation fragment carries no type, and supplying one here would put
+    /// a key on the wire the provider never sent.
+    /// Rendered through `render_chunk` rather than by calling the helper
+    /// directly: the bug this guards against was the CALL SITE echoing `kind`,
+    /// and a test of the helper alone passes while the call site ignores it.
+    #[test]
+    fn a_tool_calls_kind_is_translated_into_this_protocols_vocabulary() {
+        let rendered = |kind: Option<&str>| {
+            let chunk = types::ChatResponseChunk {
+                id: "msg_1".into(),
+                model: "claude-opus-5".into(),
+                created: None,
+                completions: vec![types::CompletionDelta {
+                    delta: types::MessageDelta {
+                        role: None,
+                        content: vec![ContentDelta::ToolCall {
+                            index: 0,
+                            id: Some("tu_1".into()),
+                            kind: kind.map(str::to_string),
+                            name: Some("get_weather".into()),
+                            arguments: None,
+                        }],
+                        ext: types::ProviderExt::new(),
+                    },
+                    finish_reason: None,
+                    finish_reason_raw: None,
+                    ext: types::ProviderExt::new(),
+                }],
+                usage: None,
+                ext: types::ProviderExt::new(),
+                source: None,
+            };
+            plain(&render_chunk(&chunk, "anthropic"))["choices"][0]["delta"]["tool_calls"][0]
+                ["type"]
+                .clone()
+        };
+
+        assert_eq!(
+            rendered(Some("tool_use")),
+            json!("function"),
+            "Anthropic's spelling reached an OpenAI caller, whose SDK has no such value"
+        );
+        assert_eq!(
+            rendered(Some("function")),
+            json!("function"),
+            "this protocol's own spelling must survive unchanged"
+        );
+        assert_eq!(
+            rendered(Some("custom")),
+            json!("custom"),
+            "a word this protocol has must not be rewritten to `function`"
+        );
+        assert_eq!(
+            rendered(None),
+            json!(null),
+            "a fragment that carried no type must not gain one"
+        );
     }
 
     /// The opener names the call and carries `type`; the fragments after it

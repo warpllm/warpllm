@@ -60,7 +60,17 @@ honest version of what you can build on.
 | Mistral | On `main`, unreleased |
 | OpenAI-compatible HTTP gateway | On `main`, unreleased |
 | Weighted load balancing (Rust only) | On `main`, unreleased |
+| Anthropic's Messages protocol | On `main`, not yet routable |
+| Claude direct on `api.anthropic.com` | Not yet — [#23](https://github.com/warpllm/warpllm/issues/23) |
 | Failover, retries, caching, metrics | Planned |
+
+<Note>
+  Those two Anthropic rows say different things. warpllm can now translate a
+  chat-completions request into Anthropic's `/messages` shape and read its
+  streamed reply back, but no model string routes there yet — so Claude is
+  still reached through OpenRouter. See
+  [Model routing](/concepts/model-routing).
+</Note>
 
 <Info>
   0.4.0 is **source-breaking for Rust only**: `ClientConfig` gained a

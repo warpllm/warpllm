@@ -122,9 +122,13 @@ pub(crate) fn ingest_request(request: CreateMessageRequest, model: &str) -> type
         // the blocks, where `ingest_block` puts them.
         cache: None,
         stream: stream.unwrap_or(false),
-        // No counterpart: Anthropic reports usage on every stream
-        // unconditionally, so there is no opt-in to record.
-        stream_include_usage: None,
+        // No wire counterpart, and `None` would be the wrong reading of that:
+        // Anthropic reports a stream's totals unconditionally, so a caller who
+        // speaks this protocol has asked for them by construction. Saying so
+        // is what keeps the counts in the gateway form on this protocol's own
+        // path, and what makes an OpenAI backend send the trailing usage chunk
+        // this protocol requires when a request crosses the other way.
+        stream_include_usage: Some(true),
         ext: namespaced(anthropic),
         source: Some(IngestSource {
             protocol: Protocol::Anthropic,
@@ -1004,6 +1008,22 @@ mod tests {
         let body = maximal_body();
         let normalized = ingest_request(wire(body.clone()), "claude-opus-5");
         assert_eq!(rendered(&normalized), body);
+    }
+
+    /// A caller who speaks this protocol has asked for a stream's totals by
+    /// construction — Anthropic reports them unconditionally, so there is no
+    /// state in which one of its callers does not want them. `None` would read
+    /// as "no opinion" and cost them the counts on their own protocol's path.
+    ///
+    /// It is a request field with no wire spelling here, so nothing about the
+    /// round trip above can catch it going wrong.
+    #[test]
+    fn an_anthropic_caller_has_asked_for_a_streams_totals() {
+        let request = ingest_request(wire(maximal_body()), "claude-opus-5");
+        assert_eq!(request.stream_include_usage, Some(true));
+        // And it stays a gateway-form fact: Anthropic has no `stream_options`,
+        // so saying so must not put anything on the wire.
+        assert_eq!(rendered(&request), maximal_body());
     }
 
     /// The gateway view, so a change to the mapping fails on the mapping rather

@@ -78,6 +78,11 @@ models Google's own shape. None of those have an `api:` here yet, and
 registering them would hand back a model string that resolves and then fails
 upstream on every request.
 
+`anthropic_messages` is the closest to arriving: the surface is implemented on
+`main` and nothing routes to it, which is the last step of
+[#23](https://github.com/warpllm/warpllm/issues/23). Registering these entries
+is what that step unblocks.
+
 No entry carries `capabilities`: Zen publishes a price per model and no context
 window, output ceiling, or concurrency figure. Every model is re-hosted, so the
 original provider's numbers are not Zen's to promise.

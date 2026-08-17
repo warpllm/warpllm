@@ -79,6 +79,15 @@ A model name may contain further slashes after the provider prefix —
 `openrouter/anthropic/claude-sonnet-4` is the OpenRouter provider serving the
 `anthropic/claude-sonnet-4` slug.
 
+<Note>
+  OpenRouter is the only route to Claude today. A direct `anthropic/` provider
+  is not yet registered, so `anthropic/claude-sonnet-4` fails the same way any
+  unknown string does. The protocol underneath it — translating your request
+  into Anthropic's `/messages` shape and its reply back — is on `main`;
+  routing to it is tracked in
+  [#23](https://github.com/warpllm/warpllm/issues/23).
+</Note>
+
 ## What the registry records
 
 The registry lives at

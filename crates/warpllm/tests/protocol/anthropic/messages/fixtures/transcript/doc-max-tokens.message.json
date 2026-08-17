@@ -1,0 +1,18 @@
+{
+  "id": "msg_01MaxTok3nsQ9",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-20250514",
+  "content": [
+    {
+      "type": "text",
+      "text": "Once upon a"
+    }
+  ],
+  "stop_reason": "max_tokens",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 11,
+    "output_tokens": 4
+  }
+}

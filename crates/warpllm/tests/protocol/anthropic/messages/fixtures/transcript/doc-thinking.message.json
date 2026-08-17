@@ -1,0 +1,24 @@
+{
+  "id": "msg_01Ty7fMH2xL9pQ3rK",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-20250514",
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "Let me work through this.",
+      "signature": "EqQBCgIYAhIM1gbcDa9GJwZA2b3hIkfXAiVBg=="
+    },
+    {
+      "type": "text",
+      "text": "42."
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 40,
+    "output_tokens": 63,
+    "cache_read_input_tokens": 1024
+  }
+}

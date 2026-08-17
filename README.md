@@ -119,23 +119,24 @@ This project is to lay out the most resilient open source productionization laye
 ## Status
 
 > [!IMPORTANT]
-> The published packages are **0.2.0**, which adds the provider registry —
-> DeepSeek and OpenRouter alongside OpenAI, reached through `provider/model`
-> routing strings. It is a **breaking** release: `chat_completion` is now
-> `chat_completions`, and most of the public surface moved. See the
-> [changelog](CHANGELOG.md) before upgrading from `0.1.x`.
+> The published packages are **0.3.1**, which adds streaming — from the Rust
+> core, both SDKs, and the HTTP gateway — alongside the Kimi provider and the
+> rest of OpenAI's chat-completion roster. It is a **breaking** release:
+> response fields that are optional *and* nullable now tell an absent key from
+> an explicit `null`, so their type changed in all three languages. See the
+> [changelog](CHANGELOG.md) before upgrading from `0.2.x`.
 >
 > The OpenAI-compatible HTTP gateway has landed on `main` but is **not
-> released yet**. Streaming is not implemented.
+> released yet**.
 
-| | Released (0.2.0) | On `main` |
+| | Released (0.3.1) | On `main` |
 | --- | --- | --- |
 | OpenAI chat completions, non-streaming | Yes | Yes |
 | `provider/model` routing strings | Provider registry | Provider registry |
 | DeepSeek, OpenRouter | Yes | Yes |
-| Kimi | — | Yes |
+| Kimi | Yes | Yes |
 | OpenAI-compatible HTTP gateway | — | Unreleased |
-| Streaming | — | — |
+| Streaming | Yes | Yes |
 | Failover, load balancing, caching, metrics | — | — |
 
 Unlisted models are rejected rather than guessed at, so routing a name warpllm

@@ -1,0 +1,4 @@
+# Recorded wire captures, read by the Rust, Node and Python suites alike. A
+# Windows checkout rewrites text files to CRLF by default, which would leave
+# every language reading a corpus that differs from the one recorded.
+*.sse text eol=lf

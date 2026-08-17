@@ -1,5 +1,7 @@
 //! The upstream half of a chat completion: gateway types in, gateway types out.
 
+use std::time::Duration;
+
 use crate::error::Result;
 use crate::gateway::openai_compat::error::error_from_body;
 use crate::gateway::types;
@@ -54,15 +56,19 @@ pub(crate) async fn exchange(
 /// The failure it can report is only the one that happens BEFORE any chunk —
 /// a refused request, a rate limit, an unreachable host. Once the stream is
 /// open, a failure has no status left to map and surfaces on the stream itself.
+///
+/// `read_timeout` travels through rather than being read from a client here,
+/// which is what keeps this stateless.
 pub(crate) async fn exchange_stream(
     request: &types::ChatRequest,
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
     api_key: &str,
+    read_timeout: Option<Duration>,
 ) -> Result<ChatChunkStream> {
     let wire = render_request(request, provider)?;
-    match transport::post_stream(http, provider, base_url, api_key, &wire).await? {
+    match transport::post_stream(http, provider, base_url, api_key, &wire, read_timeout).await? {
         StreamOutcome::Ok(chunks) => Ok(ChatChunkStream { chunks }),
         StreamOutcome::Status {
             status,

@@ -11,6 +11,8 @@ interface CannedResponse {
   status: number
   body: unknown
   headers?: Record<string, string>
+  /** Send `body` as a string, untouched, instead of JSON-encoding it. */
+  raw?: boolean
 }
 
 /** Minimal localhost HTTP mock: queue responses, record requests. */
@@ -40,8 +42,11 @@ export class MockServer {
           body: raw ? JSON.parse(raw) : undefined,
         })
         const next = mock.queue.shift() ?? { status: 404, body: { error: 'no canned response' } }
-        res.writeHead(next.status, { 'content-type': 'application/json', ...next.headers })
-        res.end(JSON.stringify(next.body))
+        res.writeHead(next.status, {
+          'content-type': next.raw ? 'text/event-stream' : 'application/json',
+          ...next.headers,
+        })
+        res.end(next.raw ? String(next.body) : JSON.stringify(next.body))
       })
     })
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -58,6 +63,12 @@ export class MockServer {
    * through to the caller. */
   respondWith(status: number, body: unknown, headers?: Record<string, string>): void {
     this.queue.push({ status, body, headers })
+  }
+
+  /** An SSE body, sent verbatim. JSON-encoding it would destroy the framing —
+   * `data:` lines and blank-line separators are bytes, not a value. */
+  respondWithStream(body: string, status = 200): void {
+    this.queue.push({ status, body, raw: true })
   }
 
   async close(): Promise<void> {

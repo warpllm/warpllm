@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "warpllm"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "proptest",
  "reqwest",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "warpllm-codegen"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "schemars",
  "serde_json",
@@ -2068,29 +2068,32 @@ dependencies = [
 
 [[package]]
 name = "warpllm-node"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "tokio",
  "warpllm",
 ]
 
 [[package]]
 name = "warpllm-python"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
+ "tokio",
  "warpllm",
 ]
 
 [[package]]
 name = "warpllm-server"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "clap",
+ "futures-util",
  "reqwest",
  "serde_json",
  "temp-env",

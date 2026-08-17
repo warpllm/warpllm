@@ -20,4 +20,21 @@ pub struct ClientConfig {
     /// means each provider talks to its own API.
     pub base_url: Option<String>,
     pub timeout_secs: Option<u64>,
+    /// How long a stream may go without a single byte before warpllm gives up
+    /// on it. Absent means never, which is the default.
+    ///
+    /// [`timeout_secs`](Self::timeout_secs) is a TOTAL deadline — it cannot
+    /// tell a stream that is alive and slow from one that is wedged, so it
+    /// bounds a stall only by outliving it. This bounds the GAP instead, and
+    /// resets on every byte, which is the shape that fits a response whose
+    /// length nobody knows in advance.
+    ///
+    /// Opt-in because there is no value that is right for everyone, and a
+    /// wrong one fails silently in the worst direction: the gap before the
+    /// FIRST chunk is a gap like any other, and a reasoning model can think
+    /// for minutes before it emits a token. Set this above the slowest
+    /// time-to-first-token you expect, not merely above the gap between
+    /// chunks — several providers also send `:` keepalive comments during a
+    /// long think, and those count as bytes.
+    pub stream_read_timeout_secs: Option<u64>,
 }

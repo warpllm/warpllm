@@ -28,6 +28,10 @@ codegen = ["dep:ts-rs", "dep:schemars"]
 
 [dev-dependencies]
 wiremock = "0.6"
+# A raw socket, for the one case a mock server cannot produce: a response that
+# arrives and then goes quiet without closing. wiremock delays whole responses,
+# which stalls the request before its headers instead.
+tokio = { workspace = true, features = ["net", "io-util"] }
 temp-env = "0.3"
 # Examples only. warpllm emits `tracing` events and installs no subscriber of
 # its own; the quickstart shows a caller opting in to see them.

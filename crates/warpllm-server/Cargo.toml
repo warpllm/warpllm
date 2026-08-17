@@ -12,6 +12,10 @@ publish = false
 warpllm.workspace = true
 axum.workspace = true
 clap.workspace = true
+# `axum::response::Sse` wants a `Stream`; `warpllm::ChatCompletionStream` has an
+# inherent `next()`. `stream::unfold` is the adapter, and keeping it here rather
+# than in the core is what lets the core stay free of a futures dependency.
+futures-util = { version = "0.3", default-features = false }
 tower-http.workspace = true
 tokio = { workspace = true, features = ["signal", "net"] }
 serde_json.workspace = true

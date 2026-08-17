@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use napi_derive::napi;
+use tokio::sync::Mutex;
 
 #[napi]
 pub fn version() -> &'static str {
@@ -35,5 +36,40 @@ impl Client {
             .chat_completions(&request_json)
             .await
             .map_err(wire_err)
+    }
+
+    #[napi]
+    pub async fn chat_completions_stream(&self, request_json: String) -> napi::Result<ChatStream> {
+        let client = self.inner.clone();
+        let stream = client
+            .chat_completions_stream(&request_json)
+            .await
+            .map_err(wire_err)?;
+        Ok(ChatStream {
+            inner: Arc::new(Mutex::new(stream)),
+        })
+    }
+}
+
+/// A handle over one streamed reply. The iteration protocol is TypeScript's —
+/// `client.ts` wraps this in `Symbol.asyncIterator` — because napi's own
+/// `Generator` trait is synchronous and cannot express `for await`.
+#[napi]
+pub struct ChatStream {
+    /// `Arc<Mutex<_>>` rather than `&mut self`: a napi async method has to hand
+    /// the runtime a `'static` future, which a borrow of `self` is not. The
+    /// lock also makes concurrent `next()` calls queue rather than race, which
+    /// is the only sane reading of two callers pulling one stream.
+    inner: Arc<Mutex<warpllm::JsonChatStream>>,
+}
+
+#[napi]
+impl ChatStream {
+    /// The next chunk as JSON, or `null` once the stream ends.
+    #[napi]
+    pub async fn next(&self) -> napi::Result<Option<String>> {
+        let stream = self.inner.clone();
+        let mut stream = stream.lock().await;
+        stream.next().await.transpose().map_err(wire_err)
     }
 }

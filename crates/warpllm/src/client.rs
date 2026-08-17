@@ -134,6 +134,9 @@ impl Client {
                 provider.name(),
                 self.base_url(provider),
                 api_key,
+                self.config
+                    .stream_read_timeout_secs
+                    .map(Duration::from_secs),
             )
             .await?,
             provider: provider.name(),
@@ -237,6 +240,11 @@ pub struct ChatCompletionStream {
 
 impl ChatCompletionStream {
     /// The next chunk, or `None` once the stream ends.
+    ///
+    /// `None` means the reply is COMPLETE. An upstream that stopped early ends
+    /// with [`Error::StreamTruncated`](crate::Error::StreamTruncated) instead,
+    /// after every chunk that did arrive — so a caller never has to wonder
+    /// whether the answer it collected is the whole one.
     ///
     /// An error item is terminal: whatever produced it also ended the stream,
     /// so the next call returns `None`.
@@ -468,11 +476,7 @@ mod tests {
         let client = client(ClientConfig::default());
         let request = CreateChatCompletionRequest {
             model: "demo/chat".into(),
-            messages: vec![ChatCompletionRequestMessage {
-                role: "user".into(),
-                content: "hi".into(),
-                ..Default::default()
-            }],
+            messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
             ..Default::default()
         };
         // What `chat_completions` does, minus the routing it already proved:
@@ -527,11 +531,7 @@ mod tests {
         });
         let request = CreateChatCompletionRequest {
             model: "openai/gpt-5.6".into(),
-            messages: vec![ChatCompletionRequestMessage {
-                role: "user".into(),
-                content: "hi".into(),
-                ..Default::default()
-            }],
+            messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
             ..Default::default()
         };
         let (provider, model) = pair_for("openai/gpt-5.6");

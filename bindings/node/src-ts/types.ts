@@ -5,7 +5,9 @@ export type {
   AnnotationURLCitation,
   ChatCompletionAudio,
   ChatCompletionMessageCustomToolCall,
+  ChatCompletionMessageToolCallChunk,
   ChatCompletionRequestMessage,
+  ChatCompletionStreamResponseDelta,
   ChatCompletionTokenLogprob,
   Choice,
   ChoiceLogprobs,
@@ -13,9 +15,13 @@ export type {
   CompletionUsage,
   CreateChatCompletionRequest,
   CreateChatCompletionResponse,
+  CreateChatCompletionStreamResponse,
+  DeltaFunctionCall,
   ErrorBody,
   FunctionCall,
   PromptTokensDetails,
+  StreamChoice,
+  ToolCallChunkFunction,
   TopLogprob,
 } from './generated/types.js'
 

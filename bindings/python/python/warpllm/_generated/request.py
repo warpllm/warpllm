@@ -3,14 +3,138 @@
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Any, TypeAlias, TypedDict
 
 from typing_extensions import NotRequired
 
 
+class ChatCompletionRequestMessageContentPartText(TypedDict):
+    type: str
+    text: str
+
+
+class ImageUrl(TypedDict):
+    url: str
+    detail: NotRequired[str | None]
+
+
+class InputAudio(TypedDict):
+    data: str
+    format: str
+
+
+class FileContent(TypedDict):
+    file_data: NotRequired[str | None]
+    file_id: NotRequired[str | None]
+    filename: NotRequired[str | None]
+
+
+class ChatCompletionRequestMessageContentPartRefusal(TypedDict):
+    type: str
+    refusal: str
+
+
+class Function(TypedDict):
+    arguments: str
+    name: str
+
+
+class Custom(TypedDict):
+    input: str
+    name: str
+
+
+ChatCompletionStop: TypeAlias = str | list[str]
+
+
+class ChatCompletionStreamOptions(TypedDict):
+    include_usage: NotRequired[bool | None]
+
+
+class FunctionObject(TypedDict):
+    name: str
+    description: NotRequired[str | None]
+    parameters: NotRequired[Any]
+    strict: NotRequired[bool | None]
+
+
+class ToolChoiceFunction(TypedDict):
+    name: str
+
+
+class JsonSchemaDefinition(TypedDict):
+    name: str
+    description: NotRequired[str | None]
+    schema: NotRequired[Any]
+    strict: NotRequired[bool | None]
+
+
+class ResponseFormatSimple(TypedDict):
+    type: str
+
+
+class ChatCompletionRequestMessageContentPartImage(TypedDict):
+    type: str
+    image_url: ImageUrl
+
+
+class ChatCompletionRequestMessageContentPartAudio(TypedDict):
+    type: str
+    input_audio: InputAudio
+
+
+class ChatCompletionRequestMessageContentPartFile(TypedDict):
+    type: str
+    file: FileContent
+
+
+class ChatCompletionMessageToolCall(TypedDict):
+    id: str
+    type: str
+    function: Function
+
+
+class ChatCompletionMessageCustomToolCall(TypedDict):
+    id: str
+    type: str
+    custom: Custom
+
+
+class ChatCompletionTool(TypedDict):
+    type: str
+    function: NotRequired[FunctionObject | None]
+
+
+class ChatCompletionNamedToolChoice(TypedDict):
+    type: str
+    function: ToolChoiceFunction
+
+
+class ResponseFormatJsonSchema(TypedDict):
+    type: str
+    json_schema: JsonSchemaDefinition
+
+
+ChatCompletionRequestMessageContentPart: TypeAlias = ChatCompletionRequestMessageContentPartText | ChatCompletionRequestMessageContentPartImage | ChatCompletionRequestMessageContentPartAudio | ChatCompletionRequestMessageContentPartFile | ChatCompletionRequestMessageContentPartRefusal | Any
+
+
+ChatCompletionMessageToolCallUnion: TypeAlias = ChatCompletionMessageToolCall | ChatCompletionMessageCustomToolCall
+
+
+ChatCompletionToolChoiceOption: TypeAlias = ChatCompletionNamedToolChoice | str | Any
+
+
+ChatCompletionResponseFormat: TypeAlias = ResponseFormatJsonSchema | ResponseFormatSimple
+
+
+ChatCompletionRequestMessageContent: TypeAlias = str | list[ChatCompletionRequestMessageContentPart]
+
+
 class ChatCompletionRequestMessage(TypedDict):
     role: str
-    content: str
+    content: NotRequired[ChatCompletionRequestMessageContent | None]
+    tool_calls: NotRequired[list[ChatCompletionMessageToolCallUnion] | None]
+    tool_call_id: NotRequired[str | None]
 
 
 class CreateChatCompletionRequest(TypedDict):
@@ -19,5 +143,10 @@ class CreateChatCompletionRequest(TypedDict):
     temperature: NotRequired[float | None]
     max_tokens: NotRequired[int | None]
     top_p: NotRequired[float | None]
-    stop: NotRequired[list[str] | None]
+    stop: NotRequired[ChatCompletionStop | None]
     stream: NotRequired[bool | None]
+    stream_options: NotRequired[ChatCompletionStreamOptions | None]
+    tools: NotRequired[list[ChatCompletionTool] | None]
+    tool_choice: NotRequired[ChatCompletionToolChoiceOption | None]
+    response_format: NotRequired[ChatCompletionResponseFormat | None]
+    reasoning_effort: NotRequired[str | None]

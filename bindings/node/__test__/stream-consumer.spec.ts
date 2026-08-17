@@ -18,7 +18,11 @@ const TRANSCRIPTS = resolve(
 
 function transcript(name: string): CreateChatCompletionStreamResponse[] {
   return readFileSync(resolve(TRANSCRIPTS, name), 'utf8')
-    .split('\n')
+    // SSE terminates a line with CRLF, and a Windows checkout stores the
+    // fixture that way too — so splitting on `\n` alone leaves a `\r` on every
+    // payload, and `[DONE]` stops matching the filter below. Rust's
+    // `str::lines()` drops it for free, which is why only this reader broke.
+    .split(/\r?\n/)
     .filter((line) => line.startsWith('data: '))
     .map((line) => line.slice('data: '.length))
     .filter((payload) => payload !== '[DONE]')

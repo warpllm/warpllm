@@ -25,12 +25,23 @@ use warpllm::{
     CreateChatCompletionStreamResponse, fetch_model,
 };
 
-/// One model per provider on the roster. Cheap and short-answered on purpose:
-/// this is a shape check, not a capability survey.
-const MODELS: [&str; 3] = [
-    "openai/gpt-5-nano",
-    "deepseek/deepseek-v4-flash",
-    "openrouter/~deepseek/deepseek-v4-flash-latest",
+/// One model per provider on the roster, each with the parameter that caps its
+/// reply. Cheap and short-answered on purpose: this is a shape check, not a
+/// capability survey.
+///
+/// The cap is NAMED PER MODEL because it genuinely differs: OpenAI's newer
+/// families reject `max_tokens` outright — *"Unsupported parameter:
+/// 'max_tokens' is not supported with this model"* — and require
+/// `max_completion_tokens`, while the others still take `max_tokens`. warpllm
+/// passes either through untouched rather than translating between them, so
+/// the caller is what has to know, and here that is this table.
+const MODELS: [(&str, &str); 3] = [
+    ("openai/gpt-5-nano", "max_completion_tokens"),
+    ("deepseek/deepseek-v4-flash", "max_tokens"),
+    (
+        "openrouter/~deepseek/deepseek-v4-flash-latest",
+        "max_tokens",
+    ),
 ];
 
 #[tokio::test]
@@ -39,7 +50,7 @@ async fn every_configured_provider_streams_chunks_warpllm_can_hold() {
     let mut checked = Vec::new();
     let mut skipped = Vec::new();
 
-    for model_str in MODELS {
+    for (model_str, cap) in MODELS {
         let (provider, _) = fetch_model(model_str).expect("roster entry");
         if provider
             .env_api_key()
@@ -52,16 +63,26 @@ async fn every_configured_provider_streams_chunks_warpllm_can_hold() {
 
         let mut request = CreateChatCompletionRequest {
             model: model_str.to_owned(),
-            messages: vec![ChatCompletionRequestMessage {
-                role: "user".into(),
-                content: "Reply with exactly: hello".into(),
-                unknown_fields: Default::default(),
-            }],
-            max_tokens: Some(16),
+            messages: vec![ChatCompletionRequestMessage::new(
+                "user",
+                "Reply with exactly: hello",
+            )],
             ..Default::default()
         };
-        // Unmodeled, and reaching the provider anyway — the catch-all doing
-        // the job it exists for, on a request rather than a reply.
+        // Both go through the catch-all — the job it exists for, on a request
+        // rather than a reply. `max_completion_tokens` is genuinely unmodeled;
+        // `max_tokens` is a modeled field, but naming it here keeps the two
+        // spellings side by side instead of branching on which one this model
+        // wants.
+        //
+        // The cap is generous rather than tight, because it exists to bound a
+        // runaway and not to shape the answer. 16 does not survive a reasoning
+        // model: the budget covers reasoning tokens too, so gpt-5-nano spent
+        // all of it thinking and finished on `length` with nothing to show.
+        // The prompt is what keeps the reply short.
+        request
+            .unknown_fields
+            .insert(cap.into(), serde_json::json!(512));
         request.unknown_fields.insert(
             "stream_options".into(),
             serde_json::json!({"include_usage": true}),
@@ -103,7 +124,7 @@ fn assert_chunks_are_usable(model_str: &str, chunks: &[CreateChatCompletionStrea
     );
 
     let mut text = String::new();
-    let mut finished = false;
+    let mut reasons = Vec::new();
     for chunk in chunks {
         assert_eq!(
             chunk.model, model_str,
@@ -113,10 +134,35 @@ fn assert_chunks_are_usable(model_str: &str, chunks: &[CreateChatCompletionStrea
             if let Some(Some(fragment)) = &choice.delta.content {
                 text.push_str(fragment);
             }
-            finished |= choice.finish_reason.is_some();
+            if let Some(reason) = &choice.finish_reason {
+                reasons.push(reason.clone());
+            }
         }
     }
+    // The usage chunk is why the request asks for one: it is the only place
+    // that says where the budget went, and a reply that is empty because the
+    // model spent it all on reasoning looks exactly like one that is empty
+    // because warpllm dropped the content.
+    let usage = chunks.iter().rev().find_map(|chunk| chunk.usage.as_ref());
 
-    assert!(finished, "{model_str} never sent a finish_reason");
-    assert!(!text.trim().is_empty(), "{model_str} streamed no content");
+    // Printed rather than asserted. `include_usage` was asked for explicitly, so
+    // a provider ignoring it is worth SEEING — but one provider honouring it is
+    // not evidence the other two do, and an invariant drawn from one sample is
+    // how a live check starts failing for reasons that are nobody's bug.
+    println!(
+        "{model_str}: {} chunks, finish_reason {reasons:?}, usage {}",
+        chunks.len(),
+        if usage.is_some() { "sent" } else { "ABSENT" }
+    );
+
+    assert!(
+        !reasons.is_empty(),
+        "{model_str} never sent a finish_reason"
+    );
+    assert!(
+        !text.trim().is_empty(),
+        "{model_str} streamed no content (finish_reason {reasons:?}, usage {usage:#?}) — \
+         a reasoning model whose cap is too low finishes on `length` having emitted \
+         only reasoning tokens"
+    );
 }

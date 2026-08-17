@@ -208,6 +208,12 @@ fn opinion(error: &Error) -> Opinion {
             Some("connection_error"),
         ),
         Error::Decode { .. } => (Is(502), Some("api_error"), Some("decode_error")),
+        // A bad answer from upstream, like `Decode` — the difference is that
+        // this one arrived incomplete rather than unreadable.
+        Error::StreamTruncated { .. } => (Is(502), Some("api_error"), Some("stream_truncated")),
+        // 504 rather than 502: the upstream did not answer badly, it stopped
+        // answering — which is the one thing a gateway timeout means.
+        Error::StreamStalled { .. } => (Is(504), Some("api_error"), Some("stream_stalled")),
         Error::NotImplemented(_) => (Is(501), Some("api_error"), Some("not_implemented")),
         Error::Internal(_) => (Is(500), Some("server_error"), Some("internal_error")),
 

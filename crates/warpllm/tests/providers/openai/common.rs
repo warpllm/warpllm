@@ -22,6 +22,7 @@ pub fn client_for(server: &MockServer) -> Client {
     Client::new(ClientConfig {
         base_url: Some(server.uri()),
         timeout_secs: Some(5),
+        stream_read_timeout_secs: None,
     })
     .unwrap()
 }
@@ -60,11 +61,7 @@ pub fn with_openrouter_key<F: Future<Output = ()>>(body: F) {
 pub fn request(model: &str) -> CreateChatCompletionRequest {
     CreateChatCompletionRequest {
         model: model.into(),
-        messages: vec![ChatCompletionRequestMessage {
-            role: "user".into(),
-            content: "hi".into(),
-            ..Default::default()
-        }],
+        messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
         ..Default::default()
     }
 }

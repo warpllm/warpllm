@@ -51,6 +51,7 @@ async fn spawn_app(upstream_uri: &str) -> String {
     let client = warpllm::Client::new(warpllm::ClientConfig {
         base_url: Some(upstream_uri.to_string()),
         timeout_secs: Some(5),
+        stream_read_timeout_secs: None,
     })
     .unwrap();
     let app = router(AppState {
@@ -244,8 +245,248 @@ fn quota_exhaustion_is_not_reported_as_a_rate_limit() {
     });
 }
 
+/// The chunks an upstream sends for "Hello there!", mirroring
+/// `fixtures/transcript/openai-text.sse`.
+const UPSTREAM_STREAM: &str = concat!(
+    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",",
+    "\"created\":1700000000,\"model\":\"gpt-5.6\",\"choices\":[{\"index\":0,",
+    "\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"logprobs\":null,",
+    "\"finish_reason\":null}],\"usage\":null,\"obfuscation\":\"KtQ3nZ8w\"}\n\n",
+    ": keepalive\n\n",
+    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",",
+    "\"created\":1700000000,\"model\":\"gpt-5.6\",\"choices\":[{\"index\":0,",
+    "\"delta\":{\"content\":\" there!\"},\"logprobs\":null,",
+    "\"finish_reason\":\"stop\"}]}\n\n",
+    "data: [DONE]\n\n",
+);
+
+/// The `data:` payloads of an SSE body, in order.
+fn payloads(sse: &str) -> Vec<&str> {
+    sse.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .collect()
+}
+
+async fn post_stream(gateway: &str, body: &Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("{gateway}/v1/chat/completions"))
+        .json(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+fn streaming_request_body() -> Value {
+    let mut body = request_body();
+    body["stream"] = json!(true);
+    body
+}
+
+/// The gap this closes: an OpenAI SDK pointed at the gateway asks for a stream
+/// and gets one, framed the way it expects.
 #[test]
-fn stream_requests_are_501_before_upstream() {
+fn stream_true_is_served_as_sse() {
+    with_gateway_key(async {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", format!("Bearer {GATEWAY_KEY}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(UPSTREAM_STREAM),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let gateway = spawn_app(&upstream.uri()).await;
+
+        let response = post_stream(&gateway, &streaming_request_body()).await;
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream")
+        );
+
+        let body = response.text().await.unwrap();
+        let payloads = payloads(&body);
+        assert_eq!(payloads.len(), 3, "two chunks and the sentinel: {body}");
+        assert_eq!(*payloads.last().unwrap(), "[DONE]");
+
+        let mut text = String::new();
+        for payload in &payloads[..2] {
+            let chunk: Value = serde_json::from_str(payload).unwrap();
+            // The caller's prefixed string, not the upstream echo.
+            assert_eq!(chunk["model"], "openai/gpt-5.6");
+            // Per-chunk residue no specification names still reaches the caller.
+            assert_eq!(chunk["object"], "chat.completion.chunk");
+            if let Some(fragment) = chunk["choices"][0]["delta"]["content"].as_str() {
+                text.push_str(fragment);
+            }
+        }
+        assert_eq!(text, "Hello there!");
+
+        // The gateway asked the provider to stream, and stripped the prefix.
+        let sent: Value = upstream.received_requests().await.unwrap()[0]
+            .body_json()
+            .unwrap();
+        assert_eq!(sent["stream"], json!(true));
+        assert_eq!(sent["model"], "gpt-5.6");
+    });
+}
+
+/// ...and an EXPLICIT `"stream": false` is a whole reply, like its absence.
+///
+/// The other whole-reply tests all omit the key, so they only ever exercise
+/// `None`. `Some(false)` is the third input the route can see, and the one a
+/// loosened condition — `stream.is_some()`, `unwrap_or(true)` — would silently
+/// start answering with events that a caller calling `.json()` cannot read.
+#[test]
+fn stream_false_is_served_as_a_whole_reply() {
+    with_gateway_key(async {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(completion_body()))
+            .mount(&upstream)
+            .await;
+        let gateway = spawn_app(&upstream.uri()).await;
+
+        let mut body = request_body();
+        body["stream"] = json!(false);
+        let response = post_stream(&gateway, &body).await;
+
+        assert_eq!(response.status(), 200);
+        assert_ne!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream"),
+            "an explicit false must not open a stream"
+        );
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["choices"][0]["message"]["content"], "Hello there!");
+    });
+}
+
+/// A failure BEFORE the stream opens still has a status to use, so it keeps
+/// its real one — and everything that makes it actionable.
+#[test]
+fn a_refusal_before_the_stream_keeps_its_status_and_retry_after() {
+    with_gateway_key(async {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "30")
+                    .set_body_json(json!({
+                        "error": {"message": "Rate limit reached", "type": "rate_limit_exceeded"}
+                    })),
+            )
+            .mount(&upstream)
+            .await;
+        let gateway = spawn_app(&upstream.uri()).await;
+
+        let response = post_stream(&gateway, &streaming_request_body()).await;
+
+        assert_eq!(response.status(), 429);
+        assert_eq!(
+            response.headers().get("retry-after").unwrap(),
+            "30",
+            "the header a standard client backs off on"
+        );
+        let body: Value = response.json().await.unwrap();
+        // Prefixed with the provider and status, exactly as the whole-reply
+        // path renders it — a streamed refusal is not a different failure.
+        assert_eq!(
+            body["error"]["message"],
+            "openai returned HTTP 429: Rate limit reached"
+        );
+        assert_eq!(body["error"]["warpllm_code"], "rate_limited");
+    });
+}
+
+/// ...and a failure AFTER it opens has none left, so it travels in the body.
+///
+/// The upstream sends an event that will not decode. The caller must be told,
+/// and must be able to tell this from a completed answer — so the error
+/// arrives as an event and NO sentinel follows it.
+#[test]
+fn a_failure_mid_stream_arrives_as_an_error_event_with_no_sentinel() {
+    with_gateway_key(async {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: not json\n\n"),
+            )
+            .mount(&upstream)
+            .await;
+        let gateway = spawn_app(&upstream.uri()).await;
+
+        let response = post_stream(&gateway, &streaming_request_body()).await;
+
+        // The status was committed before the body existed; it cannot change.
+        assert_eq!(response.status(), 200);
+        let body = response.text().await.unwrap();
+        let payloads = payloads(&body);
+
+        assert_eq!(payloads.len(), 1, "the failure is the only event: {body}");
+        let error: Value = serde_json::from_str(payloads[0]).unwrap();
+        assert_eq!(error["error"]["code"], "decode_error");
+        assert!(
+            !body.contains("[DONE]"),
+            "a sentinel would claim the answer completed: {body}"
+        );
+    });
+}
+
+/// An upstream that DROPS mid-answer is a failure too, and the one that hides
+/// best: nothing is malformed, the connection simply stops.
+///
+/// The chunks that arrived are forwarded — they are real — and then the
+/// truncation is reported as an error event. Emitting `[DONE]` instead, which
+/// is what a stream ending indistinguishably from a finished one produces,
+/// would tell an OpenAI SDK the half-written answer it holds is the whole one.
+#[test]
+fn an_upstream_that_stops_before_its_sentinel_is_not_reported_as_complete() {
+    with_gateway_key(async {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(UPSTREAM_STREAM.replace("data: [DONE]\n\n", "")),
+            )
+            .mount(&upstream)
+            .await;
+        let gateway = spawn_app(&upstream.uri()).await;
+
+        let response = post_stream(&gateway, &streaming_request_body()).await;
+
+        assert_eq!(response.status(), 200);
+        let body = response.text().await.unwrap();
+        let payloads = payloads(&body);
+
+        assert_eq!(payloads.len(), 3, "two chunks, then the failure: {body}");
+        let error: Value = serde_json::from_str(payloads[2]).unwrap();
+        assert_eq!(error["error"]["code"], "stream_truncated");
+        assert!(
+            !body.contains("[DONE]"),
+            "a truncated answer must not be signed off as finished: {body}"
+        );
+    });
+}
+
+/// The roster is closed on this path too: an unregistered name never opens a
+/// stream, and the refusal is an ordinary 400 rather than an empty one.
+#[test]
+fn streaming_an_unregistered_model_is_refused_before_upstream() {
     without_key(async {
         let upstream = MockServer::start().await;
         Mock::given(method("POST"))
@@ -255,17 +496,12 @@ fn stream_requests_are_501_before_upstream() {
             .await;
         let gateway = spawn_app(&upstream.uri()).await;
 
-        let mut body = request_body();
-        body["stream"] = json!(true);
-        let response = reqwest::Client::new()
-            .post(format!("{gateway}/v1/chat/completions"))
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 501);
-        let body: Value = response.json().await.unwrap();
-        assert_eq!(body["error"]["code"], "not_implemented");
+        let mut body = streaming_request_body();
+        body["model"] = json!("openai/not-a-model");
+        let response = post_stream(&gateway, &body).await;
+
+        assert_eq!(response.status(), 400);
+        assert!(upstream.received_requests().await.unwrap().is_empty());
     });
 }
 
@@ -329,6 +565,7 @@ fn serve_boots_answers_health_and_shuts_down_gracefully() {
             host: "127.0.0.1".into(),
             port,
             timeout_secs: 5,
+            stream_read_timeout_secs: None,
         };
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(warpllm_server::serve(config, async {

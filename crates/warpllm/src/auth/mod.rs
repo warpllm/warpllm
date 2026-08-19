@@ -37,6 +37,7 @@
 //! survive into [`reqwest::Request`]'s own `Debug` either.
 
 mod header;
+mod oauth;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -44,6 +45,7 @@ pub(crate) mod testing;
 use crate::error::Result;
 
 pub(crate) use header::Header;
+pub(crate) use oauth::OauthBearer;
 
 /// One provider's resolved credential.
 ///
@@ -70,7 +72,12 @@ pub(crate) enum Authenticator {
     /// prefix, so they are one variant rather than two.
     Header(Header),
     // SigV4 { .. }        <- #24, in `sigv4.rs`
-    // OauthBearer { .. }  <- #25, in `oauth.rs`
+    /// Reads as dead outside tests until token minting from ADC exists —
+    /// tracked as a follow-up to #25. The variant and its `apply` path are
+    /// real and tested; only the constructor that would reach them from a
+    /// live request is missing.
+    #[allow(dead_code)]
+    OauthBearer(OauthBearer),
 }
 
 impl Authenticator {
@@ -104,6 +111,7 @@ impl Authenticator {
     pub(crate) async fn authenticate(&self, request: reqwest::Request) -> Result<reqwest::Request> {
         match self {
             Authenticator::Header(header) => header.apply(request),
+            Authenticator::OauthBearer(oauth) => oauth.apply(request),
         }
     }
 }

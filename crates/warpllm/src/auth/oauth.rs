@@ -26,6 +26,10 @@ pub(crate) struct OauthBearer {
 }
 
 impl OauthBearer {
+    /// Reads as dead outside tests until ADC token-minting exists to call
+    /// this — the same reason the `OauthBearer` variant itself is marked,
+    /// see [`super::Authenticator::OauthBearer`].
+    #[allow(dead_code)]
     pub(crate) fn new(token: String, expires_at: SystemTime) -> Self {
         Self { token, expires_at }
     }
@@ -45,9 +49,7 @@ impl OauthBearer {
             ));
         }
         let mut value = HeaderValue::from_str(&format!("Bearer {}", self.token)).map_err(|_| {
-            Error::Internal(
-                "the OAuth token holds a byte that cannot be sent in a header".into(),
-            )
+            Error::Internal("the OAuth token holds a byte that cannot be sent in a header".into())
         })?;
         value.set_sensitive(true);
         request.headers_mut().insert(AUTHORIZATION, value);

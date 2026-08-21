@@ -92,7 +92,7 @@ fn deepseek_forwards_params_for_the_provider_to_judge() {
             .await;
 
         let mut req = request("deepseek/deepseek-v4-flash");
-        req.temperature = Some(3.0);
+        req.temperature = Some(Some(3.0));
         req.unknown_fields.insert("seed".into(), json!(7));
         client_for(&server).chat_completions(req).await.unwrap();
 

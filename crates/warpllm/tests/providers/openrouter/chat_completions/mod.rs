@@ -101,7 +101,7 @@ fn openrouter_forwards_params_for_the_provider_to_judge() {
             .await;
 
         let mut req = request("openrouter/anthropic/claude-sonnet-4");
-        req.temperature = Some(3.0);
+        req.temperature = Some(Some(3.0));
         req.unknown_fields
             .insert("provider".into(), json!("StreamLake"));
         req.unknown_fields.insert("route".into(), json!("fallback"));

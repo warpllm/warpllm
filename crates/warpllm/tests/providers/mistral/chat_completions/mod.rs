@@ -47,7 +47,7 @@ fn mistral_forwards_params_for_the_provider_to_judge() {
             .await;
 
         let mut req = request("mistral/mistral-large-2411");
-        req.temperature = Some(0.5);
+        req.temperature = Some(Some(0.5));
         req.unknown_fields.insert("safe_prompt".into(), json!(true));
         client_for(&server).chat_completions(req).await.unwrap();
 

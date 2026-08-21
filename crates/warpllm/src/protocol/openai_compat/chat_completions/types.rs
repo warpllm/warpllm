@@ -631,15 +631,30 @@ pub struct CreateChatCompletionRequest {
     /// Model string in `provider/model` form, e.g. `"openai/gpt-5.6"`.
     pub model: String,
     pub messages: Vec<ChatCompletionRequestMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "codegen", ts(optional = nullable))]
-    pub temperature: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "codegen", ts(optional = nullable))]
-    pub max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "codegen", ts(optional = nullable))]
-    pub top_p: Option<f64>,
+    #[serde(
+        default,
+        deserialize_with = "present_or_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[cfg_attr(feature = "codegen", ts(optional))]
+    #[cfg_attr(feature = "codegen", schemars(extend("x-nullable-when-present" = true)))]
+    pub temperature: Option<Option<f64>>,
+    #[serde(
+        default,
+        deserialize_with = "present_or_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[cfg_attr(feature = "codegen", ts(optional))]
+    #[cfg_attr(feature = "codegen", schemars(extend("x-nullable-when-present" = true)))]
+    pub max_tokens: Option<Option<u32>>,
+    #[serde(
+        default,
+        deserialize_with = "present_or_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[cfg_attr(feature = "codegen", ts(optional))]
+    #[cfg_attr(feature = "codegen", schemars(extend("x-nullable-when-present" = true)))]
+    pub top_p: Option<Option<f64>>,
     #[serde(
         default,
         deserialize_with = "present_or_null",

@@ -83,6 +83,9 @@ pub(crate) fn ingest_request(
     } = request;
 
     let mut compat = unknown_fields;
+    retain(&mut compat, "temperature", temperature.as_ref());
+    retain(&mut compat, "max_tokens", max_tokens.as_ref());
+    retain(&mut compat, "top_p", top_p.as_ref());
     retain(&mut compat, "stop", stop.as_ref());
     retain(&mut compat, "stream_options", stream_options.as_ref());
     retain(&mut compat, "tools", tools.as_ref());
@@ -101,9 +104,12 @@ pub(crate) fn ingest_request(
             .collect(),
         tool_choice: tool_choice.as_ref().and_then(ingest_tool_choice),
         params: types::GenerationParams {
-            max_tokens,
-            temperature,
-            top_p,
+            // Both an absent field and an explicit `null` mean "no value" to
+            // the gateway IR; which one it was rides the residue above so
+            // rendering can restore it.
+            max_tokens: max_tokens.flatten(),
+            temperature: temperature.flatten(),
+            top_p: top_p.flatten(),
             // Both wire spellings mean the same list of sequences; the one
             // that arrived is retained above so rendering can restore it.
             stop: stop
@@ -402,9 +408,13 @@ pub(crate) fn render_request(
     Ok(CreateChatCompletionRequest {
         model: request.model.clone(),
         messages,
-        temperature: params.temperature,
-        max_tokens: params.max_tokens,
-        top_p: params.top_p,
+        // Each of these prefers what arrived over what the gateway IR can
+        // reconstruct: a null the caller sent survives the round trip.
+        temperature: take_typed(&mut unknown_fields, "temperature")
+            .or_else(|| params.temperature.map(Some)),
+        max_tokens: take_typed(&mut unknown_fields, "max_tokens")
+            .or_else(|| params.max_tokens.map(Some)),
+        top_p: take_typed(&mut unknown_fields, "top_p").or_else(|| params.top_p.map(Some)),
         stop: take_typed(&mut unknown_fields, "stop").or_else(|| {
             (!params.stop.is_empty()).then(|| Some(ChatCompletionStop::Many(params.stop.clone())))
         }),
@@ -865,9 +875,9 @@ mod tests {
                     ..Default::default()
                 },
             ],
-            temperature: Some(0.7),
-            max_tokens: Some(256),
-            top_p: Some(0.9),
+            temperature: Some(Some(0.7)),
+            max_tokens: Some(Some(256)),
+            top_p: Some(Some(0.9)),
             stop: Some(Some(ChatCompletionStop::Many(vec![
                 "END".into(),
                 "STOP".into(),
@@ -908,9 +918,9 @@ mod tests {
         // Message-level passthrough fields ride ext and come back verbatim.
         assert_eq!(wire.messages[1].unknown_fields["name"], json!("alice"));
         assert_eq!(wire.messages[1].unknown_fields["vendor_tag"], json!("vt"));
-        assert_eq!(wire.temperature, Some(0.7));
-        assert_eq!(wire.max_tokens, Some(256));
-        assert_eq!(wire.top_p, Some(0.9));
+        assert_eq!(wire.temperature, Some(Some(0.7)));
+        assert_eq!(wire.max_tokens, Some(Some(256)));
+        assert_eq!(wire.top_p, Some(Some(0.9)));
         assert_eq!(plain(&wire.stop), json!(["END", "STOP"]));
         assert_eq!(wire.stream, None);
         // Request-level passthrough fields ride ext and come back verbatim.
@@ -1668,6 +1678,9 @@ mod tests {
         let body = json!({
             "model": "openai/gpt-5.6",
             "messages": [],
+            "temperature": null,
+            "max_tokens": null,
+            "top_p": null,
             "stop": null,
             "stream_options": null,
             "reasoning_effort": null,

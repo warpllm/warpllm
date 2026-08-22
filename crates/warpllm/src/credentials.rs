@@ -65,9 +65,22 @@ impl Credentials {
     /// says nothing about presentation; this is the seam where the table that
     /// makes the scheme a real choice goes, with the first provider that is not
     /// bearer.
-    pub(crate) fn resolve(declared: Option<&BTreeMap<String, ProviderConfig>>) -> Self {
+    ///
+    /// Reads against `registry` rather than the shipped roster, because that is
+    /// per client now: a key for a provider only this client's roster file has
+    /// heard of is no less a key.
+    ///
+    /// A provider declaring `auth: none` names no variable, so it lands here
+    /// only if the caller declared an inline key for it, and is otherwise
+    /// absent — the same as a provider whose key plumbing has not landed. The
+    /// two are told apart at request time, where the difference is the whole
+    /// point: one is sent no header, the other is refused.
+    pub(crate) fn resolve(
+        registry: &registry::Registry,
+        declared: Option<&BTreeMap<String, ProviderConfig>>,
+    ) -> Self {
         let keys = match declared {
-            None => registry::providers()
+            None => registry::providers(registry)
                 .filter_map(|provider| {
                     Some((
                         provider.name(),
@@ -78,7 +91,7 @@ impl Credentials {
             Some(declared) => declared
                 .iter()
                 .filter_map(|(name, entry)| {
-                    let provider = registry::provider(name)
+                    let provider = registry::provider(registry, name)
                         .expect("Client::new refuses a declaration the roster does not hold");
                     Some((
                         provider.name(),
@@ -181,10 +194,16 @@ impl std::fmt::Debug for Credentials {
 /// process-global lock across an await.
 #[cfg(test)]
 pub(crate) fn with_env<T>(vars: &[(&str, Option<&str>)], body: impl FnOnce() -> T) -> T {
-    let mut settings: std::collections::BTreeMap<String, Option<String>> = registry::providers()
-        .filter_map(|provider| provider.env_api_key())
-        .map(|var| (var.to_string(), None))
-        .collect();
+    let mut settings: std::collections::BTreeMap<String, Option<String>> =
+        registry::providers(registry::shipped())
+            .filter_map(|provider| provider.env_api_key())
+            .map(|var| (var.to_string(), None))
+            .collect();
+    // Not a key, and cleared for a sharper reason than the rest: a contributor
+    // who exports it would point every client built in this binary at a roster
+    // the suite has never seen, and the failures name nothing that leads back
+    // to the variable.
+    settings.insert(crate::client::SPECS_ENV_VAR.to_string(), None);
     for (var, value) in vars {
         settings.insert((*var).to_string(), value.map(str::to_string));
     }
@@ -214,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn one_key_admits_one_provider() {
         let credentials = with_env(&[(OPENAI, Some("sk-openai")), (DEEPSEEK, None)], || {
-            Credentials::resolve(None)
+            Credentials::resolve(registry::shipped(), None)
         });
         assert_eq!(credentials.names(), vec!["openai"]);
         assert_eq!(
@@ -230,7 +249,7 @@ mod tests {
     async fn every_set_key_admits_its_provider() {
         let credentials = with_env(
             &[(OPENAI, Some("sk-openai")), (DEEPSEEK, Some("sk-deepseek"))],
-            || Credentials::resolve(None),
+            || Credentials::resolve(registry::shipped(), None),
         );
         assert_eq!(credentials.names(), vec!["deepseek", "openai"]);
         assert_eq!(
@@ -245,7 +264,7 @@ mod tests {
     #[test]
     fn an_empty_environment_yields_no_providers() {
         with_env(&[(OPENAI, None), (DEEPSEEK, None)], || {
-            let credentials = Credentials::resolve(None);
+            let credentials = Credentials::resolve(registry::shipped(), None);
             assert!(credentials.names().is_empty());
             assert!(credentials.get("openai").is_none());
         });
@@ -257,7 +276,11 @@ mod tests {
     #[test]
     fn an_empty_value_is_not_a_key() {
         with_env(&[(OPENAI, Some("")), (DEEPSEEK, None)], || {
-            assert!(Credentials::resolve(None).names().is_empty());
+            assert!(
+                Credentials::resolve(registry::shipped(), None)
+                    .names()
+                    .is_empty()
+            );
         });
     }
 
@@ -266,7 +289,11 @@ mod tests {
     #[test]
     fn an_unknown_provider_is_never_available() {
         with_env(&[(OPENAI, Some("sk-openai"))], || {
-            assert!(Credentials::resolve(None).get("mistral").is_none());
+            assert!(
+                Credentials::resolve(registry::shipped(), None)
+                    .get("mistral")
+                    .is_none()
+            );
         });
     }
 
@@ -277,15 +304,16 @@ mod tests {
         with_env(
             &[(OPENAI, Some("sk-secret-value")), (DEEPSEEK, None)],
             || {
-                let rendered = format!("{:?}", Credentials::resolve(None));
+                let rendered = format!("{:?}", Credentials::resolve(registry::shipped(), None));
                 assert!(rendered.contains("openai"), "{rendered}");
                 assert!(!rendered.contains("sk-secret-value"), "{rendered}");
 
                 let inline = format!(
                     "{:?}",
-                    Credentials::resolve(Some(&declare(&[
-                        ("deepseek", Some("sk-inline-secret"),)
-                    ])))
+                    Credentials::resolve(
+                        registry::shipped(),
+                        Some(&declare(&[("deepseek", Some("sk-inline-secret"),)]))
+                    )
                 );
                 assert!(inline.contains("deepseek"), "{inline}");
                 assert!(!inline.contains("sk-inline-secret"), "{inline}");
@@ -319,7 +347,8 @@ mod tests {
         with_env(
             &[(OPENAI, Some("sk-openai")), (DEEPSEEK, Some("sk-deepseek"))],
             || {
-                let credentials = Credentials::resolve(Some(&declare(&[("openai", None)])));
+                let credentials =
+                    Credentials::resolve(registry::shipped(), Some(&declare(&[("openai", None)])));
                 assert_eq!(credentials.names(), vec!["openai"]);
                 assert!(credentials.get("deepseek").is_none());
             },
@@ -331,7 +360,7 @@ mod tests {
     #[tokio::test]
     async fn a_declaration_with_no_key_still_reads_the_environment() {
         let credentials = with_env(&[(OPENAI, Some("sk-openai")), (DEEPSEEK, None)], || {
-            Credentials::resolve(Some(&declare(&[("openai", None)])))
+            Credentials::resolve(registry::shipped(), Some(&declare(&[("openai", None)])))
         });
         assert_eq!(
             sent(&credentials, "openai").await.as_deref(),
@@ -344,7 +373,10 @@ mod tests {
     #[tokio::test]
     async fn an_inline_key_wins_over_the_environment() {
         let credentials = with_env(&[(OPENAI, Some("sk-from-the-environment"))], || {
-            Credentials::resolve(Some(&declare(&[("openai", Some("sk-inline"))])))
+            Credentials::resolve(
+                registry::shipped(),
+                Some(&declare(&[("openai", Some("sk-inline"))])),
+            )
         });
         assert_eq!(
             sent(&credentials, "openai").await.as_deref(),
@@ -359,7 +391,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_inline_key_falls_back_to_the_environment() {
         let credentials = with_env(&[(OPENAI, Some("sk-openai"))], || {
-            Credentials::resolve(Some(&declare(&[("openai", Some(""))])))
+            Credentials::resolve(registry::shipped(), Some(&declare(&[("openai", Some(""))])))
         });
         assert_eq!(
             sent(&credentials, "openai").await.as_deref(),
@@ -373,7 +405,7 @@ mod tests {
     fn an_empty_inline_key_with_no_variable_set_is_no_key() {
         with_env(&[(OPENAI, None)], || {
             assert!(
-                Credentials::resolve(Some(&declare(&[("openai", Some(""))])))
+                Credentials::resolve(registry::shipped(), Some(&declare(&[("openai", Some(""))])))
                     .names()
                     .is_empty()
             );
@@ -386,7 +418,7 @@ mod tests {
     fn an_empty_declaration_authenticates_nothing() {
         with_env(&[(OPENAI, Some("sk-openai"))], || {
             assert!(
-                Credentials::resolve(Some(&BTreeMap::new()))
+                Credentials::resolve(registry::shipped(), Some(&BTreeMap::new()))
                     .names()
                     .is_empty()
             );
@@ -401,7 +433,7 @@ mod tests {
             &[(OPENAI, Some("sk-openai")), (DEEPSEEK, Some("sk-deepseek"))],
             || {
                 assert_eq!(
-                    Credentials::resolve(None).names(),
+                    Credentials::resolve(registry::shipped(), None).names(),
                     vec!["deepseek", "openai"]
                 );
             },
@@ -415,9 +447,12 @@ mod tests {
     #[test]
     fn an_inline_key_authenticates_a_provider_the_roster_gives_no_variable() {
         let spec = ProviderSpec {
-            name: "keyless".into(),
+            name: "keyless",
             base_url: "https://api.keyless.test/v1".into(),
-            env_api_key: None,
+            // Not `NotRequired`: this is a provider whose key plumbing never
+            // landed, which is the case an inline key rescues. A host that
+            // wants no credential is a different entry and needs no rescuing.
+            credential: crate::registry::Credential::Unavailable,
         };
         with_env(&[], || {
             assert_eq!(

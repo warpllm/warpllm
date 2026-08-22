@@ -118,6 +118,26 @@ pub enum Error {
     /// what is squarely a 500.
     #[error("internal error: {0}")]
     Internal(String),
+    /// The roster file this client was pointed at could not be used: it was
+    /// unreadable, malformed, or left a roster that cannot serve a request.
+    ///
+    /// Configuration, not payload — so it is a 500 and not an
+    /// [`InvalidInput`](Self::InvalidInput), by the argument two variants up.
+    /// Distinct from [`Internal`](Self::Internal) so that an operator reading a
+    /// log can tell "the roster you wrote is wrong" from "TLS would not
+    /// initialize"; only the first has a file to go and open.
+    ///
+    /// A tuple variant rather than one naming a path, because a client's roster
+    /// is its file folded over the shipped one and "which file" is not a single
+    /// value. The message names its own source instead — a path when the
+    /// trouble is in the user's file, `specs.yaml` when it is not.
+    ///
+    /// Only ever raised while a client is being built, which is why the message
+    /// can carry the path and the parser's own complaint in full: a running
+    /// gateway cannot emit this in a response body, because it failed before it
+    /// bound a port.
+    #[error("could not load the model roster: {0}")]
+    InvalidRoster(String),
 
     // ----------------------------------------- the provider's own failures
     //
@@ -238,7 +258,8 @@ impl Error {
             | Error::StreamTruncated { .. }
             | Error::StreamStalled { .. }
             | Error::NotImplemented(_)
-            | Error::Internal(_) => Origin::Gateway,
+            | Error::Internal(_)
+            | Error::InvalidRoster(_) => Origin::Gateway,
             Error::RateLimited(_)
             | Error::QuotaExceeded(_)
             | Error::Overloaded(_)
@@ -295,6 +316,7 @@ impl Error {
             Error::StreamStalled { .. } => "stream_stalled",
             Error::NotImplemented(_) => "not_implemented",
             Error::Internal(_) => "internal_error",
+            Error::InvalidRoster(_) => "invalid_roster",
             Error::RateLimited(_) => "rate_limited",
             Error::QuotaExceeded(_) => "quota_exceeded",
             Error::Overloaded(_) => "overloaded",
@@ -492,6 +514,11 @@ mod tests {
             ),
             (Error::NotImplemented("streaming"), 501, "api_error"),
             (Error::Internal("tls".into()), 500, "server_error"),
+            (
+                Error::InvalidRoster("bad.yaml: x".into()),
+                500,
+                "server_error",
+            ),
         ];
         for (error, status, error_type) in cases {
             let rendered = error.to_openai();
@@ -608,6 +635,7 @@ mod tests {
             },
             Error::NotImplemented("x"),
             Error::Internal("x".into()),
+            Error::InvalidRoster("x".into()),
             rate_limit(),
             Error::QuotaExceeded(Box::new(provider_error())),
             Error::Overloaded(Box::new(provider_error())),
@@ -673,6 +701,7 @@ mod tests {
             .code(),
             Error::NotImplemented("x").code(),
             Error::Internal("x".into()).code(),
+            Error::InvalidRoster("x".into()).code(),
             Error::RateLimited(Box::new(provider_error())).code(),
             Error::QuotaExceeded(Box::new(provider_error())).code(),
             Error::Overloaded(Box::new(provider_error())).code(),

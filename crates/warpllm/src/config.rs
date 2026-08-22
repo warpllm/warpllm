@@ -1,6 +1,7 @@
 //! Client configuration.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
@@ -22,7 +23,43 @@ pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 600;
 pub struct ClientConfig {
     /// Overrides the provider's default base URL (proxies, tests). Absent
     /// means each provider talks to its own API.
+    ///
+    /// Global, and worth saying plainly now that a client can carry providers
+    /// of its own: this redirects EVERY provider, including the self-hosted one
+    /// whose whole point was its own address. Setting both is almost always a
+    /// mistake, and the client says so in its logs when it sees them together.
     pub base_url: Option<String>,
+    /// A roster of your own, in the same schema as warpllm's shipped
+    /// `specs.yaml`, folded over it when this client is built.
+    ///
+    /// This is how a model warpllm could not have shipped becomes routable —
+    /// one running on your own hardware, behind your own address, under a name
+    /// only you know. The shipped roster always survives the fold: a file that
+    /// adds `local/` leaves `openai/` exactly where it was. An entry naming a
+    /// provider warpllm already ships replaces that provider WHOLE, models
+    /// included, and says so at `warn` rather than quietly.
+    ///
+    /// ```yaml
+    /// providers:
+    ///   local:
+    ///     base_url: "http://localhost:8000/v1"
+    ///     auth: none          # the box is on a private network
+    ///     models:
+    ///       local/llama-3.3-70b:
+    ///         supported_apis:
+    ///           - {api: openai_compat_chat_completions}
+    ///           - {api: openai_compat_chat_completions_stream}
+    /// ```
+    ///
+    /// Read once, when the client is built, exactly as API keys are — so a
+    /// roster edited afterwards needs a new client, and everything wrong with
+    /// the file is reported here rather than by a request failing hours later.
+    ///
+    /// Absent falls back to `WARPLLM_SPECS`, and then to the shipped roster
+    /// alone. A path that is set and unreadable is an error either way: a typo
+    /// that silently dropped your own models would surface as "no registered
+    /// model spec" somewhere far from the cause.
+    pub specs_path: Option<PathBuf>,
     pub timeout_secs: Option<u64>,
     /// How long a stream may go without a single byte before warpllm gives up
     /// on it. Absent means never, which is the default.

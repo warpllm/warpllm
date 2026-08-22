@@ -36,6 +36,14 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      # examples/.env.example calls itself a mirror of the roster; nothing in
+      # the Rust suite can check that, because the file sits outside the crate
+      # directory. This is the only thing standing between a new provider and a
+      # template that never learned its variable.
+      - name: Env template mirrors the roster
+        run: |
+          ./scripts/check-env-example.test.sh
+          ./scripts/check-env-example.sh
       - name: Format
         run: cargo fmt --all --check
       # --all-targets lints tests and examples too, not just the libraries.

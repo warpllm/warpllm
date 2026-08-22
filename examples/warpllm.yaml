@@ -1,0 +1,104 @@
+# A roster of your own: models warpllm could not have shipped, because they run
+# on your hardware under names only you know.
+#
+# Point warpllm at this file and its entries become routable beside the built-in
+# ones. Nothing here replaces the shipped roster — `openai/gpt-5.6` still works
+# — unless you deliberately reuse a provider name, which replaces that provider
+# whole and is logged at `warn` when it happens. That log reaches you through
+# `tracing`, so `warpllm-server` prints it and a Rust client does once it
+# installs a subscriber; from Python and Node the replacement is silent, so
+# reuse a name there only on purpose.
+#
+#   warpllm-server --specs ./examples/warpllm.yaml
+#   WarpLLM(specs_path="./examples/warpllm.yaml")            # Python
+#   new WarpLLM({ specsPath: './examples/warpllm.yaml' })    # Node
+#   WARPLLM_SPECS=./examples/warpllm.yaml                    # any of them
+#
+# The schema is the one documented at the top of
+# `crates/warpllm/src/registry/specs.yaml`. This file is a worked example of the
+# parts a self-hosted deployment actually uses.
+#
+# The file is read when the client is built, and everything wrong with it is
+# reported there — a trailing slash on a `base_url`, a model listing no surface,
+# a provider nothing routes to. A gateway with a bad roster refuses to start
+# rather than starting clean and failing every request.
+
+providers:
+  # ---------------------------------------------------------------- vLLM
+  #
+  # Started with something like:
+  #
+  #   python -m vllm.entrypoints.openai.api_server \
+  #     --model meta-llama/Llama-3.3-70B-Instruct \
+  #     --max-model-len 32768
+  #
+  # No key: the box is on a private network and vLLM was started without
+  # `--api-key`. `auth: none` says that deliberately — warpllm then sends no
+  # `Authorization` header at all, rather than an empty bearer token.
+  #
+  # Omitting BOTH fields would mean something different and less useful: "this
+  # provider cannot be authenticated", which fails the request rather than
+  # sending it. The line is not optional politeness.
+  vllm:
+    base_url: "http://localhost:8000/v1"
+    auth: none
+    models:
+      # The key is what you route with; `model:` is what ships upstream. They
+      # differ here because vLLM serves the model under its full HuggingFace
+      # id, and `vllm/meta-llama/Llama-3.3-70B-Instruct` is a mouthful to type
+      # into every request.
+      vllm/llama-3.3-70b:
+        model: "meta-llama/Llama-3.3-70B-Instruct"
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        # Whatever you launched the server with. Recorded so a caller can read
+        # it back; warpllm does not enforce it, and will not reject an
+        # over-long prompt on your behalf.
+        capabilities:
+          max_input_tokens: 32768
+
+      # A second model on the same host. The transport is stated once, above;
+      # an entry only carries what differs.
+      vllm/qwen-2.5-coder:
+        model: "Qwen/Qwen2.5-Coder-32B-Instruct"
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+
+  # -------------------------------------------------------------- Ollama
+  #
+  #   ollama serve && ollama pull llama3.3
+  #
+  # Ollama's OpenAI-compatible surface lives under `/v1` and ignores any key.
+  ollama:
+    base_url: "http://localhost:11434/v1"
+    auth: none
+    models:
+      ollama/llama3.3:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+
+  # ------------------------------------------- a box that DOES want a key
+  #
+  # A shared cluster behind a gateway that checks a token, or vLLM started with
+  # `--api-key`. Name the variable and export it; warpllm reads it once, when
+  # the client is built, and a missing one is reported then.
+  #
+  # Note this is `env_api_key` INSTEAD of `auth: none`, never both.
+  cluster:
+    base_url: "https://vllm.internal.example.com/v1"
+    env_api_key: CLUSTER_API_KEY
+    models:
+      cluster/llama-3.3-70b:
+        model: "meta-llama/Llama-3.3-70B-Instruct"
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+
+# There is deliberately no wildcard. `vllm/*` is an error, not a catch-all:
+# every model needs an entry, because `supported_apis` and `capabilities` are
+# per model and a pattern would have to claim both on behalf of models nobody
+# listed. If your server's model set changes often, generate this file from its
+# own `GET /v1/models` rather than reaching for a `*`.

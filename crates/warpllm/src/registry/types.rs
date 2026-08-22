@@ -24,10 +24,13 @@
 //! fails to load, so a spec that exists is a spec that is complete, and the
 //! accessors below can hand back values rather than possibilities.
 //!
-//! [`ProviderSpec::env_api_key`] is the one genuine `Option`, and it means
-//! what it says: a provider may legitimately name no environment variable.
-//! The three [`Capabilities`] limits are the others, and there `None` means
-//! undocumented — never unlimited.
+//! How a provider authenticates is the one field with more than two states,
+//! and [`Credential`] spells all three out rather than leaving one of them as
+//! the absence of the others: a variable to read, nothing to send, or no way to
+//! authenticate at all. [`ProviderSpec::env_api_key`] answers only the first,
+//! so it stays an `Option` and keeps meaning what it always did. The three
+//! [`Capabilities`] limits are the other genuine `Option`s, and there `None`
+//! means undocumented — never unlimited.
 //!
 //! Fields are `pub(crate)` so the loader can build these. They are private to
 //! everyone else: outside this crate a spec is read-only.
@@ -57,16 +60,44 @@ pub(crate) struct Registry {
 /// what a model can DO, and which wire format that is spoken in, are not here.
 #[derive(Debug, Clone)]
 pub struct ProviderSpec {
-    pub(crate) name: String,
+    /// Interned, and the only field here that is. A name reaches the public
+    /// error surface, which holds it as `&'static str`; `intern` next door
+    /// argues why that is worth a bounded leak.
+    pub(crate) name: &'static str,
     pub(crate) base_url: String,
-    pub(crate) env_api_key: Option<String>,
+    pub(crate) credential: Credential,
+}
+
+/// How a provider authenticates, with all three states named.
+///
+/// Three, not two, because "the roster names a variable" and "the roster says
+/// this host wants nothing" and "the roster has no answer" are different
+/// situations with different remedies — and the third has to stay reachable,
+/// since it is what an entry means today when it simply says nothing. Folding
+/// it into the second would make a forgotten `env_api_key:` line silently send
+/// a prompt to a paid host with no credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Credential {
+    /// `env_api_key: FOO` — read `FOO` from the environment.
+    EnvVar(&'static str),
+    /// `auth: none` — the host takes no credential, so no `Authorization`
+    /// header is sent at all. What a self-hosted box on a private network
+    /// declares.
+    NotRequired,
+    /// Neither field. The provider cannot be authenticated, and a request
+    /// routed to it says so rather than naming a variable nothing reads.
+    Unavailable,
 }
 
 impl ProviderSpec {
     /// The provider's name — its key in the roster, and the first segment of
     /// every `model_str` it serves.
-    pub fn name(&self) -> &str {
-        &self.name
+    ///
+    /// `&'static str` because a name outlives the roster it was read from:
+    /// it is what the error types carry, and they are handed to callers who
+    /// may well have dropped the client by then.
+    pub fn name(&self) -> &'static str {
+        self.name
     }
 
     /// The provider's API root, version prefix included and no trailing
@@ -79,15 +110,38 @@ impl ProviderSpec {
     /// the roster names one. The default key source, and the only one a client
     /// that declares nothing has.
     ///
-    /// `None` means the roster offers this provider no key source of its own:
-    /// there is no variable to read and nothing to suggest setting. The roster
-    /// accepts that — a provider entry can land before the key plumbing it
-    /// needs does — and a request to one says exactly that rather than naming
-    /// a variable nothing reads. Such a provider is still authenticatable, by
-    /// a client that supplies the key itself through
-    /// [`ProviderConfig::api_key`](crate::ProviderConfig::api_key).
-    pub fn env_api_key(&self) -> Option<&str> {
-        self.env_api_key.as_deref()
+    /// `None` covers the two cases where there is no variable to name, which
+    /// this question cannot tell apart and does not try to: the provider takes
+    /// no credential at all, or the roster records no way to authenticate it.
+    /// [`unauthenticated`](Self::unauthenticated) is the one that separates
+    /// them, and it is the one a request has to ask.
+    ///
+    /// Either way this is only the ROSTER's answer. A client that supplies the
+    /// key itself through
+    /// [`ProviderConfig::api_key`](crate::ProviderConfig::api_key) can
+    /// authenticate a provider named no variable here at all.
+    pub fn env_api_key(&self) -> Option<&'static str> {
+        match self.credential {
+            Credential::EnvVar(var) => Some(var),
+            Credential::NotRequired | Credential::Unavailable => None,
+        }
+    }
+
+    /// Whether this provider is served with NO credential — the roster's
+    /// `auth: none`, which a self-hosted host on a private network declares.
+    ///
+    /// The distinction that matters is against a provider whose entry simply
+    /// names nothing: that one cannot be authenticated, and a request to it
+    /// fails saying so. This one is complete, and a request to it sends no
+    /// `Authorization` header. Only a deliberate line in the roster produces
+    /// it, so nobody reaches an unauthenticated endpoint by forgetting one.
+    ///
+    /// It says what the ROSTER declares, not what happens: a client that
+    /// declares an inline key for this provider is making the more specific
+    /// statement and that key still goes out. Somebody who put a token in front
+    /// of their own box has said something the roster file could not.
+    pub fn unauthenticated(&self) -> bool {
+        self.credential == Credential::NotRequired
     }
 }
 

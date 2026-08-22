@@ -134,6 +134,71 @@ and a provider name the roster doesn't hold fails when the client is built.
 Runnable versions of all three, with comments, are in
 [`examples/`](examples/).
 
+### Your own models
+
+Anything that speaks the OpenAI API — vLLM, TGI, Ollama, llama.cpp — is a
+routing target. Describe it in a file and hand warpllm the path:
+
+```yaml
+# ./warpllm.yaml
+providers:
+  local:
+    base_url: "http://localhost:8000/v1"
+    auth: none                       # the box is on a private network
+    models:
+      local/llama-3.3-70b:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+```
+
+```python
+client = WarpLLM(specs_path="./warpllm.yaml")
+client.chat_completions({"model": "local/llama-3.3-70b", "messages": [...]})
+```
+
+```typescript
+const client = new WarpLLM({ specsPath: './warpllm.yaml' })
+```
+
+```rust
+let client = Client::new(ClientConfig {
+    specs_path: Some("./warpllm.yaml".into()),
+    ..Default::default()
+})?;
+```
+
+```bash
+warpllm-server --specs ./warpllm.yaml   # or WARPLLM_SPECS=./warpllm.yaml
+```
+
+Your file is **merged** over the built-in roster, so adding `local/` leaves
+`openai/` exactly where it was — the same client routes both. Reusing a
+built-in provider's name replaces that provider whole, and warpllm warns rather
+than shadowing it quietly. The warning goes through [`tracing`], which
+`warpllm-server` surfaces and a Rust client does once it installs a subscriber;
+the Python and Node bindings install none yet, so there it goes nowhere. Same
+for the older warning about an environment with no provider keys in it.
+
+[`tracing`]: https://docs.rs/tracing
+
+`auth: none` is the line that matters for a private box: warpllm then sends no
+`Authorization` header at all. Omitting it means something else — that the
+roster records no way to authenticate this provider — so a forgotten
+`env_api_key` on a paid provider fails locally instead of leaving without a
+credential.
+
+The file is read when the client is built, so a roster that can't be used is an
+error there, naming the path — not a request failing hours later. There is no
+wildcard: every model gets an entry, because `supported_apis` and
+`capabilities` are per model and a pattern would have to claim both on behalf
+of models nobody listed.
+
+The schema is documented in full at the top of
+[`specs.yaml`](crates/warpllm/src/registry/specs.yaml), and
+[`examples/warpllm.yaml`](examples/warpllm.yaml) is a worked one covering vLLM,
+Ollama, and a cluster that does want a key.
+
 ## Mission
 
 This project is to lay out the most resilient open source productionization layer for AI-deployments. Designed for you if you want:
@@ -167,6 +232,7 @@ This project is to lay out the most resilient open source productionization laye
 | Kimi | Yes | Yes |
 | OpenCode Zen | Yes | Yes |
 | Declaring the providers a client serves | Yes | Yes |
+| Self-hosted models via your own roster file | — | Unreleased |
 | OpenAI-compatible HTTP gateway | — | Unreleased |
 | Streaming | Yes | Yes |
 | Failover, load balancing, caching, metrics | — | — |

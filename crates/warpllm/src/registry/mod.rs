@@ -13,24 +13,41 @@
 //! `&'static` strings to make the result a `const`. The gate now lives in
 //! `the_shipped_registry_loads_and_lints`, which CI runs on every PR.
 //!
-//! Three modules and no more: `types` is what a spec IS, `load` turns the
-//! file into the tables, `lint` holds what is merely true of a tidy roster.
+//! That shipped roster is the DEFAULT, not the limit. A client may be built
+//! with a path to a roster of its own — the same schema, the same loader, the
+//! same checks — which is folded over the shipped one at construction and
+//! belongs to that client alone. It is how somebody reaches a model warpllm
+//! could not have shipped even if it wanted to: one running on their own
+//! hardware, under a name only they know. See [`load_for_client`].
+//!
+//! Four modules and no more: `types` is what a spec IS, `load` turns files
+//! into the tables, `lint` holds what is merely true of a usable roster, and
+//! `intern` explains the two strings that outlive the roster they came from.
 //! Each keeps its own tests.
 
-use std::sync::LazyLock;
+use std::path::Path;
+use std::sync::{Arc, LazyLock};
 
 use crate::error::{Error, Result};
 
+mod intern;
+mod lint;
 mod load;
 mod types;
 
 #[cfg(test)]
-mod lint;
-#[cfg(test)]
 mod testing;
 
-use types::Registry;
+/// Only the client's tests name a credential directly; everything else reads
+/// one through [`ProviderSpec`]'s accessors.
+#[cfg(test)]
+pub(crate) use types::Credential;
+pub(crate) use types::Registry;
 pub use types::{Capabilities, ModelSpec, ProviderSpec, SupportedApi};
+
+/// The roster warpllm ships, as text. Also the first source every client folds
+/// its own file over.
+const SHIPPED_YAML: &str = include_str!("specs.yaml");
 
 /// The shipped roster, loaded on first use.
 ///
@@ -39,12 +56,89 @@ pub use types::{Capabilities, ModelSpec, ProviderSpec, SupportedApi};
 /// both gates by `the_shipped_registry_loads_and_lints`. Threading "warpllm's
 /// own roster is malformed" through the public API would put an arm at every
 /// call site that no caller could ever act on.
-static REGISTRY: LazyLock<Registry> = LazyLock::new(|| {
-    load::load(include_str!("specs.yaml")).unwrap_or_else(|e| panic!("specs.yaml: {e}"))
+///
+/// An `Arc` so that a client given no roster of its own shares this one rather
+/// than copying it. That client's registry and this are then the same tables,
+/// which is what makes the default cost nothing.
+static REGISTRY: LazyLock<Arc<Registry>> = LazyLock::new(|| {
+    Arc::new(load::load(SHIPPED_YAML).unwrap_or_else(|e| panic!("specs.yaml: {e}")))
 });
 
-/// What warpllm knows about a `model_str` such as `"openai/gpt-5.6"`: the
-/// provider that serves it, and the model itself.
+/// The roster one client routes against: the shipped one, or the shipped one
+/// with `path`'s file folded over it.
+///
+/// `None` hands back the shipped tables themselves — no read, no parse, no
+/// allocation beyond the `Arc`.
+///
+/// Read once, when the client is built, exactly as its credentials are and for
+/// the same reason: what a client can reach must not change under it
+/// mid-flight, and the answer is worth logging at the one moment a caller is
+/// set up to see it. The cost is the same too — a roster edited afterwards
+/// needs a new client.
+///
+/// Everything that can be wrong with the file is reported HERE, at
+/// construction, rather than as a closed registry refusing a request hours
+/// later somewhere else. That is the whole point of running [`lint::usable`]
+/// over the result: a malformed entry that merely fails to route would have
+/// moved the error from startup into production.
+///
+/// # Errors
+///
+/// [`Error::InvalidRoster`] if the file cannot be read, cannot be parsed, or
+/// leaves a roster that could not serve a request.
+pub(crate) fn load_for_client(path: Option<&Path>) -> Result<Arc<Registry>> {
+    let Some(path) = path else {
+        return Ok(Arc::clone(&REGISTRY));
+    };
+    let roster = path.display().to_string();
+    let yaml = std::fs::read_to_string(path)
+        .map_err(|e| Error::InvalidRoster(format!("{roster}: {e}")))?;
+    let (registry, replaced) = load::load_all(&[
+        load::Source {
+            label: "specs.yaml",
+            yaml: SHIPPED_YAML,
+        },
+        load::Source {
+            label: &roster,
+            yaml: &yaml,
+        },
+    ])
+    .map_err(Error::InvalidRoster)?;
+    lint::usable(&registry).map_err(|e| Error::InvalidRoster(format!("{roster}: {e}")))?;
+
+    // Shadowing a shipped provider is legitimate — the operator knows their
+    // deployment better than this roster does — and it is never silent.
+    for provider in &replaced {
+        tracing::warn!(
+            provider,
+            roster,
+            "the roster file replaced a built-in provider entry, models included"
+        );
+    }
+    for collision in lint::shared_env_api_keys(&registry) {
+        tracing::warn!(
+            roster,
+            "{collision}; one will authenticate with the other's key, which is \
+             what you want only if they really do share a credential"
+        );
+    }
+    tracing::info!(
+        roster,
+        providers = registry.providers.len(),
+        models = registry.models.len(),
+        "model roster loaded"
+    );
+    Ok(Arc::new(registry))
+}
+
+/// What the SHIPPED roster knows about a `model_str` such as
+/// `"openai/gpt-5.6"`: the provider that serves it, and the model itself.
+///
+/// The shipped roster and no other. A [`Client`](crate::Client) built with a
+/// roster file of its own routes against that instead, and
+/// [`Client::fetch_model`](crate::Client::fetch_model) is the question to ask
+/// about one — this answers "what does warpllm ship", which is a real question
+/// and a different one.
 ///
 /// Two rows rather than one merged spec, because the roster keeps them at two
 /// levels — how the API is reached is the provider's; the upstream name, the
@@ -88,21 +182,25 @@ pub fn fetch_model(model_str: &str) -> Result<(&'static ProviderSpec, &'static M
     })
 }
 
-/// Every provider on the roster, in no particular order.
+/// Every provider on `registry`, in no particular order.
 ///
 /// Unlike [`fetch_model`] this answers a question about the ROSTER rather than
 /// about one request: which providers exist at all, so that something can be
 /// worked out per provider before any model is named. The client uses it once,
 /// at construction, to find which providers the environment can authenticate.
 ///
+/// Takes the roster rather than reading the shipped one, because the answer is
+/// per client now: a client with a roster file of its own can authenticate
+/// providers the shipped list has never heard of.
+///
 /// Not public. A caller reaches a provider through the model it serves, and
 /// handing out the whole roster would make the shipped list an API that could
 /// not gain an entry without a semver argument.
-pub(crate) fn providers() -> impl Iterator<Item = &'static ProviderSpec> {
-    REGISTRY.providers.values()
+pub(crate) fn providers(registry: &Registry) -> impl Iterator<Item = &ProviderSpec> {
+    registry.providers.values()
 }
 
-/// The roster's row for this provider, by bare name.
+/// `registry`'s row for this provider, by bare name.
 ///
 /// The one lookup that starts from a provider rather than from a model.
 /// [`fetch_model`] is still how a REQUEST reaches a provider — nothing routes
@@ -110,11 +208,42 @@ pub(crate) fn providers() -> impl Iterator<Item = &'static ProviderSpec> {
 /// question: a client declaring which providers it serves names them directly,
 /// and the declaration has to be checked against the roster that will serve it.
 ///
+/// Which is why it takes the roster rather than reading the shipped one. A
+/// client that loaded a file of its own may legitimately declare `local`, and
+/// checking that against the shipped list would refuse the caller their own
+/// provider.
+///
 /// Not public, for the reason [`providers`] is not: the shipped list would
 /// become an API that could not gain an entry without a semver argument. A
 /// caller states a name and hears whether it worked.
-pub(crate) fn provider(name: &str) -> Option<&'static ProviderSpec> {
-    REGISTRY.providers.get(name)
+pub(crate) fn provider<'a>(registry: &'a Registry, name: &str) -> Option<&'a ProviderSpec> {
+    registry.providers.get(name)
+}
+
+/// The shipped tables, for the tests that need a roster and have no opinion
+/// about which — chiefly `credentials::with_env`, whose job is to clear every
+/// variable warpllm itself names.
+#[cfg(test)]
+pub(crate) fn shipped() -> &'static Registry {
+    &REGISTRY
+}
+
+/// Whether the SHIPPED roster holds a provider under this exact name.
+///
+/// Test-only, and that is the point: nothing at runtime should reach a
+/// provider by bare name — [`fetch_model`] hands back the spec. This exists
+/// so a table keyed by provider name, like the per-provider error overrides,
+/// can be checked against the roster rather than silently never matching
+/// after a rename.
+///
+/// The shipped roster only, and deliberately: those tables are keyed on names
+/// warpllm chose, and a user's roster is free to invent any name it likes.
+/// A user provider that happens to be called `deepseek` does pick up
+/// DeepSeek's error overrides — which is the right answer, since they named it
+/// that, and is said out loud in `provider_overrides`.
+#[cfg(test)]
+pub(crate) fn is_registered(provider: &str) -> bool {
+    REGISTRY.providers.contains_key(provider)
 }
 
 /// The model row filed under `model_str`, and the provider row it names.
@@ -124,8 +253,9 @@ pub(crate) fn provider(name: &str) -> Option<&'static ProviderSpec> {
 /// caller hears that rather than a provider hearing a guess.
 ///
 /// Split out from [`fetch_model`] so the matching can be tested against a
-/// fixture roster rather than only the shipped one.
-fn resolve<'a>(
+/// fixture roster rather than only the shipped one — and so a client can run
+/// the same matching over the roster it was built with.
+pub(crate) fn resolve<'a>(
     registry: &'a Registry,
     model_str: &str,
 ) -> Option<(&'a ProviderSpec, &'a ModelSpec)> {
@@ -323,8 +453,8 @@ mod tests {
     fn every_roster_name_resolves_to_its_own_spec() {
         // Qualified: this module's `providers` is shadowed in here by the
         // `testing` helper of the same name, which reads a fixture registry.
-        for spec in super::providers() {
-            let found = provider(spec.name()).expect("a roster name resolves");
+        for spec in super::providers(shipped()) {
+            let found = provider(shipped(), spec.name()).expect("a roster name resolves");
             assert!(
                 std::ptr::eq(found, spec),
                 "`{}` got a second copy of its provider row",
@@ -339,7 +469,7 @@ mod tests {
     #[test]
     fn a_name_the_roster_does_not_hold_resolves_to_nothing() {
         for unheld in ["openia", "OpenAI", "openai/", "", "*"] {
-            assert!(provider(unheld).is_none(), "`{unheld}`");
+            assert!(provider(shipped(), unheld).is_none(), "`{unheld}`");
         }
     }
 

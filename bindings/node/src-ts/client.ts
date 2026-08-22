@@ -20,6 +20,32 @@ export interface ProviderOptions {
 /** Constructor options. Mirrors Rust's `ClientConfig`. */
 export interface WarpLLMOptions {
   baseUrl?: string
+  /**
+   * A roster of your own, in the same schema as warpllm's built-in
+   * `specs.yaml`, merged over it. How a self-hosted OpenAI-compatible server —
+   * vLLM, TGI, Ollama, llama.cpp — becomes routable, with no key required:
+   *
+   * ```yaml
+   * providers:
+   *   local:
+   *     base_url: "http://localhost:8000/v1"
+   *     auth: none
+   *     models:
+   *       local/llama-3.3-70b:
+   *         supported_apis:
+   *           - {api: openai_compat_chat_completions}
+   * ```
+   *
+   * The built-in providers survive the merge, so adding `local/` leaves
+   * `openai/` exactly where it was. Reusing a built-in provider's name
+   * replaces that provider whole, models included, and does so **silently**
+   * here: warpllm warns over Rust's `tracing`, which this binding installs no
+   * subscriber for. The file is read when the client is constructed, so a
+   * roster that cannot be used throws there rather than failing a request
+   * later. Unset falls back to the `WARPLLM_SPECS` environment variable, and
+   * then to the built-in roster alone.
+   */
+  specsPath?: string
   /** Request timeout in seconds (default 600, matching the OpenAI SDK). */
   timeout?: number
   /**
@@ -58,6 +84,7 @@ export class WarpLLM {
       this.native = new NativeClient(
         JSON.stringify({
           base_url: options.baseUrl,
+          specs_path: options.specsPath,
           timeout_secs: options.timeout,
           stream_read_timeout_secs: options.streamReadTimeout,
           // Entries are rebuilt rather than passed through, because the key

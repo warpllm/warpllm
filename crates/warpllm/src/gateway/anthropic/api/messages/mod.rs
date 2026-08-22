@@ -1,16 +1,17 @@
 //! `Api::AnthropicMessages` ↔ the gateway forms.
 //!
 //! Split the way its openai_compat sibling is: [`request`] and [`response`] are
-//! the conversions, [`exchange`] is the one place this protocol's order —
-//! render, post, ingest — is stated.
+//! the conversions, [`stream`] is the streamed counterpart of [`response`], and
+//! [`exchange`] is the one place this protocol's order — render, post, ingest —
+//! is stated, for both the whole reply and the streamed one.
 //!
-//! The streaming half — the named-event mapping and the chunk stream carrying
-//! it — lands separately. It is the harder piece and earns its own review
-//! rather than being buried in this one.
+//! [`stream`] is the one module here that does NOT promise a byte-exact round
+//! trip. Its contract is reassembly-equivalence, for reasons its own docs give.
 
 mod exchange;
 mod request;
 mod response;
+mod stream;
 
 // Nothing calls these yet. warpllm is CALLED in another protocol and only
 // SPEAKS this one, so `ingest_request` and `render_response` wait on an
@@ -20,7 +21,8 @@ mod response;
 // unused halves are what the round-trip tests are written against.
 #[allow(unused_imports)]
 pub(crate) use self::{
-    exchange::exchange,
+    exchange::{ChatChunkStream, exchange, exchange_stream},
     request::{ingest_request, render_request},
     response::{ingest_response, render_response},
+    stream::{ingest_event, render_event},
 };

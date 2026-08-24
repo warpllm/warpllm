@@ -54,15 +54,39 @@ use warpllm::{
 /// succession can 429, and Zen may withdraw a free model when its evaluation
 /// window closes. Both surface as this test naming the model it failed on,
 /// which is why the name is printed rather than only asserted.
-const MODELS: [(&str, &str); 4] = [
-    ("openai/gpt-5-nano", "max_completion_tokens"),
-    ("deepseek/deepseek-v4-flash", "max_tokens"),
-    ("opencode/laguna-s-2.1-free", "max_tokens"),
+/// `anthropic` earns its row for the reason `opencode` does not: it is the only
+/// one here reached over a protocol that is not chat completions, so this is the
+/// only place the translation meets a real socket. Haiku 4.5 is the cheapest
+/// Claude on the roster, which is the whole basis for the pick.
+const MODELS: [(&str, Cap); 5] = [
+    (
+        "openai/gpt-5-nano",
+        Cap::Unmodelled("max_completion_tokens"),
+    ),
+    ("deepseek/deepseek-v4-flash", Cap::Unmodelled("max_tokens")),
+    ("opencode/laguna-s-2.1-free", Cap::Unmodelled("max_tokens")),
     (
         "openrouter/~deepseek/deepseek-v4-flash-latest",
-        "max_tokens",
+        Cap::Unmodelled("max_tokens"),
     ),
+    ("anthropic/claude-haiku-4-5", Cap::Typed),
 ];
+
+/// How a row's cap is written onto the request, which is a different question
+/// from what the cap is.
+enum Cap {
+    /// A spelling to insert verbatim, through the catch-all. Fine for every
+    /// chat-completions provider, because a renderer replays its OWN
+    /// protocol's residue — and useless across a protocol boundary, because
+    /// `Protocol::may_read` correctly refuses the Anthropic renderer a bag
+    /// keyed `openai_compat`. A cap parked there would be silently dropped and
+    /// the roster's ceiling used instead.
+    Unmodelled(&'static str),
+    /// The MODELED `max_tokens` field, which crosses protocols because warpllm
+    /// translates it. The only way to cap a reply from a provider that does not
+    /// speak the caller's protocol.
+    Typed,
+}
 
 #[tokio::test]
 #[ignore = "needs live provider API keys; run with --ignored"]
@@ -89,20 +113,25 @@ async fn every_configured_provider_streams_chunks_warpllm_can_hold() {
             )],
             ..Default::default()
         };
-        // Both go through the catch-all — the job it exists for, on a request
-        // rather than a reply. `max_completion_tokens` is genuinely unmodeled;
-        // `max_tokens` is a modeled field, but naming it here keeps the two
-        // spellings side by side instead of branching on which one this model
-        // wants.
+        // Most rows go through the catch-all — the job it exists for, on a
+        // request rather than a reply. `max_completion_tokens` is genuinely
+        // unmodeled; `max_tokens` is a modeled field, but naming it there keeps
+        // the two spellings side by side. Anthropic is the exception and
+        // [`Cap`] says why.
         //
         // The cap is generous rather than tight, because it exists to bound a
         // runaway and not to shape the answer. 16 does not survive a reasoning
         // model: the budget covers reasoning tokens too, so gpt-5-nano spent
         // all of it thinking and finished on `length` with nothing to show.
         // The prompt is what keeps the reply short.
-        request
-            .unknown_fields
-            .insert(cap.into(), serde_json::json!(512));
+        match cap {
+            Cap::Unmodelled(spelling) => {
+                request
+                    .unknown_fields
+                    .insert(spelling.into(), serde_json::json!(512));
+            }
+            Cap::Typed => request.max_tokens = Some(Some(512)),
+        }
         request.unknown_fields.insert(
             "stream_options".into(),
             serde_json::json!({"include_usage": true}),

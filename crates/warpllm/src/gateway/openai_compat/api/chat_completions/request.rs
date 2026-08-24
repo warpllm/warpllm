@@ -103,13 +103,36 @@ pub(crate) fn ingest_request(
             .map(ingest_tool)
             .collect(),
         tool_choice: tool_choice.as_ref().and_then(ingest_tool_choice),
+        // Promoted but retained, like `top_k` below: this protocol's own
+        // renderer restores it from the residue, and the promotion exists so
+        // Anthropic's renderer can spell it `disable_parallel_tool_use`.
+        // Anything but a bool is left for the provider to judge.
+        parallel_tool_calls: compat.get("parallel_tool_calls").and_then(Value::as_bool),
         params: types::GenerationParams {
             // Both an absent field and an explicit `null` mean "no value" to
             // the gateway IR; which one it was rides the residue above so
             // rendering can restore it.
-            max_tokens: max_tokens.flatten(),
+            //
+            // `max_completion_tokens` is the OTHER spelling of this, and it is
+            // read from the residue rather than from a typed field because
+            // warpllm does not model it — OpenAI's newer families REQUIRE it
+            // and reject `max_tokens`, so a caller on those writes only this
+            // one. It has to be lifted here, at ingest, because a renderer for
+            // another protocol may not read this protocol's bag: leaving it
+            // there meant a request capped at 16 tokens reached Claude with the
+            // roster's ceiling instead, which for `claude-opus-5` is 128,000.
+            //
+            // It WINS over `max_tokens` when both are present, matching
+            // OpenAI's own deprecation of the older spelling. Both stay in the
+            // residue, so a same-protocol round trip is unchanged.
+            max_tokens: max_completion_tokens(&compat).or_else(|| max_tokens.flatten()),
             temperature: temperature.flatten(),
             top_p: top_p.flatten(),
+            // Lifted from the residue for the same reason as
+            // `max_completion_tokens`, and it stays there too: Anthropic takes
+            // `top_k` natively, and a renderer for that protocol may not read
+            // this one's bag.
+            top_k: extension_u32(&compat, "top_k"),
             // Both wire spellings mean the same list of sequences; the one
             // that arrived is retained above so rendering can restore it.
             stop: stop
@@ -138,6 +161,37 @@ pub(crate) fn ingest_request(
         }),
         ..Default::default()
     }
+}
+
+/// The cap under OpenAI's newer spelling, if the caller wrote one.
+///
+/// A free function rather than inline, because the shape is worth naming: this
+/// reads a field warpllm does not MODEL and promotes it anyway. The rule for
+/// what gets typed is "what the IR has a home for", and the IR's home here is
+/// `GenerationParams::max_tokens` — already occupied by the older spelling.
+/// Two wire names for one gateway field is exactly the case `ext` cannot serve,
+/// because `ext` is same-protocol only.
+///
+/// Anything but a number is left alone. A caller who wrote `"512"` or `null`
+/// gets it forwarded verbatim for OpenAI to judge, which is the passthrough
+/// rule everywhere else here — this promotes a value, it does not validate one.
+fn max_completion_tokens(compat: &UnknownFields) -> Option<u32> {
+    extension_u32(compat, "max_completion_tokens")
+}
+
+/// A whole-number field warpllm does not MODEL on this wire, read from the
+/// residue so a renderer for another protocol can see it.
+///
+/// Anything but a number in range is left alone, which is the passthrough rule
+/// everywhere else here: this promotes a value, it does not validate one. A
+/// caller who wrote `"40"` gets it forwarded verbatim for the provider to
+/// judge — and on a cross-protocol route, forwarded is exactly what it is not,
+/// which is the tradeoff of promoting only what this protocol can read.
+fn extension_u32(compat: &UnknownFields, key: &str) -> Option<u32> {
+    compat
+        .get(key)?
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
 }
 
 /// Keeps a typed field's wire value under this protocol's namespace, so
@@ -412,8 +466,16 @@ pub(crate) fn render_request(
         // reconstruct: a null the caller sent survives the round trip.
         temperature: take_typed(&mut unknown_fields, "temperature")
             .or_else(|| params.temperature.map(Some)),
-        max_tokens: take_typed(&mut unknown_fields, "max_tokens")
-            .or_else(|| params.max_tokens.map(Some)),
+        max_tokens: take_typed(&mut unknown_fields, "max_tokens").or_else(|| {
+            // Not reconstructed when the cap arrived under the OTHER spelling:
+            // `max_completion_tokens` is still in the residue about to be
+            // emitted, so writing `max_tokens` here would hand the caller back
+            // a field they never sent, in the spelling OpenAI deprecated — and
+            // to a model that rejects it.
+            (!unknown_fields.contains_key("max_completion_tokens"))
+                .then(|| params.max_tokens.map(Some))
+                .flatten()
+        }),
         top_p: take_typed(&mut unknown_fields, "top_p").or_else(|| params.top_p.map(Some)),
         stop: take_typed(&mut unknown_fields, "stop").or_else(|| {
             (!params.stop.is_empty()).then(|| Some(ChatCompletionStop::Many(params.stop.clone())))
@@ -897,6 +959,63 @@ mod tests {
             .unknown_fields
             .insert("vendor_tag".into(), json!("vt"));
         request
+    }
+
+    /// Promoting a field warpllm does not MODEL must not change what a
+    /// same-protocol caller gets back. Both spellings stay in the residue, so
+    /// the request that comes out is the request that went in.
+    ///
+    /// The failure mode this pins is specific and would be easy to introduce:
+    /// once `max_completion_tokens` fills `params.max_tokens`, a renderer that
+    /// reconstructs `max_tokens` from the gateway form hands the caller a field
+    /// they never wrote — in the spelling OpenAI deprecated, to a model that
+    /// rejects it.
+    #[test]
+    fn the_newer_cap_spelling_round_trips_without_gaining_the_older_one() {
+        for body in [
+            json!({"model": "gpt-5-nano", "messages": [{"role": "user", "content": "hi"}],
+                   "max_completion_tokens": 16}),
+            json!({"model": "gpt-5-nano", "messages": [{"role": "user", "content": "hi"}],
+                   "max_tokens": 4096, "max_completion_tokens": 16}),
+        ] {
+            let normalized = ingest_request(wire(body.clone()), "gpt-5-nano");
+            // Promoted, whichever spellings arrived: the newer one wins.
+            assert_eq!(normalized.params.max_tokens, Some(16), "{body}");
+            assert_eq!(
+                plain(&render_request(&normalized, "openai").unwrap()),
+                body,
+                "{body}"
+            );
+        }
+    }
+
+    /// A value that is not a number is forwarded for OpenAI to judge rather
+    /// than promoted or refused, which is the passthrough rule the rest of this
+    /// module follows. Promotion reads a value; it does not validate one.
+    #[test]
+    fn a_cap_that_is_not_a_number_is_left_for_the_provider() {
+        let body = json!({"model": "gpt-5-nano", "messages": [{"role": "user", "content": "hi"}],
+                          "max_completion_tokens": "512"});
+        let normalized = ingest_request(wire(body.clone()), "gpt-5-nano");
+        assert_eq!(normalized.params.max_tokens, None);
+        assert_eq!(plain(&render_request(&normalized, "openai").unwrap()), body);
+    }
+
+    /// `developer` normalizes to `Role::System` and comes back out spelled
+    /// `developer`. The gateway role is what a second protocol reads; the raw
+    /// spelling is what makes this round trip.
+    #[test]
+    fn a_developer_message_is_a_system_role_that_still_says_developer() {
+        let body = json!({
+            "model": "gpt-5-nano",
+            "messages": [
+                {"role": "developer", "content": "Answer in French."},
+                {"role": "user", "content": "hi"}
+            ]
+        });
+        let normalized = ingest_request(wire(body.clone()), "gpt-5-nano");
+        assert_eq!(normalized.messages[0].role, Role::System);
+        assert_eq!(plain(&render_request(&normalized, "openai").unwrap()), body);
     }
 
     /// An OpenAI-compatible request must survive normalization and come

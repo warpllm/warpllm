@@ -359,19 +359,24 @@ fn render_message(message: &types::Message, provider: &str) -> ChatCompletionRes
             // no rendering on this protocol at all; they can only arise
             // cross-protocol, which warpllm does not do yet.
             //
-            // THAT LAST SENTENCE EXPIRES WITH THE ANTHROPIC DISPATCH, and the
-            // casualty is specific enough to name: Anthropic requires a run of
-            // its own signed `thinking` blocks to come back UNTOUCHED alongside
-            // tool results. Ingest preserves the signature and the retained
-            // wire content, but neither reaches a caller here — the block is
-            // dropped, and `Protocol::may_read` correctly denies this renderer
-            // the `anthropic` bag — so a caller has nothing to echo, and the
-            // next request renders a `tool_use` turn with no `thinking` before
-            // it. Anthropic rejects that. Whoever wires the dispatch either
-            // carries the blocks in a caller-visible form that round trips with
-            // the signature intact, or refuses thinking for cross-protocol tool
-            // conversations. Dropping silently is the one option that is not
-            // available.
+            // THAT LAST SENTENCE HAS NOW EXPIRED — the dispatch is wired — and
+            // the casualty is specific enough to name: Anthropic requires a run
+            // of its own signed `thinking` blocks to come back UNTOUCHED
+            // alongside tool results. Ingest preserves the signature and the
+            // retained wire content, but neither reaches a caller here: the
+            // block is dropped, and `Protocol::may_read` correctly denies this
+            // renderer the `anthropic` bag. So a caller has nothing to echo,
+            // and the request carrying the results back would render a
+            // `tool_use` turn with no `thinking` before it, which Anthropic
+            // rejects.
+            //
+            // Of the two ways out that comment named, the SECOND is taken:
+            // `anthropic::…::request::ensure_renderable` refuses thinking
+            // paired with tools, at the first request rather than the second.
+            // Dropping silently was the option that was not available, and it
+            // is not what happens. Carrying the blocks in a caller-visible form
+            // that round trips with the signature intact is still the larger
+            // fix, and it is what would lift that refusal.
             _ => {}
         }
     }

@@ -26,6 +26,7 @@
 //! | tool arguments | a string of JSON | a decoded object | [`render_block`], which can fail |
 //! | reasoning depth | `reasoning_effort` | `output_config.effort` | [`render_output_config`] |
 //! | structured output | `response_format` | `output_config.format` | [`render_output_format`] |
+//! | parallel tool calls | `parallel_tool_calls` | inverted, on `tool_choice` | [`render_tool_choice_for`] |
 //! | `max_tokens` | optional | REQUIRED | [`resolve_max_tokens`] |
 
 use serde_json::Value;
@@ -59,6 +60,17 @@ use super::response::{control_of, ingest_block, object, plain, render_reasoning,
 /// the wire request without mapping it here is a compile error. Everything
 /// without a typed wire field — `top_k`, `metadata`, `service_tier` — rides
 /// `ext["anthropic"]` verbatim.
+// Dead until an Anthropic-shaped INGRESS exists — a `client.messages()`
+// entrypoint and a `/v1/messages` route on the server — which is out of scope
+// for #23. warpllm is CALLED in chat completions and only SPEAKS this protocol,
+// so the reverse direction has no caller: this function, and the whole `ingest_*` tree beneath it, are the half of
+// `request.rs` with nothing above them.
+//
+// On the ENTRY POINT rather than on its helpers, and that is the whole reason
+// three attributes cover what were twenty-eight warnings: an allowed item counts
+// as a live root, so everything it reaches is reachable again. A helper that goes
+// dead for its OWN reason still warns.
+#[allow(dead_code)]
 pub(crate) fn ingest_request(request: CreateMessageRequest, model: &str) -> types::ChatRequest {
     // Wire structs are plain serde data; serialization cannot fail.
     let body = plain(&request);
@@ -106,10 +118,18 @@ pub(crate) fn ingest_request(request: CreateMessageRequest, model: &str) -> type
             .map(ingest_tool)
             .collect(),
         tool_choice: tool_choice.as_ref().and_then(ingest_tool_choice),
+        parallel_tool_calls: tool_choice.as_ref().and_then(ingest_parallel_tool_calls),
         params: types::GenerationParams {
             max_tokens: Some(max_tokens),
             temperature,
             top_p,
+            // Typed on neither wire but promoted on both, so the two protocols
+            // agree about where it lives. Retained in the bag above as well,
+            // which is what keeps a same-protocol round trip byte-exact.
+            top_k: anthropic
+                .get("top_k")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok()),
             stop: stop_sequences.unwrap_or_default(),
         },
         response_format: output_config
@@ -248,6 +268,25 @@ fn ingest_tool(tool: &Tool) -> types::ToolDef {
     }
 }
 
+/// The caller's parallel-call setting, in the gateway's spelling.
+///
+/// INVERTED, which is the whole reason it is worth a function: this protocol
+/// disables, the gateway permits. Absent stays absent — writing a default here
+/// would claim the caller asked for something they left alone, and the flag
+/// only means anything when someone set it.
+fn ingest_parallel_tool_calls(choice: &ToolChoice) -> Option<bool> {
+    let disabled = match choice {
+        ToolChoice::Auto(mode) | ToolChoice::Any(mode) | ToolChoice::None(mode) => {
+            mode.disable_parallel_tool_use
+        }
+        ToolChoice::Tool(tool) => tool.disable_parallel_tool_use,
+        // An unknown tag keeps whatever it arrived with; its shape is not this
+        // crate's to interpret.
+        ToolChoice::Unknown(_) => None,
+    }?;
+    Some(!disabled)
+}
+
 fn ingest_tool_choice(choice: &ToolChoice) -> Option<types::ToolChoice> {
     match choice {
         ToolChoice::Auto(_) => Some(types::ToolChoice::Auto),
@@ -355,6 +394,15 @@ pub(crate) fn render_request(
                 .collect::<Result<Vec<_>>>()?,
         ),
     };
+    // This protocol takes `top_k` natively but warpllm gives it no typed wire
+    // field, so it goes back the way everything untyped here does — through
+    // the residue. What arrived wins, per this module's rule; the IR copy is
+    // what a caller on the OTHER protocol left, and there is no residue then.
+    if let Some(top_k) = params.top_k {
+        unknown_fields
+            .entry("top_k".to_string())
+            .or_insert_with(|| Value::from(top_k));
+    }
     Ok(CreateMessageRequest {
         model: request.model.clone(),
         max_tokens: resolve_max_tokens(request, max_output_tokens)?,
@@ -368,8 +416,7 @@ pub(crate) fn render_request(
             .or_else(|| (!params.stop.is_empty()).then(|| params.stop.clone())),
         stream: request.stream.then_some(true),
         tools,
-        tool_choice: take_typed(&mut unknown_fields, "tool_choice")
-            .or_else(|| request.tool_choice.as_ref().map(render_tool_choice)),
+        tool_choice: render_tool_choice_for(request, &mut unknown_fields),
         thinking: take_typed(&mut unknown_fields, "thinking")
             .or_else(|| request.reasoning.as_ref().and_then(render_thinking)),
         output_config: render_output_config(request, &mut unknown_fields)?,
@@ -410,6 +457,41 @@ fn resolve_max_tokens(request: &types::ChatRequest, max_output_tokens: Option<u3
 /// Per-value refusals are not here — a tool with no schema, an unparseable
 /// argument string, a JSON mode with no schema — because each is decided where
 /// the value is converted and would have to be found twice to be checked here.
+/// Whether this request was INGESTED on this protocol rather than translated
+/// onto it.
+///
+/// The distinction is what separates a caller who holds Anthropic's retained
+/// residue — signed thinking blocks and all — from one who was handed a
+/// chat-completions reply with nothing to echo. A request with no recorded
+/// source was assembled rather than ingested, and cannot be shown to hold the
+/// residue, so it is treated as the caller who does not.
+fn arrived_on_this_protocol(request: &types::ChatRequest) -> bool {
+    request
+        .source
+        .as_ref()
+        .is_some_and(|source| source.protocol == Protocol::Anthropic)
+}
+
+/// Whether this request turns extended thinking ON.
+///
+/// Asked once so that a refusal cannot disagree with what would actually be
+/// sent: the two spellings [`thinking_arm`] and [`render_output_config`]
+/// render between them are both thinking, and either one obliges the caller to
+/// return the signed blocks.
+///
+/// An explicit off is not thinking, and neither is a config carrying nothing
+/// renderable — refusing those would turn away callers who said the opposite
+/// of the thing being refused.
+fn thinks(request: &types::ChatRequest) -> bool {
+    let Some(reasoning) = &request.reasoning else {
+        return false;
+    };
+    reasoning.enabled != Some(false)
+        && (reasoning.enabled.is_some()
+            || reasoning.budget_tokens.is_some()
+            || reasoning.effort.is_some())
+}
+
 fn ensure_renderable(request: &types::ChatRequest) -> Result<()> {
     // No audio block exists on this protocol, in any shape. Dropping one would
     // send a request that reads as if the caller never attached the audio, and
@@ -426,6 +508,36 @@ fn ensure_renderable(request: &types::ChatRequest) -> Result<()> {
     if request.cache.is_some() {
         return Err(Error::NotImplemented(
             "a request-level cache hint on the anthropic renderer",
+        ));
+    }
+    // Anthropic requires its own signed `thinking` blocks to come back
+    // UNTOUCHED in the assistant turn that carries a `tool_use` — the turn must
+    // START with one — and a chat-completions caller has nowhere to keep them.
+    // The openai_compat renderer drops the block, and `Protocol::may_read`
+    // correctly denies it the `anthropic` bag the signature was retained in, so
+    // nothing a caller can echo ever reaches them.
+    //
+    // Which means the conversation cannot COMPLETE. The first exchange looks
+    // fine and answers with tool calls; the request carrying the results back
+    // has no thinking block to put before them and Anthropic rejects it. So the
+    // refusal is here, at the first request, rather than at the second: a
+    // caller told now loses only a turn they could not have used, and a caller
+    // told later has already built the loop around it.
+    //
+    // The counterpart comment in `openai_compat::…::response` records the other
+    // half of this and says dropping silently is the one option not available.
+    // This is that promise being kept. Carrying the blocks in a caller-visible,
+    // round-trippable form is the larger fix that would lift the refusal.
+    //
+    // And ONLY for a caller who cannot carry them. A request that ARRIVED on
+    // this protocol keeps its signed blocks in the retained residue and hands
+    // them straight back untouched, so the loop was never broken for them —
+    // refusing it would turn away the one caller this all works for.
+    if !arrived_on_this_protocol(request) && !request.tools.is_empty() && thinks(request) {
+        return Err(Error::NotImplemented(
+            "extended thinking with tools on the anthropic renderer: Anthropic \
+             wants its signed thinking blocks back alongside the tool results \
+             and chat completions has no field to carry them",
         ));
     }
     // Anthropic's base64 source REQUIRES a media type — `application/pdf`,
@@ -822,6 +934,55 @@ fn render_tool(tool: &types::ToolDef) -> Result<Tool> {
     }))
 }
 
+/// This protocol's tool choice, carrying the caller's parallel-call setting.
+///
+/// `parallel_tool_calls: false` has an exact equivalent here, but it is not a
+/// field of its own: Anthropic spells it inverted, as
+/// `disable_parallel_tool_use` hanging off `tool_choice`. So a caller who
+/// forbade parallel calls without naming a choice needs one synthesized, and
+/// `auto` is the honest synthesis — it IS this protocol's default, so writing
+/// it changes nothing except giving the flag somewhere to sit.
+///
+/// A retained residue choice wins untouched, per this module's prefer-what-
+/// arrived rule: it arrived on this protocol and already carries the flag in
+/// this protocol's own spelling.
+fn render_tool_choice_for(
+    request: &types::ChatRequest,
+    unknown_fields: &mut UnknownFields,
+) -> Option<ToolChoice> {
+    if let Some(retained) = take_typed(unknown_fields, "tool_choice") {
+        return Some(retained);
+    }
+    let mut choice = match &request.tool_choice {
+        Some(choice) => render_tool_choice(choice),
+        // Nothing to say about parallelism, or nothing to say it ABOUT.
+        // Synthesizing a choice for a caller who declared no tools would hand
+        // Anthropic a `tool_choice` with nothing to apply it to — a shape it
+        // refuses, and one this request did not have before it was translated.
+        None if request.parallel_tool_calls != Some(false) || request.tools.is_empty() => {
+            return None;
+        }
+        None => ToolChoice::Auto(ToolChoiceMode::default()),
+    };
+    if request.parallel_tool_calls == Some(false) {
+        match &mut choice {
+            ToolChoice::Auto(mode) | ToolChoice::Any(mode) => {
+                mode.disable_parallel_tool_use = Some(true);
+            }
+            ToolChoice::Tool(tool) => tool.disable_parallel_tool_use = Some(true),
+            // `none` forbids tool calls outright, so "not several at once" has
+            // nothing left to constrain, and Anthropic's `none` documents no
+            // such field. Writing it anyway risks a refusal for a request that
+            // already means everything the caller asked for.
+            ToolChoice::None(_) => {}
+            // A tag this crate does not know keeps the shape it arrived with;
+            // reaching into it would be guessing at a field nobody documented.
+            ToolChoice::Unknown(_) => {}
+        }
+    }
+    Some(choice)
+}
+
 fn render_tool_choice(choice: &types::ToolChoice) -> ToolChoice {
     match choice {
         types::ToolChoice::Auto => ToolChoice::Auto(ToolChoiceMode::default()),
@@ -1150,8 +1311,7 @@ mod tests {
                         "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
                     }
                 }],
-                "tool_choice": "auto",
-                "reasoning_effort": "medium"
+                "tool_choice": "auto"
             }))
             .unwrap(),
             "claude-opus-5",
@@ -1193,10 +1353,84 @@ mod tests {
                     "description": "current weather",
                     "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}
                 }],
-                "tool_choice": {"type": "auto"},
-                "output_config": {"effort": "medium"}
+                "tool_choice": {"type": "auto"}
             })
         );
+    }
+
+    /// Thinking and tools cannot round trip on this route, so the pair is
+    /// refused rather than sent.
+    ///
+    /// Anthropic wants the assistant turn holding a `tool_use` to START with
+    /// its own signed `thinking` block, and a chat-completions caller is never
+    /// given one to return — the reply renderer drops it and `may_read` denies
+    /// it the bag the signature was kept in. Sent anyway, the FIRST exchange
+    /// succeeds and the second is rejected upstream, which is the shape this
+    /// fixture used to have: it asked for `reasoning_effort` alongside tools
+    /// and asserted the result was a valid Anthropic body. It was not.
+    #[test]
+    fn thinking_with_tools_is_refused_rather_than_sent_to_be_rejected() {
+        let mut request = openai_tool_conversation();
+        request.reasoning = Some(types::ReasoningConfig {
+            effort: Some("medium".into()),
+            ..Default::default()
+        });
+        assert!(matches!(
+            render_request(&request, "anthropic", None),
+            Err(Error::NotImplemented(_))
+        ));
+
+        // Either spelling of thinking, since either obliges the caller to
+        // return blocks they were never handed.
+        request.reasoning = Some(types::ReasoningConfig {
+            budget_tokens: Some(4096),
+            ..Default::default()
+        });
+        assert!(matches!(
+            render_request(&request, "anthropic", None),
+            Err(Error::NotImplemented(_))
+        ));
+    }
+
+    /// The refusal is about the PAIR. Tools without thinking is the ordinary
+    /// tool call this whole path exists to serve, and thinking without tools
+    /// has no blocks to hand back, so neither is turned away.
+    #[test]
+    fn thinking_and_tools_are_each_fine_alone() {
+        assert!(render_request(&openai_tool_conversation(), "anthropic", None).is_ok());
+
+        let mut thinking_only = openai_tool_conversation();
+        thinking_only.tools.clear();
+        thinking_only.tool_choice = None;
+        thinking_only.reasoning = Some(types::ReasoningConfig {
+            effort: Some("medium".into()),
+            ..Default::default()
+        });
+        assert!(render_request(&thinking_only, "anthropic", None).is_ok());
+    }
+
+    /// The refusal is for callers who were TRANSLATED onto this protocol. One
+    /// who arrived on it keeps Anthropic's signed blocks in the retained
+    /// residue and hands them back untouched, so the loop this guards has never
+    /// been broken for them — and `maximal_body` is exactly that caller, with
+    /// `thinking` and `tools` together in one request.
+    #[test]
+    fn thinking_with_tools_is_fine_for_a_caller_who_arrived_on_this_protocol() {
+        let native = ingest_request(wire(maximal_body()), "claude-opus-5");
+        assert!(!native.tools.is_empty() && thinks(&native), "the fixture");
+        assert!(render_request(&native, "anthropic", None).is_ok());
+    }
+
+    /// An explicit "don't think" is not thinking. Refusing it would turn away a
+    /// caller who asked for exactly the thing that makes the pair safe.
+    #[test]
+    fn thinking_switched_off_does_not_block_tools() {
+        let mut request = openai_tool_conversation();
+        request.reasoning = Some(types::ReasoningConfig {
+            enabled: Some(false),
+            ..Default::default()
+        });
+        assert!(render_request(&request, "anthropic", None).is_ok());
     }
 
     /// The other direction, closing the loop: Anthropic's reply renders back as
@@ -1326,6 +1560,136 @@ mod tests {
         assert_eq!(body["top_k"], json!(40));
         assert!(body.get("seed").is_none(), "{body}");
         assert!(body.get("logit_bias").is_none(), "{body}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Controls the caller wrote in the OTHER protocol's spelling.
+    //
+    // The seam these guard is the one `ext` cannot cross: a value left in
+    // `ext["openai_compat"]` is a value `merged_ext` here is forbidden to read,
+    // so anything not promoted at ingest reaches Anthropic as if the caller
+    // never wrote it — silently, since the provider never sees it to reject it.
+    // -----------------------------------------------------------------------
+
+    /// An OpenAI-shaped request routed to Anthropic, with `extra` merged in at
+    /// the top level, rendered onto this protocol's wire.
+    fn rendered_from_openai(extra: Value) -> Value {
+        let mut body = json!({
+            "model": "anthropic/claude-opus-5",
+            "max_tokens": 512,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "weather", "parameters": {"type": "object"}}
+            }]
+        });
+        let object = body.as_object_mut().unwrap();
+        for (key, value) in extra.as_object().unwrap() {
+            object.insert(key.clone(), value.clone());
+        }
+        rendered(&ingest_openai(
+            serde_json::from_value(body).unwrap(),
+            "claude-opus-5",
+        ))
+    }
+
+    /// `parallel_tool_calls: false` is a REFUSAL, and Anthropic can honor it —
+    /// inverted, and hanging off `tool_choice` rather than standing alone.
+    /// Dropped, the model is free to open several calls at once for a caller
+    /// who explicitly forbade it, and nothing on the wire says so.
+    #[test]
+    fn forbidding_parallel_calls_crosses_the_protocol_seam() {
+        let body = rendered_from_openai(json!({
+            "parallel_tool_calls": false,
+            "tool_choice": "required"
+        }));
+        assert_eq!(body["tool_choice"]["type"], json!("any"), "{body}");
+        assert_eq!(
+            body["tool_choice"]["disable_parallel_tool_use"],
+            json!(true),
+            "{body}"
+        );
+    }
+
+    /// The flag has nowhere to sit when the caller named no choice, so one is
+    /// synthesized — and `auto` is the honest synthesis, since it is what
+    /// Anthropic does with no `tool_choice` at all.
+    #[test]
+    fn forbidding_parallel_calls_synthesizes_a_choice_to_carry_it() {
+        let body = rendered_from_openai(json!({"parallel_tool_calls": false}));
+        assert_eq!(body["tool_choice"]["type"], json!("auto"), "{body}");
+        assert_eq!(
+            body["tool_choice"]["disable_parallel_tool_use"],
+            json!(true),
+            "{body}"
+        );
+    }
+
+    /// `true` is what Anthropic already does, so it writes nothing. A request
+    /// that grew a `tool_choice` nobody asked for would be a different request.
+    #[test]
+    fn permitting_parallel_calls_says_nothing() {
+        let body = rendered_from_openai(json!({"parallel_tool_calls": true}));
+        assert!(body.get("tool_choice").is_none(), "{body}");
+    }
+
+    /// `none` forbids every tool call, so there is no parallelism left to
+    /// forbid — and Anthropic's `none` takes no such field. A renderer that
+    /// stamped the flag onto whichever choice it happened to be holding turns
+    /// a request the caller was allowed to write into an upstream refusal.
+    #[test]
+    fn forbidding_parallel_calls_adds_nothing_to_a_choice_of_none() {
+        let body = rendered_from_openai(json!({
+            "parallel_tool_calls": false,
+            "tool_choice": "none"
+        }));
+        assert_eq!(body["tool_choice"]["type"], json!("none"), "{body}");
+        assert!(
+            body["tool_choice"]
+                .get("disable_parallel_tool_use")
+                .is_none(),
+            "{body}"
+        );
+    }
+
+    /// A choice is synthesized to CARRY the flag, so there has to be something
+    /// for it to govern. With no tools declared there is not, and inventing a
+    /// `tool_choice` anyway would attach one to a request that has nothing to
+    /// choose between — a shape Anthropic refuses, and one this request did not
+    /// have until warpllm translated it.
+    #[test]
+    fn no_choice_is_synthesized_for_a_request_that_declares_no_tools() {
+        let mut body = json!({
+            "model": "anthropic/claude-opus-5",
+            "max_tokens": 512,
+            "messages": [{"role": "user", "content": "hi"}],
+            "parallel_tool_calls": false
+        });
+        // Deliberately NOT `rendered_from_openai`, which always declares a tool.
+        let rendered = rendered(&ingest_openai(
+            serde_json::from_value(body.take()).unwrap(),
+            "claude-opus-5",
+        ));
+        assert!(rendered.get("tool_choice").is_none(), "{rendered}");
+    }
+
+    /// `top_k` is typed on NEITHER wire — a provider extension over there, an
+    /// untyped native field here — which is exactly why it has to be promoted
+    /// to cross. Left in the openai bag it would be dropped on the floor.
+    #[test]
+    fn top_k_crosses_the_protocol_seam() {
+        assert_eq!(
+            rendered_from_openai(json!({"top_k": 40}))["top_k"],
+            json!(40)
+        );
+    }
+
+    /// Promotion reads a number, not a shape. Anything else stays where it was
+    /// — this promotes a value, it does not coerce one.
+    #[test]
+    fn a_non_numeric_top_k_is_not_promoted() {
+        let body = rendered_from_openai(json!({"top_k": "40"}));
+        assert!(body.get("top_k").is_none(), "{body}");
     }
 
     // -----------------------------------------------------------------------

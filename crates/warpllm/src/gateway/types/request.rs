@@ -18,6 +18,18 @@ pub(crate) struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
 
+    /// Whether the model may open more than one tool call in a turn.
+    ///
+    /// Typed on neither wire — chat completions spells it `parallel_tool_calls`
+    /// among its unknown fields, Anthropic spells it inverted as
+    /// `disable_parallel_tool_use` hanging off `tool_choice` — and promoted
+    /// anyway, for the reason [`GenerationParams`] gives: `ext` is
+    /// same-protocol only, so a value left there is a value the OTHER
+    /// protocol's renderer is forbidden to see. Left there, a caller who
+    /// forbade parallel calls got them anyway.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+
     #[serde(default)]
     pub params: GenerationParams,
 
@@ -42,8 +54,12 @@ pub(crate) struct ChatRequest {
     pub ext: ProviderExt,
 
     /// Where this request came from; see [`IngestSource`].
+    ///
+    /// Read by the Anthropic renderer to tell a caller who arrived on that
+    /// protocol — and therefore still holds its retained residue — from one
+    /// who was translated onto it and holds nothing. The passthrough fast path
+    /// is the other reader this was staged for.
     #[serde(skip)]
-    #[allow(dead_code)] // staged: read once the passthrough fast path lands
     pub source: Option<IngestSource>,
 }
 
@@ -75,15 +91,23 @@ pub(crate) enum ToolChoice {
     Tool { name: String },
 }
 
-/// Store what the caller sent, unconverted. Only the params with a typed
-/// home on every supported wire live here; everything else (seed, top_k,
-/// penalties, ...) rides the namespaced ext bags untouched until a second
-/// protocol needs to render them differently.
+/// Store what the caller sent, unconverted. A param lives here when a renderer
+/// for ANOTHER protocol has to read it; everything else (seed, penalties, ...)
+/// rides the namespaced ext bags untouched until that becomes true of it too.
+///
+/// A typed wire field is the usual reason, but not the test — `top_k` is typed
+/// on neither wire and still belongs here, because `ext` is same-protocol only
+/// and [`Protocol::may_read`](crate::types::Protocol::may_read) forbids the
+/// other protocol's renderer from reaching into this one's bag. That is the
+/// same rule that promotes `max_completion_tokens` at ingest.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct GenerationParams {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
+    /// Anthropic takes this natively; chat completions carries it as a
+    /// provider extension. Promoted so the routed protocol can honor it.
+    pub top_k: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stop: Vec<String>,
 }

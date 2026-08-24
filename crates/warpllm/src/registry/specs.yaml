@@ -131,6 +131,21 @@
 #                                          2026-08-16).
 #   openai_compat_responses                OpenAI's Responses API. Not
 #                                          implemented yet.
+#   anthropic_messages                     Anthropic's own `/messages`: one
+#                                          request, one whole reply.
+#                                          IMPLEMENTED. A different PROTOCOL
+#                                          from the three above rather than
+#                                          another endpoint in the same one, so
+#                                          a chat-completions request routed
+#                                          here is translated both ways.
+#   anthropic_messages_stream              The same, streamed as server-sent
+#                                          events. IMPLEMENTED. Anthropic
+#                                          documents `stream` on the endpoint
+#                                          rather than per model, so it is
+#                                          listed for every model that serves
+#                                          `/messages` at all:
+#                                          <https://platform.claude.com/docs/en/api/messages-streaming>
+#                                          (checked 2026-08-24).
 #
 # Rules EVERY roster is held to
 # -----------------------------
@@ -204,6 +219,136 @@
 # See `examples/warpllm.yaml` for a worked one.
 
 providers:
+  # <https://platform.claude.com/docs/en/about-claude/models/overview> and
+  # <https://platform.claude.com/docs/en/about-claude/model-deprecations>
+  # (both checked 2026-08-24). Every figure below is from the first; every
+  # judgement about a model's lifecycle is from the second.
+  #
+  # The first provider here that is NOT an OpenAI-compatible host. It speaks
+  # Anthropic's own `/messages`, so a chat-completions request is translated on
+  # the way out and its reply on the way back, and its credential goes in
+  # `x-api-key` rather than `Authorization` — see `Credentials::scheme`.
+  #
+  # `deprecation_date` is absent on EVERY entry, and that is a reading of
+  # Anthropic's table rather than an oversight. What it publishes for an active
+  # model is "Tentative retirement date: not sooner than <date>" with
+  # "Deprecated: N/A" — a FLOOR on when retirement could be announced, not an
+  # announcement. This field records "the day the provider stops serving this
+  # model, when one has been announced", so a floor written here would read as
+  # a schedule that does not exist. Every model below is state Active.
+  #
+  # Windows and output ceilings are the published figures verbatim: 1M and 128k
+  # for the Fable/Opus 5/Sonnet 5 generation and for Opus 4.8/4.7/4.6 and
+  # Sonnet 4.6; 200k and 64k for Haiku 4.5, Opus 4.5 and Sonnet 4.5. The
+  # `max_output` column is the SYNCHRONOUS Messages API figure, which is the
+  # surface registered here — the Batches API reaches 300k behind a beta
+  # header on some of these, and that is a different surface warpllm does not
+  # serve.
+  #
+  # No `max_concurrent_requests` on any entry: Anthropic publishes rate limits
+  # per usage tier and per model in requests and tokens per minute, not a
+  # concurrency figure. <https://platform.claude.com/docs/en/api/rate-limits>
+  #
+  # `model:` appears only on the three pre-4.6 entries. Anthropic's aliases for
+  # those resolve to ONE dated snapshot each and are stable pointers rather
+  # than moving ones, so the alias is what callers name and the dated id is
+  # what ships upstream. From the 4.6 generation on, the id is dateless AND
+  # pinned, so there is no second name to record.
+  #
+  # WORTH KNOWING, and deliberately not enforced: `temperature`, `top_p` and
+  # `top_k` are deprecated on Claude Opus 4.7 and later, and a non-default
+  # value returns a 400. warpllm passes them through — capabilities describe a
+  # model and never reshape a request, and dropping a parameter the caller
+  # wrote would change the request rather than translate it. An OpenAI-shaped
+  # request carrying `temperature` therefore fails against those models, by
+  # the provider's decision and with the provider's message.
+  #
+  # Deliberately absent, checked 2026-08-24:
+  # - claude-mythos-5 and claude-mythos-preview: invitation-only under Project
+  #   Glasswing with no self-serve sign-up, so a registered name would resolve
+  #   and then 403 for almost everyone. The preview is additionally deprecated.
+  # - Every retired model: the whole claude-3 family, claude-opus-4,
+  #   claude-sonnet-4, claude-opus-4-1. Requests to them fail upstream.
+  # - The dated ids of the three aliased models, per the roster's rule that
+  #   aliases are what callers name.
+  anthropic:
+    base_url: "https://api.anthropic.com/v1"
+    env_api_key: ANTHROPIC_API_KEY
+    models:
+      anthropic/claude-fable-5:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
+      anthropic/claude-haiku-4-5:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        model: claude-haiku-4-5-20251001
+        capabilities:
+          max_input_tokens: 200000
+          max_output_tokens: 64000
+      anthropic/claude-opus-4-5:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        model: claude-opus-4-5-20251101
+        capabilities:
+          max_input_tokens: 200000
+          max_output_tokens: 64000
+      anthropic/claude-opus-4-6:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
+      anthropic/claude-opus-4-7:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
+      anthropic/claude-opus-4-8:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
+      anthropic/claude-opus-5:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
+      anthropic/claude-sonnet-4-5:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        model: claude-sonnet-4-5-20250929
+        capabilities:
+          max_input_tokens: 200000
+          max_output_tokens: 64000
+      anthropic/claude-sonnet-4-6:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
+      anthropic/claude-sonnet-5:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
+
   # <https://api-docs.deepseek.com/api/create-chat-completion> (checked
   # 2026-07-24). The legacy `deepseek-chat` / `deepseek-reasoner` names were
   # discontinued 2026-07-24 and map to V4-Flash modes.

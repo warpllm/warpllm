@@ -59,12 +59,9 @@ impl Credentials {
     /// `Authorization: Bearer ` upstream and report back whatever the provider
     /// makes of it.
     ///
-    /// The scheme is chosen HERE, and it is [`Authenticator::bearer`] for
-    /// everything, because every provider on the roster is an OpenAI-compatible
-    /// host that reads `Authorization`. [`Self::key_for`] owns the source and
-    /// says nothing about presentation; this is the seam where the table that
-    /// makes the scheme a real choice goes, with the first provider that is not
-    /// bearer.
+    /// The scheme is chosen HERE, by [`Self::scheme`]. [`Self::key_for`] owns
+    /// the SOURCE and says nothing about presentation; the two are separate
+    /// because they vary independently.
     ///
     /// Reads against `registry` rather than the shipped roster, because that is
     /// per client now: a key for a provider only this client's roster file has
@@ -84,7 +81,7 @@ impl Credentials {
                 .filter_map(|provider| {
                     Some((
                         provider.name(),
-                        Authenticator::bearer(Self::key_for(provider, None)?),
+                        Self::scheme(provider, Self::key_for(provider, None)?),
                     ))
                 })
                 .collect(),
@@ -95,7 +92,7 @@ impl Credentials {
                         .expect("Client::new refuses a declaration the roster does not hold");
                     Some((
                         provider.name(),
-                        Authenticator::bearer(Self::key_for(provider, Some(entry))?),
+                        Self::scheme(provider, Self::key_for(provider, Some(entry))?),
                     ))
                 })
                 .collect(),
@@ -112,6 +109,36 @@ impl Credentials {
             tracing::info!(providers = ?credentials.names(), "providers available");
         }
         credentials
+    }
+
+    /// How this provider's secret goes on the wire.
+    ///
+    /// Keyed on the PROVIDER and not on the protocol it speaks, which the two
+    /// cases either side of Anthropic settle between them: OpenCode Zen
+    /// re-hosts Claude and reads a bearer header, and Vertex (#25) will serve
+    /// Anthropic's Messages surface and Google's own `generateContent` under
+    /// ONE OAuth token. A scheme filed under a protocol gets both wrong, and
+    /// would have to build Vertex's credential twice.
+    ///
+    /// Bearer is the fallback rather than an error, and that is a deliberate
+    /// exception to this crate's habit of refusing what it cannot name. Two
+    /// reasons: it is what an OpenAI-compatible host reads and all but one
+    /// provider on the roster is one, and a caller may bring a roster of their
+    /// own naming providers this table has never heard of — refusing those
+    /// would break the feature that exists to serve them.
+    ///
+    /// It is also the limitation worth knowing about. A host serving
+    /// Anthropic's surface under a name other than `anthropic` — a proxy, a
+    /// self-hosted box — is sent a bearer header and answered with a 401,
+    /// because the roster has no way to SAY which scheme it wants. Making it
+    /// declarable is a follow-up; the shipped roster has one Anthropic host
+    /// and it is called `anthropic`.
+    fn scheme(provider: &ProviderSpec, secret: String) -> Authenticator {
+        match provider.name() {
+            // Anthropic reads `x-api-key` and refuses `Authorization`.
+            "anthropic" => Authenticator::anthropic_api_key(secret),
+            _ => Authenticator::bearer(secret),
+        }
     }
 
     /// One provider's key, or `None` when no source held a non-empty one.

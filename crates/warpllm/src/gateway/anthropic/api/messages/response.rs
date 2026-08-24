@@ -385,6 +385,17 @@ fn restore_count(
 
 /// Infallible: wire fields restore from ext, and anything corrupted past its
 /// wire type falls back to dropping that field rather than failing a render.
+// Dead until an Anthropic-shaped INGRESS exists — a `client.messages()`
+// entrypoint and a `/v1/messages` route on the server — which is out of scope
+// for #23. warpllm is CALLED in chat completions and only SPEAKS this protocol,
+// so the reverse direction has no caller: this function is the inverse of the `ingest_response` that `exchange`
+// does call.
+//
+// On the ENTRY POINT rather than on its helpers, and that is the whole reason
+// three attributes cover what were twenty-eight warnings: an allowed item counts
+// as a live root, so everything it reaches is reachable again. A helper that goes
+// dead for its OWN reason still warns.
+#[allow(dead_code)]
 pub(crate) fn render_response(response: &types::ChatResponse, provider: &str) -> Message {
     let mut unknown_fields = merged_ext(&response.ext, provider);
     // One reply, one completion — see this module's docs. A response carrying

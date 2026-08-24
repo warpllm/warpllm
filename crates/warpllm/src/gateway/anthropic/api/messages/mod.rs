@@ -13,12 +13,13 @@ mod request;
 mod response;
 mod stream;
 
-// Nothing calls these yet. warpllm is CALLED in another protocol and only
-// SPEAKS this one, so `ingest_request` and `render_response` wait on an
-// Anthropic-shaped ingress, and `exchange` waits on the client dispatch. The
-// barrel names the surface's whole vocabulary regardless — a re-export list
-// tracking today's callers would churn on every wiring change, and the two
-// unused halves are what the round-trip tests are written against.
+// `exchange` and `exchange_stream` are reached from `client.rs`; the rest are
+// not, and two of them cannot be yet. warpllm is CALLED in another protocol and
+// only SPEAKS this one, so `ingest_request` and `render_response` wait on an
+// Anthropic-shaped ingress — the direction that is out of scope. The barrel
+// names the surface's whole vocabulary regardless: a re-export list tracking
+// today's callers would churn on every wiring change, and those two halves are
+// what the round-trip tests are written against.
 #[allow(unused_imports)]
 pub(crate) use self::{
     exchange::{ChatChunkStream, exchange, exchange_stream},

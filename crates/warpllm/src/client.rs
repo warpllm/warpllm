@@ -4,16 +4,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::Value;
+
 use crate::auth::Authenticator;
 use crate::config::{ClientConfig, DEFAULT_TIMEOUT_SECS};
 use crate::credentials::Credentials;
 use crate::error::{Error, Result};
-use crate::gateway::openai_compat;
+use crate::gateway::{anthropic, openai_compat};
 use crate::protocol::openai_compat::chat_completions::types::{
     CreateChatCompletionRequest, CreateChatCompletionResponse, CreateChatCompletionStreamResponse,
 };
 use crate::registry::{self, ModelSpec, ProviderSpec, Registry};
-use crate::types::Api;
+use crate::types::{Api, Protocol};
 
 /// Where a roster file is named when [`ClientConfig::specs_path`] does not name
 /// one. The last resort before the shipped roster alone.
@@ -35,10 +37,11 @@ pub struct Client {
 }
 
 /// Everything one validated request needs to reach its model: where to send it,
-/// what the model is called upstream, and what to authenticate with.
+/// what the model is called upstream, what to authenticate with, and which
+/// protocol to speak on the way out.
 ///
-/// A struct rather than a tuple, because both call sites read all three by
-/// name and a fourth would otherwise renumber them.
+/// A struct rather than a tuple, because both call sites read all four by
+/// name and a fifth would otherwise renumber them.
 struct ModelDefinition<'a> {
     provider: &'a ProviderSpec,
     model: &'a ModelSpec,
@@ -46,6 +49,100 @@ struct ModelDefinition<'a> {
     /// so the request goes out with no `Authorization` header rather than with
     /// an empty one.
     auth: Option<&'a Authenticator>,
+    egress: Egress,
+}
+
+/// Which protocol a routed request is spoken in UPSTREAM.
+///
+/// Not the protocol warpllm was called in — that is fixed by the entrypoint,
+/// and for both entrypoints here it is openai_compat by signature. This is the
+/// other half, and it is a property of the routed MODEL:
+/// `anthropic/claude-opus-5` serves `anthropic_messages` and nothing else, so a
+/// chat-completions request for it is translated on the way out and its reply
+/// on the way back.
+///
+/// A two-variant enum rather than dispatching on [`Api`] at the call site.
+/// `Api` has five variants and only two can reach either entrypoint, so a match
+/// on it would carry arms for cases the validation just ruled out — and the
+/// admission list already knows which module serves which surface. Pairing the
+/// two in [`Client::WHOLE_REPLY`] and [`Client::STREAMED`] makes those arms
+/// unrepresentable rather than unreachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Egress {
+    OpenAiCompat,
+    Anthropic,
+}
+
+/// Refuses a request whose meaning the routed protocol has no way to carry.
+///
+/// SILENCE is the failure this exists to prevent. warpllm's contract everywhere
+/// else is passthrough — forward what the caller wrote, let the provider judge
+/// it — and that contract quietly loses its second half on a translated route:
+/// a field the provider never receives is a field the provider cannot reject.
+/// `n: 2` would come back as one choice, indistinguishable from a model that
+/// ignored the request.
+///
+/// It sits at DISPATCH rather than in the Anthropic renderer because of where
+/// the value lives. `n` rides `ext["openai_compat"]`, and
+/// [`Protocol::may_read`] forbids that renderer from ever seeing it — by
+/// design, since another protocol's bag is exactly what a renderer must not
+/// read. Dispatch is the one layer above both.
+///
+/// Only what CHANGES the answer is refused, and only when it cannot be
+/// translated. `top_k` and `parallel_tool_calls` have equivalents on the far
+/// side and are promoted at ingest and rendered, not refused.
+fn reject_untranslatable(request: &crate::gateway::types::ChatRequest) -> Result<()> {
+    let Some(bag) = request.ext.get(Protocol::OpenAiCompat.as_str()) else {
+        return Ok(());
+    };
+    for (field, means_it) in UNTRANSLATABLE {
+        if bag.get(field).is_some_and(means_it) {
+            return Err(Error::InvalidInput(format!(
+                "`{field}` has no equivalent on Anthropic's Messages API, which is what \
+                 serves this model; warpllm refuses it rather than answering as though \
+                 it were never written"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The fields chat completions can state, Anthropic cannot, and that change the
+/// answer or its shape — each paired with the test for whether the caller
+/// actually MEANT it.
+///
+/// The predicate is what keeps the list from being blunt. Every one of these
+/// has a value meaning "no opinion" — zero penalties, `logprobs: false`, an
+/// empty bias map, one choice — and those are exactly what an SDK fills in by
+/// default. Rejecting on the KEY would turn away requests that ask for nothing,
+/// which is most of them.
+///
+/// A DENY list and not an allow list, deliberately. An allow list would also
+/// refuse every harmless field a caller or a future SDK sends (`user`, `store`,
+/// a provider's own extension), and warpllm's whole contract is that those ride
+/// through untouched. The cost is that this list has to be maintained: a field
+/// nobody adds here is still dropped in silence, which is the same failure this
+/// function exists to end.
+type MeansIt = fn(&Value) -> bool;
+const UNTRANSLATABLE: &[(&str, MeansIt)] = &[
+    ("n", |value| value.as_u64().is_some_and(|n| n > 1)),
+    ("frequency_penalty", nonzero),
+    ("presence_penalty", nonzero),
+    ("logprobs", |value| value == &Value::Bool(true)),
+    ("top_logprobs", |value| {
+        value.as_u64().is_some_and(|count| count > 0)
+    }),
+    ("logit_bias", |value| {
+        value.as_object().is_some_and(|bias| !bias.is_empty())
+    }),
+    // Unlike the rest, ANY value means it: `seed` exists only to ask for
+    // reproducibility, and a caller who believes they have it and does not is
+    // worse off than one told plainly that they cannot.
+    ("seed", Value::is_number),
+];
+
+fn nonzero(value: &Value) -> bool {
+    value.as_f64().is_some_and(|penalty| penalty != 0.0)
 }
 
 impl Client {
@@ -191,11 +288,39 @@ impl Client {
         Ok(())
     }
 
+    /// The surfaces a whole-reply request may be served by, each with the
+    /// protocol that serves it.
+    ///
+    /// Order is preference, and it only matters for a model that lists both —
+    /// nothing on the roster does, and a model that did would be one host
+    /// offering the same completion two ways. Chat completions first, because
+    /// it is the protocol the caller is already speaking and needs no
+    /// translation.
+    const WHOLE_REPLY: &'static [(Api, Egress)] = &[
+        (Api::OpenAiCompatChatCompletions, Egress::OpenAiCompat),
+        (Api::AnthropicMessages, Egress::Anthropic),
+    ];
+
+    /// The streamed counterpart of [`Client::WHOLE_REPLY`]. A separate list
+    /// rather than derived from it, because streaming is its own roster entry:
+    /// a model serving whole replies says nothing about whether it serves
+    /// streamed ones, and that is true per protocol.
+    const STREAMED: &'static [(Api, Egress)] = &[
+        (Api::OpenAiCompatChatCompletionsStream, Egress::OpenAiCompat),
+        (Api::AnthropicMessagesStream, Egress::Anthropic),
+    ];
+
     /// Serves one OpenAI-compatible chat completion.
     ///
     /// Validation is [`Client::validate`]'s, which is where the order of the
     /// checks and the reason for it are written down. This entrypoint differs
-    /// from the streaming one only in the surface it asks about.
+    /// from the streaming one only in the surfaces it admits.
+    ///
+    /// The request shape is OpenAI's whichever provider serves it. A model that
+    /// serves Anthropic's `/messages` and nothing else is reached by
+    /// translating on the way out and back, and the caller sees a
+    /// chat-completions reply either way — that is the whole point of the
+    /// gateway form in between.
     pub async fn chat_completions(
         &self,
         request: CreateChatCompletionRequest,
@@ -213,7 +338,8 @@ impl Client {
             provider,
             model,
             auth,
-        } = self.validate(&requested_model, Api::OpenAiCompatChatCompletions)?;
+            egress,
+        } = self.validate(&requested_model, Self::WHOLE_REPLY)?;
 
         // Ingest answers to the protocol warpllm was CALLED with, which is
         // openai_compat and only ever will be for this entrypoint. The ENTRY's
@@ -221,18 +347,38 @@ impl Client {
         // warpllm's routing alias differs from the provider's own name.
         let normalized =
             openai_compat::api::chat_completions::ingest_request(request, model.model());
-        // No dispatch to do: the surface above names its own protocol, so
-        // asking for `openai_compat_chat_completions` IS the choice of module.
-        // A second protocol arrives as a second entrypoint, not as an arm here
-        // — this one takes an OpenAI-shaped request by signature.
-        let response = openai_compat::api::chat_completions::exchange(
-            &normalized,
-            &self.http,
-            provider.name(),
-            self.base_url(provider),
-            auth,
-        )
-        .await?;
+        // Ingress by entrypoint, EGRESS by the routed model's surface. Both
+        // arms take and return gateway types, which is what keeps this a
+        // two-line choice rather than two request paths.
+        let response = match egress {
+            Egress::OpenAiCompat => {
+                openai_compat::api::chat_completions::exchange(
+                    &normalized,
+                    &self.http,
+                    provider.name(),
+                    self.base_url(provider),
+                    auth,
+                )
+                .await?
+            }
+            Egress::Anthropic => {
+                reject_untranslatable(&normalized)?;
+                anthropic::api::messages::exchange(
+                    &normalized,
+                    &self.http,
+                    provider.name(),
+                    self.base_url(provider),
+                    auth,
+                    // Anthropic REQUIRES a `max_tokens` and the gateway form's
+                    // is optional, so the roster's ceiling is the fallback. A
+                    // model documenting none and a caller naming none is a
+                    // refusal, not an invented default — see
+                    // `anthropic::…::request::resolve_max_tokens`.
+                    model.capabilities().max_output_tokens(),
+                )
+                .await?
+            }
+        };
         let mut completion =
             openai_compat::api::chat_completions::render_response(&response, provider.name());
         // Echo the caller's provider-prefixed string, not the upstream echo.
@@ -242,8 +388,8 @@ impl Client {
 
     /// Serves one OpenAI-compatible chat completion as a stream of chunks.
     ///
-    /// The same validation as [`Client::chat_completions`], against a DIFFERENT
-    /// surface: streaming is its own entry in the roster, so a model that
+    /// The same validation as [`Client::chat_completions`], against DIFFERENT
+    /// surfaces: streaming is its own entry in the roster, so a model that
     /// serves whole replies says nothing about whether it serves streamed ones.
     ///
     /// `stream` is set on the caller's behalf rather than required: the method
@@ -262,24 +408,48 @@ impl Client {
             provider,
             model,
             auth,
-        } = self.validate(&requested_model, Api::OpenAiCompatChatCompletionsStream)?;
+            egress,
+        } = self.validate(&requested_model, Self::STREAMED)?;
 
         let normalized =
             openai_compat::api::chat_completions::ingest_request(request, model.model());
+        let read_timeout = self
+            .config
+            .stream_read_timeout_secs
+            .map(Duration::from_secs);
+        let chunks = match egress {
+            Egress::OpenAiCompat => Chunks::OpenAiCompat(Box::new(
+                openai_compat::api::chat_completions::exchange_stream(
+                    &normalized,
+                    &self.http,
+                    provider.name(),
+                    self.base_url(provider),
+                    auth,
+                    read_timeout,
+                )
+                .await?,
+            )),
+            Egress::Anthropic => {
+                reject_untranslatable(&normalized)?;
+                Chunks::Anthropic(Box::new(
+                    anthropic::api::messages::exchange_stream(
+                        &normalized,
+                        &self.http,
+                        provider.name(),
+                        self.base_url(provider),
+                        auth,
+                        model.capabilities().max_output_tokens(),
+                        read_timeout,
+                    )
+                    .await?,
+                ))
+            }
+        };
         Ok(ChatCompletionStream {
-            chunks: openai_compat::api::chat_completions::exchange_stream(
-                &normalized,
-                &self.http,
-                provider.name(),
-                self.base_url(provider),
-                auth,
-                self.config
-                    .stream_read_timeout_secs
-                    .map(Duration::from_secs),
-            )
-            .await?,
+            chunks,
             provider: provider.name(),
             model: requested_model,
+            ordinals: openai_compat::api::chat_completions::ToolCallOrdinals::default(),
         })
     }
 
@@ -304,14 +474,15 @@ impl Client {
     /// One helper rather than the sequence written twice, because the two
     /// entrypoints differ in exactly one argument — and a fifth gate added to
     /// one copy and not the other is a hole nothing would catch.
-    fn validate(&self, requested: &str, api: Api) -> Result<ModelDefinition<'_>> {
+    fn validate(&self, requested: &str, admitted: &[(Api, Egress)]) -> Result<ModelDefinition<'_>> {
         let (provider, model) = self.fetch_model(requested)?;
         self.validate_declared(provider, requested)?;
-        Self::validate_api(model, api, provider, requested)?;
+        let egress = Self::validate_api(model, admitted, provider, requested)?;
         Ok(ModelDefinition {
             provider,
             model,
             auth: self.authenticator(provider)?,
+            egress,
         })
     }
 
@@ -385,27 +556,42 @@ impl Client {
     /// reuses this rather than copying it — and so the refusal cannot claim
     /// the wrong surface, which a hard-coded message eventually would.
     ///
-    /// `model` and `api` are the check; `provider` and `requested` only build
-    /// the message. Split out from [`Client::chat_completions`] so the refusal
-    /// can be tested at all: every model the roster ships today serves chat
-    /// completions, so the failing branch is otherwise unreachable from the
-    /// public entrypoint until one lands that does not.
+    /// `model` and `admitted` are the check; `provider` and `requested` only
+    /// build the message. Split out from [`Client::chat_completions`] so the
+    /// refusal can be tested at all: every model the roster ships today serves
+    /// one of the admitted surfaces, so the failing branch is otherwise
+    /// unreachable from the public entrypoint.
+    ///
+    /// Takes a LIST and returns what matched, which is the whole of the
+    /// dispatch decision: an entrypoint that serves two protocols has to say
+    /// which surfaces it will take, and then the answer to "which one did"
+    /// exists in exactly one place. Returning [`Egress`] rather than the [`Api`]
+    /// is what keeps the caller's match down to the protocols that can actually
+    /// have matched.
+    ///
+    /// The refusal names EVERY surface tried, in the roster's own spelling. A
+    /// model serving only `openai_compat_responses` is refused by both
+    /// entrypoints, and hearing about only one of them would send someone
+    /// looking for a roster line that is already right.
     fn validate_api(
         model: &ModelSpec,
-        api: Api,
+        admitted: &[(Api, Egress)],
         provider: &ProviderSpec,
         requested: &str,
-    ) -> Result<()> {
-        if model.supports_api(api) {
-            return Ok(());
+    ) -> Result<Egress> {
+        for &(api, egress) in admitted {
+            if model.supports_api(api) {
+                return Ok(egress);
+            }
         }
-        // The roster's own spelling for the surface, and the provider because
+        // The roster's own spelling for each surface, and the provider because
         // the roster is where what-is-served is recorded — between them they
         // name the line a reader would go and fix.
+        let tried: Vec<&str> = admitted.iter().map(|(api, _)| api.as_str()).collect();
         Err(Error::InvalidInput(format!(
-            "{}: {requested} does not serve {}",
+            "{}: {requested} serves none of {}",
             provider.name(),
-            api.as_str()
+            tried.join(", ")
         )))
     }
 
@@ -446,12 +632,36 @@ impl Client {
 /// that wrap this iterate it the same way.
 #[derive(Debug)]
 pub struct ChatCompletionStream {
-    chunks: openai_compat::api::chat_completions::ChatChunkStream,
+    chunks: Chunks,
     provider: &'static str,
     /// The caller's provider-prefixed string, echoed onto every chunk in place
     /// of the upstream's own — the streaming counterpart of the one
     /// [`Client::chat_completions`] performs on a whole reply.
     model: String,
+    /// A stream's tool-call numbering, which only a scope that outlives a chunk
+    /// can hold. See
+    /// [`ToolCallOrdinals`](openai_compat::api::chat_completions::ToolCallOrdinals)
+    /// for what it is correcting and why it is an identity on a same-protocol
+    /// stream.
+    ordinals: openai_compat::api::chat_completions::ToolCallOrdinals,
+}
+
+/// The protocol-specific half of an open stream.
+///
+/// The enum is here rather than behind a trait for the reason the crate gives
+/// everywhere else it makes this choice: the set of protocols warpllm speaks
+/// grows an issue at a time, and a closed match is what makes the next one fail
+/// to compile until every site handles it.
+///
+/// BOTH arms are boxed, not just the larger one. They are 248 and 464 bytes, so
+/// an unboxed enum is the size of its biggest member and every stream pays for
+/// the widest protocol; boxing only the larger one just inverts which arm clippy
+/// names. One allocation per STREAM, which lives for as many chunks as the reply
+/// has, against copying a half-kilobyte enum on every move.
+#[derive(Debug)]
+enum Chunks {
+    OpenAiCompat(Box<openai_compat::api::chat_completions::ChatChunkStream>),
+    Anthropic(Box<anthropic::api::messages::ChatChunkStream>),
 }
 
 impl ChatCompletionStream {
@@ -465,10 +675,19 @@ impl ChatCompletionStream {
     /// An error item is terminal: whatever produced it also ended the stream,
     /// so the next call returns `None`.
     pub async fn next(&mut self) -> Option<Result<CreateChatCompletionStreamResponse>> {
-        let chunk = self.chunks.next().await?;
+        // Gateway chunks in, whichever protocol produced them; ONE renderer
+        // out, because the caller asked in chat completions and gets chat
+        // completions back.
+        let chunk = match &mut self.chunks {
+            Chunks::OpenAiCompat(chunks) => chunks.next().await?,
+            Chunks::Anthropic(chunks) => chunks.next().await?,
+        };
         Some(chunk.map(|chunk| {
-            let mut rendered =
-                openai_compat::api::chat_completions::render_chunk(&chunk, self.provider);
+            let mut rendered = openai_compat::api::chat_completions::render_chunk(
+                &chunk,
+                self.provider,
+                &mut self.ordinals,
+            );
             rendered.model = self.model.clone();
             rendered
         }))
@@ -523,28 +742,35 @@ mod tests {
         }
     }
 
+    /// A provider standing in for any host, so the surface tests below read as
+    /// being about surfaces.
+    fn demo_host() -> ProviderSpec {
+        demo_provider("https://api.demo.test", Credential::EnvVar("DEMO_API_KEY"))
+    }
+
     /// The gate the whole model-level `supported_apis` split exists for. This
     /// model sits under a perfectly ordinary chat-serving provider and does
     /// not serve chat itself, which only the model's own list can say.
     #[test]
-    fn a_model_that_does_not_serve_the_api_is_refused() {
+    fn a_model_that_serves_none_of_the_admitted_surfaces_is_refused() {
         let err = Client::validate_api(
             &demo_model(vec![SupportedApi {
                 api: Api::OpenAiCompatResponses,
             }]),
-            Api::OpenAiCompatChatCompletions,
-            &demo_provider("https://api.demo.test", Credential::EnvVar("DEMO_API_KEY")),
+            Client::WHOLE_REPLY,
+            &demo_host(),
             "demo/embed",
         )
         .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("demo/embed"), "{message}");
-        // The roster's spelling, not the variant's — this is the string a
-        // reader greps `specs.yaml` for.
-        assert!(
-            message.contains("does not serve openai_compat_chat_completions"),
-            "{message}"
-        );
+        // EVERY surface tried, in the roster's spelling rather than the
+        // variant's — these are the strings a reader greps `specs.yaml` for,
+        // and hearing about only one of two would send them after a line that
+        // is already right.
+        for tried in ["openai_compat_chat_completions", "anthropic_messages"] {
+            assert!(message.contains(tried), "missing `{tried}`: {message}");
+        }
 
         // A 400: the caller asked for something this model cannot do, which is
         // theirs to fix, not the provider's to fail.
@@ -552,73 +778,113 @@ mod tests {
         assert_eq!(wire["status"], 400);
     }
 
-    /// The other side of the same gate: a model that does serve the surface
-    /// passes, so the check cannot be one that refuses everything. Listing a
-    /// second surface alongside it changes nothing — each is its own claim.
+    /// The other side of the same gate, and the dispatch decision itself: which
+    /// surface a model serves is what picks the protocol it is reached over.
+    ///
+    /// Both directions in one test, because the risk is not that either answer
+    /// is wrong on its own — it is that the match returns a constant. A version
+    /// that always answered `OpenAiCompat` passes the first assertion and fails
+    /// the second.
     #[test]
-    fn a_model_that_serves_the_api_is_admitted() {
-        Client::validate_api(
-            &demo_model(vec![
-                SupportedApi {
-                    api: Api::OpenAiCompatChatCompletions,
-                },
-                SupportedApi {
-                    api: Api::OpenAiCompatResponses,
-                },
-            ]),
-            Api::OpenAiCompatChatCompletions,
-            &demo_provider("https://api.demo.test", Credential::EnvVar("DEMO_API_KEY")),
-            "demo/chat",
-        )
-        .unwrap();
-    }
-
-    /// The point of passing the surface in: one model, and the answer depends
-    /// on which surface is asked about. A check that ignored its argument
-    /// would pass both of the tests above and fail here.
-    #[test]
-    fn the_answer_depends_on_which_api_is_asked_about() {
-        let model = &demo_model(vec![SupportedApi {
-            api: Api::OpenAiCompatResponses,
-        }]);
-        let provider = &demo_provider("https://api.demo.test", Credential::EnvVar("DEMO_API_KEY"));
-
-        Client::validate_api(model, Api::OpenAiCompatResponses, provider, "demo/x").unwrap();
-        for refused in [
-            Api::OpenAiCompatChatCompletions,
-            Api::OpenAiCompatChatCompletionsStream,
+    fn the_matched_surface_picks_the_protocol_spoken_upstream() {
+        for (surface, expected) in [
+            (Api::OpenAiCompatChatCompletions, Egress::OpenAiCompat),
+            (Api::AnthropicMessages, Egress::Anthropic),
         ] {
-            let message = Client::validate_api(model, refused, provider, "demo/x")
-                .unwrap_err()
-                .to_string();
-            // Each refusal names the surface it was asked about, so a caller
-            // is never told the wrong thing is missing.
-            assert!(
-                message.contains(refused.as_str()),
-                "asked about `{}`: {message}",
-                refused.as_str()
-            );
+            let egress = Client::validate_api(
+                &demo_model(vec![
+                    SupportedApi { api: surface },
+                    // A second, unadmitted surface beside it changes nothing:
+                    // each listing is its own claim.
+                    SupportedApi {
+                        api: Api::OpenAiCompatResponses,
+                    },
+                ]),
+                Client::WHOLE_REPLY,
+                &demo_host(),
+                "demo/chat",
+            )
+            .unwrap();
+            assert_eq!(egress, expected, "{}", surface.as_str());
         }
     }
 
-    /// Streaming is its own surface, so serving chat completions says nothing
-    /// about it. The roster documents that; this is where it holds.
+    /// The point of passing the surfaces in: one model, and the answer depends
+    /// on which list is asked about. A check that ignored its argument would
+    /// pass both of the tests above and fail here.
     #[test]
-    fn chat_completions_does_not_imply_its_streaming_surface() {
-        let err = Client::validate_api(
-            &demo_model(vec![SupportedApi {
-                api: Api::OpenAiCompatChatCompletions,
-            }]),
-            Api::OpenAiCompatChatCompletionsStream,
-            &demo_provider("https://api.demo.test", Credential::EnvVar("DEMO_API_KEY")),
-            "demo/chat",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(
-            err.contains("does not serve openai_compat_chat_completions_stream"),
-            "{err}"
+    fn the_answer_depends_on_which_surfaces_are_admitted() {
+        let model = &demo_model(vec![SupportedApi {
+            api: Api::AnthropicMessages,
+        }]);
+        let provider = &demo_host();
+
+        assert_eq!(
+            Client::validate_api(model, Client::WHOLE_REPLY, provider, "demo/x").unwrap(),
+            Egress::Anthropic
         );
+        // The same model, against the STREAMED list: it serves the whole-reply
+        // surface of this protocol and not the streamed one, so admitting it
+        // here would route a stream at an endpoint the roster never claimed.
+        let message = Client::validate_api(model, Client::STREAMED, provider, "demo/x")
+            .unwrap_err()
+            .to_string();
+        for tried in [
+            "openai_compat_chat_completions_stream",
+            "anthropic_messages_stream",
+        ] {
+            assert!(message.contains(tried), "missing `{tried}`: {message}");
+        }
+    }
+
+    /// Streaming is its own surface, so serving whole replies says nothing
+    /// about it. The roster documents that; this is where it holds — and it
+    /// holds per PROTOCOL, which is why both are swept.
+    #[test]
+    fn a_whole_reply_surface_does_not_imply_its_streaming_one() {
+        for (whole, streamed) in [
+            (
+                Api::OpenAiCompatChatCompletions,
+                "openai_compat_chat_completions_stream",
+            ),
+            (Api::AnthropicMessages, "anthropic_messages_stream"),
+        ] {
+            let err = Client::validate_api(
+                &demo_model(vec![SupportedApi { api: whole }]),
+                Client::STREAMED,
+                &demo_host(),
+                "demo/chat",
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains(streamed), "{err}");
+        }
+    }
+
+    /// The two admission lists must not overlap, and neither may admit a
+    /// surface warpllm cannot serve on it. A streamed surface in
+    /// [`Client::WHOLE_REPLY`] would have the non-streaming entrypoint open a
+    /// stream it has no return type for.
+    #[test]
+    fn the_admission_lists_are_disjoint_and_correctly_halved() {
+        let whole: Vec<&str> = Client::WHOLE_REPLY
+            .iter()
+            .map(|(api, _)| api.as_str())
+            .collect();
+        let streamed: Vec<&str> = Client::STREAMED
+            .iter()
+            .map(|(api, _)| api.as_str())
+            .collect();
+        for name in &whole {
+            assert!(!name.ends_with("_stream"), "`{name}` is a streamed surface");
+            assert!(!streamed.contains(name), "`{name}` is in both lists");
+        }
+        for name in &streamed {
+            assert!(name.ends_with("_stream"), "`{name}` is not streamed");
+        }
+        // One entry per protocol in each, so a protocol cannot be reachable
+        // for whole replies and silently unreachable for streams.
+        assert_eq!(whole.len(), streamed.len());
     }
 
     /// A provider that names no environment variable has no key source at all,
@@ -690,10 +956,7 @@ mod tests {
             || {
                 let client = Client::new(declaring(&["openai"])).unwrap();
                 let err = client
-                    .validate(
-                        "deepseek/deepseek-v4-flash",
-                        Api::OpenAiCompatChatCompletions,
-                    )
+                    .validate("deepseek/deepseek-v4-flash", Client::WHOLE_REPLY)
                     .err()
                     .expect("an undeclared provider is refused");
                 match &err {
@@ -709,7 +972,7 @@ mod tests {
                 // And the declared one still routes, so the gate is not one
                 // that refuses everything.
                 client
-                    .validate("openai/gpt-5.6", Api::OpenAiCompatChatCompletions)
+                    .validate("openai/gpt-5.6", Client::WHOLE_REPLY)
                     .unwrap();
             },
         );
@@ -723,10 +986,7 @@ mod tests {
         with_env(&[], || {
             let err = Client::new(declaring(&["openai"]))
                 .unwrap()
-                .validate(
-                    "deepseek/deepseek-v4-flash",
-                    Api::OpenAiCompatChatCompletions,
-                )
+                .validate("deepseek/deepseek-v4-flash", Client::WHOLE_REPLY)
                 .err()
                 .expect("an undeclared provider is refused");
             assert!(matches!(err, Error::ProviderNotDeclared { .. }), "{err:?}");
@@ -742,7 +1002,7 @@ mod tests {
             let client = Client::new(declaring(&["openai"])).unwrap();
             for typo in ["openai/nope", "deepseek/nope"] {
                 let err = client
-                    .validate(typo, Api::OpenAiCompatChatCompletions)
+                    .validate(typo, Client::WHOLE_REPLY)
                     .err()
                     .expect("validation refuses it");
                 assert!(
@@ -760,7 +1020,7 @@ mod tests {
         with_env(&[], || {
             let err = Client::new(declaring(&["openai"]))
                 .unwrap()
-                .validate("openai/gpt-5.6", Api::OpenAiCompatChatCompletions)
+                .validate("openai/gpt-5.6", Client::WHOLE_REPLY)
                 .err()
                 .expect("validation refuses it");
             assert!(
@@ -796,7 +1056,7 @@ mod tests {
             Client::new(config).unwrap()
         });
         let admitted = client
-            .validate("openai/gpt-5.6", Api::OpenAiCompatChatCompletions)
+            .validate("openai/gpt-5.6", Client::WHOLE_REPLY)
             .unwrap();
         assert_eq!(
             crate::auth::testing::applied(
@@ -823,9 +1083,7 @@ mod tests {
             || {
                 let client = Client::new(ClientConfig::default()).unwrap();
                 for model in ["openai/gpt-5.6", "deepseek/deepseek-v4-flash"] {
-                    client
-                        .validate(model, Api::OpenAiCompatChatCompletions)
-                        .unwrap();
+                    client.validate(model, Client::WHOLE_REPLY).unwrap();
                 }
             },
         );
@@ -838,7 +1096,7 @@ mod tests {
         with_env(&[("OPENAI_API_KEY", Some("sk-openai"))], || {
             let err = Client::new(declaring(&[]))
                 .unwrap()
-                .validate("openai/gpt-5.6", Api::OpenAiCompatChatCompletions)
+                .validate("openai/gpt-5.6", Client::WHOLE_REPLY)
                 .err()
                 .expect("validation refuses it");
             assert!(matches!(err, Error::ProviderNotDeclared { .. }), "{err:?}");

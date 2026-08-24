@@ -10,6 +10,62 @@ incompatible, and `^0.1` will not upgrade you into one.
 
 ## [Unreleased]
 
+### Added
+
+- **Load balancing across the providers serving a model.** `BalancedClient`
+  wraps a `Client` and spreads requests over a list of `(model_str, weight)`
+  pairs, for a caller holding keys for the same model at more than one
+  provider — or willing to treat two different models as interchangeable.
+
+  ```rust
+  let client = Client::new(ClientConfig::default())?;
+  let balanced = BalancedClient::new(&client, &[
+      ("openai/gpt-5.6", 3),
+      ("deepseek/deepseek-v4-pro", 1),
+  ])?;
+  balanced.chat_completions(request).await?;
+  ```
+
+  **The candidate list is the caller's, not the roster's.** An earlier draft put
+  a `balance:` key in `specs.yaml`; that would have shipped a claim to every
+  consumer of the crate that one model may be billed to another provider, and
+  it would have contradicted `ClientConfig::providers`, which exists so a client
+  can withhold a vendor deliberately. Which models are interchangeable is an
+  application judgement, so it goes where the application is.
+
+  The list is resolved at construction: every `model_str` is looked up in the
+  roster then, so a name that does not exist is `InvalidModel` when the balanced
+  client is built rather than on the request that happened to select it. An
+  empty list is `InvalidInput`. Weights are relative and need no common scale.
+
+  Selection is smooth weighted round-robin — the Nginx algorithm — so weights
+  `[3, 1]` produce `A, A, B, A` rather than three `A`s and then a `B`. Each
+  candidate's running weight is an independent `AtomicI32`, so selection takes
+  no lock; two threads racing may both pick the same candidate, which costs one
+  extra request to that provider and leaves the distribution correct over the
+  cycle. Nothing here grows with traffic: the state is one integer per
+  candidate, and the candidate set is fixed when the client is built.
+
+  The selected candidate's `model_str` is written into the request's `model`
+  before it is handed to the inner client, which then runs its ordinary
+  validation — the roster registers the name, this client serves the provider,
+  the model serves the surface, the client holds a key. So the name a caller
+  passes in `model` is a *group*, and each candidate is a concrete route within
+  it.
+
+  Four boundaries worth stating rather than discovering:
+
+  - **This is not failover.** One candidate is selected per request, and if that
+    provider fails the caller sees the failure. Retrying the next candidate is
+    #27, and the two are meant to compose — selection picks the head of the
+    chain — rather than to reorder candidates independently.
+  - **Rust only, for now.** Neither SDK nor `warpllm-server` exposes it yet.
+  - **State is per process.** Two warpllm instances balance independently, and
+    their combined split is only as even as the traffic split between them.
+    Anything better needs state shared across instances.
+  - **No metrics yet.** The realized distribution is not observable from
+    outside, which is what #29 adds.
+
 ### Fixed
 
 - **An OpenCode Zen account out of credit was reported as an authentication

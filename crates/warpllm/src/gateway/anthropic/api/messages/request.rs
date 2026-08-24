@@ -122,13 +122,20 @@ pub(crate) fn ingest_request(request: CreateMessageRequest, model: &str) -> type
         // the blocks, where `ingest_block` puts them.
         cache: None,
         stream: stream.unwrap_or(false),
-        // No wire counterpart, and `None` would be the wrong reading of that:
-        // Anthropic reports a stream's totals unconditionally, so a caller who
-        // speaks this protocol has asked for them by construction. Saying so
-        // is what keeps the counts in the gateway form on this protocol's own
-        // path, and what makes an OpenAI backend send the trailing usage chunk
-        // this protocol requires when a request crosses the other way.
-        stream_include_usage: Some(true),
+        // No wire counterpart, and `None` would be the wrong reading of that
+        // for a STREAMED request: Anthropic reports a stream's totals
+        // unconditionally, so a caller who asked for a stream asked for them
+        // by construction. Saying so is what keeps the counts in the gateway
+        // form on this protocol's own path, and what makes an OpenAI backend
+        // send the trailing usage chunk this protocol requires when a request
+        // crosses the other way.
+        //
+        // Gated on `stream` because the field is meaningless without one, and
+        // not merely untidy: chat completions defines `stream_options` only
+        // alongside `stream: true` — "Only set this when you set stream:
+        // true", per the vendor's own SDK — and a stricter compatible API
+        // refuses the pair. A non-streamed request has no totals to ask for.
+        stream_include_usage: stream.unwrap_or(false).then_some(true),
         ext: namespaced(anthropic),
         source: Some(IngestSource {
             protocol: Protocol::Anthropic,
@@ -1010,20 +1017,61 @@ mod tests {
         assert_eq!(rendered(&normalized), body);
     }
 
-    /// A caller who speaks this protocol has asked for a stream's totals by
+    /// A caller who asked this protocol for a STREAM asked for its totals by
     /// construction — Anthropic reports them unconditionally, so there is no
-    /// state in which one of its callers does not want them. `None` would read
-    /// as "no opinion" and cost them the counts on their own protocol's path.
+    /// state in which one of its streaming callers does not want them. `None`
+    /// would read as "no opinion" and cost them the counts on their own
+    /// protocol's path.
     ///
     /// It is a request field with no wire spelling here, so nothing about the
     /// round trip above can catch it going wrong.
     #[test]
-    fn an_anthropic_caller_has_asked_for_a_streams_totals() {
+    fn a_streaming_anthropic_caller_has_asked_for_the_totals() {
         let request = ingest_request(wire(maximal_body()), "claude-opus-5");
+        assert!(request.stream, "the fixture stopped asking for a stream");
         assert_eq!(request.stream_include_usage, Some(true));
         // And it stays a gateway-form fact: Anthropic has no `stream_options`,
         // so saying so must not put anything on the wire.
         assert_eq!(rendered(&request), maximal_body());
+    }
+
+    /// And a caller who asked for a whole reply asked for no such thing.
+    ///
+    /// `stream_options` is defined only alongside `stream: true`, so a
+    /// normalized request carrying one without the other renders to a body a
+    /// stricter chat-completions backend refuses outright. The state is
+    /// unreachable from `Client` today — nothing ingests an Anthropic-shaped
+    /// request — which is exactly why it needs a test rather than a caller to
+    /// find it.
+    ///
+    /// Both of the two `stream` states, because the fixture above pins only
+    /// one and the bug this replaces was invisible from that one.
+    #[test]
+    fn a_non_streaming_anthropic_caller_has_asked_for_nothing_of_the_kind() {
+        for body in [
+            json!({"model": "claude-opus-5", "max_tokens": 16,
+                   "messages": [{"role": "user", "content": "hi"}]}),
+            json!({"model": "claude-opus-5", "max_tokens": 16, "stream": false,
+                   "messages": [{"role": "user", "content": "hi"}]}),
+        ] {
+            let request = ingest_request(wire(body.clone()), "claude-opus-5");
+            assert!(!request.stream);
+            assert_eq!(request.stream_include_usage, None, "{body}");
+
+            // The whole point of the gate: what the OTHER protocol's renderer
+            // then puts on the wire. Asserted on the serialized body, because
+            // a struct-level check cannot see a field that should be absent.
+            let openai = plain(
+                &crate::gateway::openai_compat::api::chat_completions::render_request(
+                    &request, "openai",
+                )
+                .unwrap(),
+            );
+            assert!(
+                openai.get("stream_options").is_none(),
+                "a streaming-only option reached a non-streamed request: {openai}"
+            );
+        }
     }
 
     /// The gateway view, so a change to the mapping fails on the mapping rather

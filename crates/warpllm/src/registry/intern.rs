@@ -27,6 +27,15 @@
 //! The leak is bounded by DISTINCT strings ever seen, not by clients: a process
 //! that builds a million clients from one roster interns the same handful.
 //!
+//! "Distinct strings ever seen" is only a bound if the names repeat, and that
+//! is an assumption about the caller rather than a property of this code. A
+//! service loading a roster per tenant, with a provider named after each, sees
+//! a new string every time and grows without limit — so [`CAPACITY`] makes the
+//! bound real and refuses past it, counting provider names and credential
+//! variables together because they share this one table. It is set far above any legitimate roster;
+//! reaching it means names are being generated, not written, and that is worth
+//! failing loudly rather than leaking quietly until the process dies of it.
+//!
 //! # The ceiling, stated
 //!
 //! This is deliberately unbounded storage, so here is exactly what bounds it in
@@ -73,24 +82,72 @@
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
 
-/// Every name handed out so far, so the same text is never leaked twice.
+/// The most distinct roster identities one process will ever leak.
+///
+/// Counts provider names AND the environment-variable names beside them —
+/// everything this module hands out — because they share one table and it is
+/// the table that has to be bounded. So the ceiling is not 4096 providers; a
+/// roster whose providers each name their own variable reaches it at half
+/// that, which is still three orders of magnitude above the shipped roster and
+/// far above any file somebody writes by hand.
+///
+/// What it stops is the one shape that grows without limit: rosters whose
+/// names vary per load.
+const CAPACITY: usize = 4096;
+
+/// Every identity handed out so far, so the same text is never leaked twice.
+///
+/// One table for provider names and credential variables together. They are
+/// not distinguished because nothing downstream distinguishes them: both are
+/// `&'static str` for the life of the process, and a bound that counted only
+/// one of them would not bound the leak.
 static NAMES: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// `name` as a string that lives as long as the process, reusing the one
 /// already leaked for that text if there is one.
 ///
 /// Called once per provider per roster load, never on the request path.
-pub(super) fn intern(name: &str) -> &'static str {
+///
+/// # Errors
+///
+/// The message, when [`CAPACITY`] distinct names have already been leaked and
+/// this is a new one. A roster already interned keeps loading — reaching the
+/// cap does not break a process that stays on the rosters it has.
+pub(super) fn intern(name: &str) -> Result<&'static str, String> {
     // Nothing inside the guard can panic, so the lock cannot be poisoned.
     let mut names = NAMES
         .lock()
         .expect("nothing under this lock panics, so it cannot be poisoned");
+    intern_into(&mut names, name, CAPACITY)
+}
+
+/// The whole of [`intern`] except which set it fills, so the cap can be tested
+/// against a small one.
+///
+/// It cannot be tested against the real set: this table is process-wide and the
+/// unit tests share a process, so a case that filled it would leave every
+/// roster loaded afterwards — in every other test — failing to intern.
+fn intern_into(
+    names: &mut HashSet<&'static str>,
+    name: &str,
+    capacity: usize,
+) -> Result<&'static str, String> {
     if let Some(existing) = names.get(name) {
-        return existing;
+        return Ok(existing);
+    }
+    if names.len() >= capacity {
+        return Err(format!(
+            "`{name}`: this process has already seen {capacity} distinct roster \
+             names — providers and their environment variables together — and \
+             each one lives as long as the process. Rosters loaded over a \
+             process's life are meant to name the same providers; if yours are \
+             generated per tenant or per request, name the providers and \
+             variables from a fixed set and vary the models under them instead"
+        ));
     }
     let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
     names.insert(leaked);
-    leaked
+    Ok(leaked)
 }
 
 #[cfg(test)]
@@ -101,8 +158,8 @@ mod tests {
     /// process loading one roster repeatedly leaks it once.
     #[test]
     fn the_same_name_twice_is_the_same_allocation() {
-        let first = intern("demo-interned");
-        let second = intern(&String::from("demo-interned"));
+        let first = intern("demo-interned").unwrap();
+        let second = intern(&String::from("demo-interned")).unwrap();
         assert_eq!(first, "demo-interned");
         assert!(std::ptr::eq(first, second));
     }
@@ -110,9 +167,34 @@ mod tests {
     /// And the dedup is by text, not by luck — two names stay two.
     #[test]
     fn different_names_stay_different() {
-        let one = intern("demo-interned-one");
-        let two = intern("demo-interned-two");
+        let one = intern("demo-interned-one").unwrap();
+        let two = intern("demo-interned-two").unwrap();
         assert!(!std::ptr::eq(one, two));
         assert_eq!((one, two), ("demo-interned-one", "demo-interned-two"));
+    }
+
+    /// A NEW name past the cap is refused, so "bounded by distinct names ever
+    /// seen" is a property of this code rather than a hope about the caller.
+    #[test]
+    fn a_new_name_past_the_cap_is_refused() {
+        let mut names = HashSet::new();
+        for i in 0..2 {
+            intern_into(&mut names, &format!("capped-{i}"), 2).unwrap();
+        }
+        let error = intern_into(&mut names, "capped-2", 2).unwrap_err();
+        assert!(error.contains("capped-2"), "{error}");
+        assert!(error.contains("2 distinct roster names"), "{error}");
+    }
+
+    /// Reaching the cap does not break a process that stays on the rosters it
+    /// already has: a name already interned still comes back.
+    #[test]
+    fn a_name_already_interned_survives_the_cap() {
+        let mut names = HashSet::new();
+        let first = intern_into(&mut names, "capped-again", 1).unwrap();
+        let second = intern_into(&mut names, "capped-again", 1)
+            .expect("an already-interned name is not a new one");
+        assert!(std::ptr::eq(first, second));
+        assert!(intern_into(&mut names, "capped-other", 1).is_err());
     }
 }

@@ -3,8 +3,10 @@
 #
 # Point warpllm at this file and its entries become routable beside the built-in
 # ones. Nothing here replaces the shipped roster — `openai/gpt-5.6` still works
-# — unless you deliberately reuse a provider name, which replaces that provider
-# whole and is logged at `warn` when it happens. That log reaches you through
+# — unless you deliberately reuse a provider name. Reusing one replaces that
+# provider whole when your entry lists its own `models:`, and replaces only its
+# transport when your entry names none, leaving the shipped models routable
+# through your host. Either way it is logged at `warn`. That log reaches you through
 # `tracing`, so `warpllm-server` prints it and a Rust client does once it
 # installs a subscriber; from Python and Node the replacement is silent, so
 # reuse a name there only on purpose.
@@ -96,6 +98,21 @@ providers:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
+
+  # ---------------------------------------------------------------------------
+  # 4. Retarget a provider warpllm ALREADY ships.
+  #
+  # Three lines, and they are the whole entry. Because it names no `models:`,
+  # every model warpllm ships under `openai` carries over unrestated and now
+  # routes to this address — useful for an egress proxy, a recording proxy, or
+  # an Azure-style deployment that speaks the same wire format.
+  #
+  # Uncomment to try it. Listing even one model here would make this a WHOLE
+  # replacement instead, and `openai` would serve that model and no other.
+  #
+  # openai:
+  #   base_url: "http://openai-proxy.internal.example.com/v1"
+  #   env_api_key: OPENAI_API_KEY
 
 # There is deliberately no wildcard. `vllm/*` is an error, not a catch-all:
 # every model needs an entry, because `supported_apis` and `capabilities` are

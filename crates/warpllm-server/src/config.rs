@@ -22,7 +22,9 @@ pub struct ServerConfig {
     /// `specs.yaml`, merged over it. How a self-hosted OpenAI-compatible
     /// server — vLLM, TGI, Ollama, llama.cpp — becomes routable. The built-in
     /// providers survive the merge; an entry naming one of them replaces it
-    /// whole. Also read from `WARPLLM_SPECS` when this is not given.
+    /// whole when it lists its own `models:`, and replaces only its transport
+    /// when it names none. Also read from `WARPLLM_SPECS` when this is not
+    /// given.
     #[arg(long, value_name = "PATH")]
     pub specs: Option<PathBuf>,
     /// Upstream request timeout in seconds

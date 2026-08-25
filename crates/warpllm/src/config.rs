@@ -36,8 +36,11 @@ pub struct ClientConfig {
     /// one running on your own hardware, behind your own address, under a name
     /// only you know. The shipped roster always survives the fold: a file that
     /// adds `local/` leaves `openai/` exactly where it was. An entry naming a
-    /// provider warpllm already ships replaces that provider WHOLE, models
-    /// included, and says so at `warn` rather than quietly.
+    /// provider warpllm already ships replaces that provider: WHOLE, models
+    /// included, when the entry lists its own `models:`; transport only when it
+    /// names none, in which case the models warpllm ships under that provider
+    /// carry over unrestated. warpllm says at `warn` which of the two happened
+    /// rather than shadowing quietly.
     ///
     /// ```yaml
     /// providers:

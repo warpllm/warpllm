@@ -5,7 +5,7 @@
 //! routable name says [`model`] rather than spelling out three lines of
 //! surface it has no opinion about.
 
-use super::load::{Source, load, load_all};
+use super::load::{Fold, Source, load, load_all};
 use super::types::Registry;
 
 /// One provider with no models yet — the base most cases diverge from.
@@ -94,13 +94,13 @@ pub(super) fn clean(yaml: &str) -> Registry {
 ///
 /// Labels the sources by position so an error message can be asserted against
 /// the file it came from.
-pub(super) fn merged(sources: &[&str]) -> (Registry, Vec<String>) {
+pub(super) fn merged(sources: &[&str]) -> Fold {
     merge(sources).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// The same fold, handing back the failure — for the cases that are about the
 /// message a bad source produces.
-pub(super) fn merge(sources: &[&str]) -> Result<(Registry, Vec<String>), String> {
+pub(super) fn merge(sources: &[&str]) -> Result<Fold, String> {
     const LABELS: [&str; 3] = ["first.yaml", "second.yaml", "third.yaml"];
     let sources: Vec<Source> = sources
         .iter()

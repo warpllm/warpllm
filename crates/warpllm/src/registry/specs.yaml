@@ -174,10 +174,13 @@
 # ---------------
 # Write the same shape in a file of your own and point warpllm at it. It is
 # MERGED over this one: adding `local/` leaves `openai/` exactly where it was.
-# An entry naming a provider warpllm already ships replaces that provider whole,
-# models included, and warpllm says so at `warn` when it does — over `tracing`,
-# which the Rust client and `warpllm-server` surface and the Python and Node
-# bindings do not yet install a subscriber for.
+# An entry naming a provider warpllm already ships replaces that provider. List
+# your own `models:` and the replacement is whole, models included; name none and
+# only the transport moves, with the models below carrying over unrestated. An
+# explicit `models: {}` says "none", and is refused rather than inherited.
+# warpllm says at `warn` which of the two happened — over `tracing`, which the
+# Rust client and `warpllm-server` surface and the Python and Node bindings do
+# not yet install a subscriber for.
 #
 #   # ./warpllm.yaml
 #   providers:

@@ -90,29 +90,42 @@ pub(crate) fn load_for_client(path: Option<&Path>) -> Result<Arc<Registry>> {
     let Some(path) = path else {
         return Ok(Arc::clone(&REGISTRY));
     };
+    // Before a single name out of a stranger's file is interned: the shipped
+    // roster's own identities are the ones `REGISTRY` will later panic without,
+    // and interning is capped. Custom rosters could otherwise fill that cap —
+    // a per-tenant provider name each load, none of them repeating — and the
+    // first client built WITHOUT a roster would then fail to intern
+    // `OPENAI_API_KEY`, panic inside the `LazyLock`, and poison it for the rest
+    // of the process. Forcing it here spends nothing: it is one build, shared,
+    // and every client that supplies no roster already forces it above.
+    LazyLock::force(&REGISTRY);
     let roster = path.display().to_string();
     let yaml = std::fs::read_to_string(path)
         .map_err(|e| Error::InvalidRoster(format!("{roster}: {e}")))?;
-    let (registry, replaced) = load::load_all(&[
-        load::Source {
-            label: "specs.yaml",
-            yaml: SHIPPED_YAML,
-        },
-        load::Source {
-            label: &roster,
-            yaml: &yaml,
-        },
-    ])
-    .map_err(Error::InvalidRoster)?;
+    let load::Fold {
+        registry,
+        replaced,
+        retargeted,
+    } = load::load_over_shipped(&roster, &yaml).map_err(Error::InvalidRoster)?;
     lint::usable(&registry).map_err(|e| Error::InvalidRoster(format!("{roster}: {e}")))?;
 
     // Shadowing a shipped provider is legitimate — the operator knows their
-    // deployment better than this roster does — and it is never silent.
+    // deployment better than this roster does — and it is never silent. The
+    // two kinds are announced apart because they lose different things: one
+    // took the shipped models with it, the other kept them.
     for provider in &replaced {
         tracing::warn!(
             provider,
             roster,
             "the roster file replaced a built-in provider entry, models included"
+        );
+    }
+    for provider in &retargeted {
+        tracing::warn!(
+            provider,
+            roster,
+            "the roster file replaced a built-in provider's transport; its \
+             shipped models carried over, because the entry named none of its own"
         );
     }
     for collision in lint::shared_env_api_keys(&registry) {

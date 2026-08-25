@@ -45,12 +45,25 @@ warpllm-server --specs ./warpllm.yaml
 
 Your file is **merged** over the built-in roster: adding `local/` leaves
 `openai/` exactly where it was, and one client routes both. Reusing a built-in
-provider's name replaces that provider whole, models included, and warpllm warns
-rather than shadowing it silently — through `tracing`, so `warpllm-server` and
+provider's name replaces that provider. If your entry lists its own `models:`,
+that is a whole replacement, models included. If it names none, only the
+transport is replaced and the shipped models carry over — so retargeting
+`openai` at an internal proxy is three lines, not a restatement of every model
+it serves. An explicit `models: {}` is a statement of none and is refused, not
+an inheritance. warpllm warns for both kinds rather than shadowing silently — through `tracing`, so `warpllm-server` and
 any Rust client with a subscriber installed surface it. The Python and Node
 bindings install no subscriber, so the warning goes nowhere there; that is
 already true of the older warning about an environment holding no provider keys,
 and bridging `tracing` into both host languages is its own change.
+
+The shipped roster is parsed once for the whole process rather than per client,
+so building a client with a roster file costs about a tenth of what it did.
+
+A provider name lives as long as the process — as does the environment variable
+named beside it — so warpllm now refuses past 4096 distinct ones rather than
+growing without limit. No file anybody writes comes near it; what it catches is
+a roster whose names are generated per tenant or per request, which used to leak
+a string on every load.
 
 It is read when the client is built, like API keys and for the same reason —
 which is also where everything wrong with it is reported. A `base_url` with a

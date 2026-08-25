@@ -165,6 +165,7 @@ envelope](#the-gateway-envelope) and nowhere else.
 | `StreamTruncated` | `stream_truncated` | 502 | `stream_truncated` | The stream ended before it finished |
 | `StreamStalled` | `stream_stalled` | 504 | `stream_stalled` | The stream went silent past the read timeout |
 | `NotImplemented` | `not_implemented` | 501 | `not_implemented` | A surface warpllm does not serve yet |
+| `InvalidRoster` | `invalid_roster` | 500 | `server_error` | A roster file could not be loaded |
 | `Internal` | `internal_error` | 500 | `internal_error` | warpllm could not set itself up |
 
 ### The provider's failures, normalized (`origin: provider`)

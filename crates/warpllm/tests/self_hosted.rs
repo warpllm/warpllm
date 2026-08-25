@@ -295,6 +295,75 @@ fn a_user_provider_replaces_a_shipped_one_whole() {
     });
 }
 
+/// Pointing a shipped provider at somewhere else, WITHOUT restating its
+/// models — the case a three-line file is written for.
+///
+/// An entry that says nothing about models keeps the ones it replaced, so
+/// every model warpllm ships under `openai` still routes, now to the given
+/// host. Before this, such a file did not misroute: it failed to build the
+/// client at all, with a message telling its author to delete the entry.
+#[test]
+fn a_user_entry_naming_no_models_retargets_the_shipped_ones() {
+    with_env(&[("OPENAI_API_KEY", Some("sk-test"))], async {
+        let upstream = local_server().await;
+        let (_dir, path) = roster_file(&format!(
+            "providers:\n  openai:\n    base_url: \"{}\"\n    env_api_key: OPENAI_API_KEY\n",
+            upstream.uri()
+        ));
+        let client = client_with(&path);
+
+        // Two of them, neither restated anywhere, both on the new host.
+        for model_str in ["openai/gpt-5.6", "openai/o3"] {
+            let (provider, _) = client
+                .fetch_model(model_str)
+                .unwrap_or_else(|e| panic!("`{model_str}` should still route: {e}"));
+            assert_eq!(provider.base_url(), upstream.uri());
+        }
+
+        // And it is not merely resolvable — a request actually reaches there.
+        let completion = client
+            .chat_completions(request("openai/gpt-5.6"))
+            .await
+            .unwrap();
+        assert_eq!(
+            completion.choices[0].message.content.as_deref(),
+            Some("hello from the box")
+        );
+
+        // Providers the file never named are untouched.
+        assert_eq!(
+            client
+                .fetch_model("deepseek/deepseek-v4-pro")
+                .unwrap()
+                .0
+                .base_url(),
+            "https://api.deepseek.com"
+        );
+    });
+}
+
+/// Inheritance is for silence alone. An explicitly empty `models:` map states
+/// that the provider serves none, and that is refused when the client is
+/// built rather than handing the shipped models quietly back.
+#[test]
+fn an_explicitly_empty_models_map_is_refused() {
+    with_env(&[("OPENAI_API_KEY", Some("sk-test"))], async {
+        let (_dir, path) = roster_file(
+            "providers:\n  openai:\n    base_url: \"http://127.0.0.1:1/v1\"\n    \
+             env_api_key: OPENAI_API_KEY\n    models: {}\n",
+        );
+        let error = Client::new(ClientConfig {
+            specs_path: Some(path),
+            ..Default::default()
+        })
+        .err()
+        .expect("a provider serving nothing cannot build a client");
+        let error = error.to_string();
+        assert!(error.contains("openai"), "{error}");
+        assert!(error.contains("registers no models"), "{error}");
+    });
+}
+
 /// The registry stays closed for a host you own. A wildcard is not a special
 /// case here — it never loads at all, so it cannot reach this far.
 #[test]

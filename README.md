@@ -174,8 +174,12 @@ warpllm-server --specs ./warpllm.yaml   # or WARPLLM_SPECS=./warpllm.yaml
 
 Your file is **merged** over the built-in roster, so adding `local/` leaves
 `openai/` exactly where it was — the same client routes both. Reusing a
-built-in provider's name replaces that provider whole, and warpllm warns rather
-than shadowing it quietly. The warning goes through [`tracing`], which
+built-in provider's name replaces that provider — whole, if your entry lists its
+own `models:`; transport only, if it names none, in which case the models
+warpllm ships under that provider carry over unrestated. That is what makes
+pointing `openai` at an internal proxy three lines rather than a copy of every
+model under it. warpllm warns either way rather than shadowing it quietly, and
+says which of the two happened. The warning goes through [`tracing`], which
 `warpllm-server` surfaces and a Rust client does once it installs a subscriber;
 the Python and Node bindings install none yet, so there it goes nowhere. Same
 for the older warning about an environment with no provider keys in it.

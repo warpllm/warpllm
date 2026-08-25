@@ -38,6 +38,7 @@
 
 mod header;
 mod oauth;
+mod token_provider;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -45,7 +46,7 @@ pub(crate) mod testing;
 use crate::error::Result;
 
 pub(crate) use header::Header;
-pub(crate) use oauth::OauthBearer;
+pub(crate) use oauth::OAuth;
 
 /// One provider's resolved credential.
 ///
@@ -77,7 +78,7 @@ pub(crate) enum Authenticator {
     /// real and tested; only the constructor that would reach them from a
     /// live request is missing.
     #[allow(dead_code)]
-    OauthBearer(OauthBearer),
+    OAuth(OAuth),
 }
 
 impl Authenticator {
@@ -111,7 +112,7 @@ impl Authenticator {
     pub(crate) async fn authenticate(&self, request: reqwest::Request) -> Result<reqwest::Request> {
         match self {
             Authenticator::Header(header) => header.apply(request),
-            Authenticator::OauthBearer(oauth) => oauth.apply(request),
+            Authenticator::OAuth(oauth) => oauth.apply(request).await,
         }
     }
 }

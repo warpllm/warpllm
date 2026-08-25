@@ -414,6 +414,7 @@ mod tests {
                 "openrouter/moonshotai/kimi-k2.7-code",
                 "openrouter/moonshotai/kimi-k3",
                 "openrouter/openai/gpt-5.6",
+                "openrouter/stealth/ox-alpha",
                 "openrouter/~deepseek/deepseek-v4-flash-latest",
             ]
         );

@@ -1,0 +1,85 @@
+# Weekly mutation testing via cargo-mutants.
+#
+# Runs every Sunday at midnight UTC (or manually via workflow_dispatch).
+# Mutates the core warpllm crate only — binding crates (Python/Node) are
+# thin FFI wrappers where mutations produce meaningless survivors.
+#
+# When survived mutants are found, a GitHub issue is created listing the
+# first 10. If no mutants survived, the job stays silent (no issue filed).
+# Full results are uploaded as an artifact for deep investigation.
+name: Weekly cargo-mutants
+on:
+  schedule:
+    # Sunday 00:00 UTC — weekly cadence keeps noise low while catching
+    # regressions before the Monday planning cycle.
+    - cron: "0 0 * * 0"
+  # Allow manual triggering for pre-merge validation or ad-hoc runs.
+  workflow_dispatch:
+
+# Blanket deny: no permissions inherit to future jobs added to this file.
+permissions: {}
+
+jobs:
+  cargo-mutants:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      # Checkout the repo. persist-credentials is off because this job
+      # never pushes — it only creates issues via gh (separate auth call).
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      # Prebuilt binaries via taiki-e, not cargo install from source.
+      # Cuts install time from minutes to seconds.
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
+        with:
+          tool: cargo-mutants
+
+      # --in-place: mutates the working tree directly (ephemeral CI
+      #   container, no copy needed).
+      # --no-shuffle: deterministic file-then-line order across weekly
+      #   runs. Without this, the "top 10" list would fluctuate due to
+      #   RNG even when the code and tests haven't changed.
+      # -p warpllm: scope to the core crate only. Binding crates are
+      #   thin FFI shells where mutations produce false survivors.
+      - run: cargo mutants --in-place --no-shuffle -p warpllm
+
+      # Upload the full mutants.out directory (missed.txt, caught.txt,
+      # timeout.txt, unviable.txt). if: always() ensures the artifact is
+      # available even if cargo-mutants itself fails or times out — exactly
+      # when debugging output is most valuable. The issue body links to
+      # this artifact for the complete list beyond the top 10 shown.
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        if: always()
+        with:
+          name: mutants.out
+          path: mutants.out
+
+      # Gate on missed.txt: -s checks file exists AND is non-empty.
+      # When no mutants survived, the job completes silently — no issue
+      # filed, no noise in the tracker.
+      - name: Check for new mutants
+        if: always()
+        run: |
+          if [ -s mutants.out/missed.txt ]; then
+            echo "New missed mutants found"
+            MUTANTS_VERSION=$(cargo mutants --version)
+            gh issue create \
+              --title "New Mutants Found" \
+              --body "$(cat <<EOF
+          Displaying up to the first 10 mutants:
+          \`\`\`
+          $(head -n 10 mutants.out/missed.txt)
+          \`\`\`
+          Running cargo mutants version: ${MUTANTS_VERSION}
+          For the complete list, please check the [mutants.out artifact](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+          EOF
+          )"
+          else
+            echo "No new mutants found"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

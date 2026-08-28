@@ -15,3 +15,6 @@ dist/
 # Node
 node_modules/
 *.node
+
+# macOS
+.DS_Store

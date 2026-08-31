@@ -141,6 +141,34 @@ fn openrouter_errors_name_openrouter() {
     });
 }
 
+/// A cloaked slug routes like any other. `stealth/` is a vendor to OpenRouter
+/// and nothing special to warpllm — the roster's `model:` ships both segments,
+/// and the anonymity is the provider's business, not the gateway's.
+#[test]
+fn openrouter_routes_a_cloaked_slug() {
+    with_openrouter_key(async {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", format!("Bearer {OPENROUTER_KEY}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openrouter_completion_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let completion = client_for(&server)
+            .chat_completions(request("openrouter/stealth/ox-alpha"))
+            .await
+            .unwrap();
+
+        assert_eq!(completion.model, "openrouter/stealth/ox-alpha");
+
+        let sent: serde_json::Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+        assert_eq!(sent["model"], "stealth/ox-alpha");
+    });
+}
+
 /// OpenRouter is an aggregator, so its roster keys carry a vendor prefix that
 /// the direct providers do not. The registry is closed either way: an
 /// unlisted slug is an error before any request, and a bare model name under

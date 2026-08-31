@@ -793,6 +793,28 @@ providers:
         capabilities:
           max_input_tokens: 1050000
           max_output_tokens: 128000
+      # Checked 2026-08-24: a CLOAKED model — OpenRouter serves it under the
+      # `stealth/` vendor and names no lab behind it, so there is no upstream
+      # model page to check this entry against and the usual second source
+      # does not exist. One endpoint, whose own name is "Stealth": 1,048,576
+      # context and 131,072 max output, and being alone it is trivially the
+      # narrowest. Free while it is cloaked, which is what a cloak is for.
+      #
+      # Expect this one to be REMOVED rather than deprecated. A cloak ends
+      # when the lab announces the weights, and the slug is withdrawn on the
+      # day rather than carrying a date anyone can read ahead of time —
+      # OpenRouter's `expiration_date` for it is the year 2098, a placeholder,
+      # so `deprecation_date` is deliberately absent here. Nothing to do until
+      # it 404s, at which point the remedy is deleting these lines.
+      # <https://openrouter.ai/stealth/ox-alpha>
+      openrouter/stealth/ox-alpha:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        model: stealth/ox-alpha
+        capabilities:
+          max_input_tokens: 1048576
+          max_output_tokens: 131072
       # Checked 2026-08-09: the `~deepseek/…-latest` alias, always the newest
       # DeepSeek V4 Flash revision — 1,048,576 context, which every member of
       # the family shares, so the alias cannot resolve to something narrower.

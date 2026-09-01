@@ -16,6 +16,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 warpllm = { path = "crates/warpllm" }
+async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json"] }

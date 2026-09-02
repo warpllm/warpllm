@@ -214,28 +214,32 @@ This project is to lay out the most resilient open source productionization laye
 ## Status
 
 > [!IMPORTANT]
-> The published packages are **0.4.0**, which adds the OpenCode Zen provider
-> and lets a client declare the providers it serves. It is **source-breaking
-> for Rust only**: `ClientConfig` gained a field, so an exhaustive struct
-> literal no longer compiles — add `providers: None`, or switch to
-> `..Default::default()`. Python and TypeScript are purely additive. See the
-> [changelog](CHANGELOG.md) before upgrading from `0.3.x`.
+> The published packages are **0.5.0**, which lets a client bring its own
+> roster file — so a self-hosted OpenAI-compatible server is a routable target
+> without forking the crate — and adds weighted load balancing (Rust only) and
+> Mistral. It is **source-breaking for Rust only**: `ClientConfig` gained a
+> field, so an exhaustive struct literal no longer compiles — add
+> `specs_path: None`, or switch to `..Default::default()`. Python and
+> TypeScript are purely additive. See the [changelog](CHANGELOG.md) before
+> upgrading from `0.4.x`.
 >
 > The OpenAI-compatible HTTP gateway has landed on `main` but is **not
 > released yet**.
 
-| | Released (0.4.0) | On `main` |
+| | Released (0.5.0) | On `main` |
 | --- | --- | --- |
 | OpenAI chat completions, non-streaming | Yes | Yes |
 | `provider/model` routing strings | Provider registry | Provider registry |
 | DeepSeek, OpenRouter | Yes | Yes |
 | Kimi | Yes | Yes |
+| Mistral | Yes | Yes |
 | OpenCode Zen | Yes | Yes |
 | Declaring the providers a client serves | Yes | Yes |
-| Self-hosted models via your own roster file | — | Unreleased |
+| Self-hosted models via your own roster file | Yes | Yes |
 | OpenAI-compatible HTTP gateway | — | Unreleased |
 | Streaming | Yes | Yes |
-| Failover, load balancing, caching, metrics | — | — |
+| Weighted load balancing | Rust only | Rust only |
+| Failover, caching, metrics | — | — |
 
 Unlisted models are rejected rather than guessed at, so routing a name warpllm
 doesn't know is an error, not a surprise upstream bill.

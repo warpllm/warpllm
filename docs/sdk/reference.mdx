@@ -58,11 +58,13 @@ not reimplementations — so behaviour cannot drift between them.
         timeout=None,              # seconds; total deadline. Default 600
         stream_read_timeout=None,  # seconds; longest silence on a stream
         providers=None,            # narrow this client to named providers
+        specs_path=None,           # a roster file of your own, merged over the
+                                   # built-in one; also WARPLLM_SPECS
     )
     ```
 
-    All four parameters are keyword-only and optional. `AsyncWarpLLM` takes the
-    same four.
+    All five parameters are keyword-only and optional. `AsyncWarpLLM` takes the
+    same five.
   </Tab>
 
   <Tab title="TypeScript">
@@ -74,6 +76,8 @@ not reimplementations — so behaviour cannot drift between them.
       timeout: undefined,           // SECONDS; total deadline. Default 600
       streamReadTimeout: undefined, // SECONDS; longest silence on a stream
       providers: undefined,         // narrow this client to named providers
+      specsPath: undefined,         // a roster file of your own, merged over
+                                    // the built-in one; also WARPLLM_SPECS
     })
     ```
 
@@ -94,6 +98,7 @@ not reimplementations — so behaviour cannot drift between them.
     ```rust
     pub struct ClientConfig {
         pub base_url: Option<String>,
+        pub specs_path: Option<PathBuf>,
         pub timeout_secs: Option<u64>,
         pub stream_read_timeout_secs: Option<u64>,
         pub providers: Option<BTreeMap<String, ProviderConfig>>,
@@ -101,9 +106,10 @@ not reimplementations — so behaviour cannot drift between them.
     ```
 
     <Note>
-      `ClientConfig` is `Default`, and it gained `providers` in 0.4.0 — an
-      exhaustive struct literal from 0.3.x no longer compiles. Add
-      `providers: None`, or use `..Default::default()`.
+      `ClientConfig` is `Default`, and it has gained a field in each of the
+      last two releases — `providers` in 0.4.0, `specs_path` in 0.5.0 — so an
+      exhaustive struct literal from either no longer compiles. Add the missing
+      field as `None`, or use `..Default::default()` and stop having to.
     </Note>
   </Tab>
 </Tabs>
@@ -707,7 +713,7 @@ provider omitted from one it sent as `null`.
     ```python
     import warpllm
 
-    warpllm.__version__   # "0.4.0"
+    warpllm.__version__   # "0.5.0"
     warpllm.version()     # the same string, from the native binary
     ```
   </Tab>
@@ -716,13 +722,13 @@ provider omitted from one it sent as `null`.
     ```ts
     import { version } from '@warpllm/warpllm'
 
-    console.log(version()) // "0.4.0"
+    console.log(version()) // "0.5.0"
     ```
   </Tab>
 
   <Tab title="Rust">
     ```rust
-    println!("{}", warpllm::version()); // "0.4.0"
+    println!("{}", warpllm::version()); // "0.5.0"
     ```
 
     warpllm emits through [`tracing`](https://docs.rs/tracing) and installs no

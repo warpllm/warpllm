@@ -8,7 +8,7 @@ Versions follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a breaking change bumps the MINOR number: `0.1.x` and `0.2.x` are
 incompatible, and `^0.1` will not upgrade you into one.
 
-## [Unreleased]
+## [0.5.0] - 2026-09-02
 
 Point warpllm at your own roster. Self-hosted OpenAI-compatible servers — vLLM,
 TGI, Ollama, llama.cpp — are first-class routable targets, with no fork and no
@@ -86,6 +86,11 @@ pattern would have to claim both on behalf of models nobody enumerated, which is
 the same fails-open claim a bare `{}` entry has always been refused for. If your
 server's model set moves often, generate the file from its own `/v1/models`.
 
+**Also in this release.** Weighted load balancing across a fixed set of models,
+Mistral as a provider, OpenRouter's cloaked `stealth/ox-alpha`, and an explicit
+`null` on `temperature`, `max_tokens` or `top_p` reaching the backend instead of
+being dropped on the way out.
+
 ### Added
 
 - `ClientConfig::specs_path`, `WarpLLM(specs_path=…)` in Python,
@@ -108,6 +113,46 @@ server's model set moves often, generate the file from its own `/v1/models`.
 - `examples/warpllm.yaml` and `examples/self_hosted.{rs,py,ts}`, plus
   `tests/live_self_hosted.rs` — an opt-in test against a real server, since a
   mock cannot prove that a real backend's replies decode.
+- **`BalancedClient`, weighted load balancing across a fixed set of models.**
+  Built from a `&Client` and a list of `(model_str, weight)` pairs; its
+  `chat_completions` and `chat_completions_stream` pick a candidate, write it
+  onto the request, and hand it to the inner client — so the same four gates
+  that validate an ordinary request validate a balanced one, and a candidate
+  that is not on that client's roster fails when the balancer is built rather
+  than at the request that happened to land on it.
+
+  ```rust
+  let balanced = BalancedClient::new(&client, &[
+      ("openai/gpt-5.6", 3),
+      ("deepseek/deepseek-v4-pro", 1),
+  ])?;
+  ```
+
+  Selection is Nginx's smooth weighted round-robin: exact distribution over each
+  cycle, with one candidate's turns spread through the cycle rather than
+  arriving in a run. The whole of the state is one `AtomicI32` per candidate and
+  the candidate set is fixed at construction, so nothing here grows at runtime.
+  Two threads racing may select the same candidate — one extra request to a
+  provider that was due one anyway — and the cycle's distribution still holds.
+
+  **Rust only.** Neither binding exposes it yet.
+- **Mistral**, a new `mistral` provider at `api.mistral.ai/v1` with
+  `MISTRAL_API_KEY`, serving four models: `codestral-2501`, `ministral-8b-2410`,
+  `mistral-large-2411` and `pixtral-large-2411`. Dated versions rather than the
+  floating `-latest` aliases, so a model string on the roster keeps naming the
+  weights it was checked against.
+
+  No `max_output_tokens` on any of the four: Mistral documents no fixed ceiling,
+  only a shared `prompt_tokens + max_tokens <= context_window` budget, and a
+  number invented for the field would be a promise the provider never made.
+- `openrouter/stealth/ox-alpha`, a cloaked model with a 1M window — 1,048,576
+  in, 131,072 out, served by the single `Stealth` endpoint. No lab is named
+  behind it, so the upstream model page a roster entry is normally checked
+  against does not exist for this one; the endpoint list is what can be checked,
+  and it is what the entry records. It carries no `deprecation_date` on purpose:
+  a cloak ends by withdrawal on announcement day rather than on a published
+  schedule, and OpenRouter's own `expiration_date` for it is the year 2098, a
+  placeholder. When the slug 404s, the remedy is deleting the entry.
 
 ### Fixed
 
@@ -140,6 +185,20 @@ server's model set moves often, generate the file from its own `/v1/models`.
   No other provider reclassifies: nothing on the roster mapped a `type` of its
   own, so every existing failure resolves exactly as before. `ErrorMapper` is
   internal, so no package's API changes.
+
+- **An explicit `null` on `temperature`, `max_tokens` or `top_p` was dropped.**
+  A caller sending `{"temperature": null}` had it forwarded as `{}`, on every
+  OpenAI-compatible backend that reads a null differently from an absence.
+  OpenAI documents all three as nullable, so the distinction was the caller's
+  to make and warpllm was erasing it.
+
+  The three read as three states now — absent, null, a value — the way `stop`,
+  `stream_options` and `reasoning_effort` already did, and the arrived value is
+  retained under `ext["openai_compat"]` so a same-protocol round trip renders
+  the null back out. The gateway IR stays a plain `Option<T>`: to a renderer for
+  another protocol a null and an absence are the same thing, and only the
+  same-protocol residue carries the difference, which is what it is for.
+  Fixes #51.
 
 - A provider taking no credential was **unreachable**, not merely unsupported.
   `env_api_key` has always been optional, but such a provider was skipped when
@@ -568,6 +627,8 @@ environment is not supported. The OpenAI-compatible HTTP gateway
 Early SDK releases serving OpenAI chat completions only, before the provider
 registry existed. See the [release tags](https://github.com/warpllm/warpllm/tags).
 
+[0.5.0]: https://github.com/warpllm/warpllm/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/warpllm/warpllm/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/warpllm/warpllm/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/warpllm/warpllm/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/warpllm/warpllm/compare/v0.1.4...v0.2.0

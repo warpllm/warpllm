@@ -46,7 +46,7 @@ of it.
 
 ## What ships today
 
-The published packages are **0.4.0**. warpllm is early, and this table is the
+The published packages are **0.5.0**. warpllm is early, and this table is the
 honest version of what you can build on.
 
 | Capability | Status |
@@ -54,12 +54,12 @@ honest version of what you can build on.
 | Chat completions, non-streaming | Released |
 | Chat completions, streaming | Released |
 | `provider/model` routing strings | Released |
-| OpenAI, DeepSeek, Kimi, OpenRouter, OpenCode Zen | Released |
+| OpenAI, DeepSeek, Kimi, OpenRouter, OpenCode Zen, Mistral | Released |
 | Declaring the providers a client serves | Released |
 | Normalized error taxonomy | Released |
-| Mistral | On `main`, unreleased |
+| Bringing your own roster file | Released |
+| Weighted load balancing (Rust only) | Released |
 | OpenAI-compatible HTTP gateway | On `main`, unreleased |
-| Weighted load balancing (Rust only) | On `main`, unreleased |
 | Anthropic's Messages protocol | On `main`, not yet routable |
 | Claude direct on `api.anthropic.com` | Not yet — [#23](https://github.com/warpllm/warpllm/issues/23) |
 | Failover, retries, caching, metrics | Planned |
@@ -73,12 +73,12 @@ honest version of what you can build on.
 </Note>
 
 <Info>
-  0.4.0 is **source-breaking for Rust only**: `ClientConfig` gained a
-  `providers` field, so an exhaustive struct literal no longer compiles — add
-  `providers: None`, or switch to `..Default::default()`. Python and TypeScript
-  are purely additive. Read the
+  0.5.0 is **source-breaking for Rust only**: `ClientConfig` gained a
+  `specs_path` field, so an exhaustive struct literal no longer compiles — add
+  `specs_path: None`, or switch to `..Default::default()`. Python and
+  TypeScript are purely additive. Read the
   [changelog](https://github.com/warpllm/warpllm/blob/main/CHANGELOG.md) before
-  upgrading from `0.3.x`.
+  upgrading from `0.4.x`.
 </Info>
 
 ## Design decisions worth knowing up front

@@ -68,6 +68,7 @@ pub(crate) fn ingest_request(
     let body = serde_json::to_value(&request).expect("wire request serializes");
     let CreateChatCompletionRequest {
         model: _,
+        models: _,
         messages,
         temperature,
         max_tokens,
@@ -407,6 +408,7 @@ pub(crate) fn render_request(
     };
     Ok(CreateChatCompletionRequest {
         model: request.model.clone(),
+        models: None,
         messages,
         // Each of these prefers what arrived over what the gateway IR can
         // reconstruct: a null the caller sent survives the round trip.

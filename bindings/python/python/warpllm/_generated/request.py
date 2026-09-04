@@ -138,7 +138,8 @@ class ChatCompletionRequestMessage(TypedDict):
 
 
 class CreateChatCompletionRequest(TypedDict):
-    model: str
+    model: NotRequired[str]
+    models: NotRequired[list[str] | None]
     messages: list[ChatCompletionRequestMessage]
     temperature: NotRequired[float | None]
     max_tokens: NotRequired[int | None]

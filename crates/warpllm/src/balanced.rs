@@ -90,10 +90,24 @@ impl<'a> BalancedClient<'a> {
 
     /// Selects the next candidate and returns a new request with the
     /// `model` field rewritten to match.
-    fn prepare(&self, request: CreateChatCompletionRequest) -> CreateChatCompletionRequest {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] if the request carries a `models` failover
+    /// list: the balancer's weighted selection IS the candidate choice, and
+    /// silently dropping the caller's redundancy would leave them believing
+    /// they have failover when they have none.
+    fn prepare(&self, request: CreateChatCompletionRequest) -> Result<CreateChatCompletionRequest> {
+        if request.models.is_some() {
+            return Err(Error::InvalidInput(
+                "models is not supported with BalancedClient; \
+                 the balancer selects the candidate"
+                    .into(),
+            ));
+        }
         let mut request = request;
         request.model.clone_from(&self.balancer.select().model_str);
-        request
+        Ok(request)
     }
 
     /// Performs a non-streaming chat completion via the next balanced candidate.
@@ -106,7 +120,7 @@ impl<'a> BalancedClient<'a> {
         &self,
         request: CreateChatCompletionRequest,
     ) -> Result<CreateChatCompletionResponse> {
-        let request = self.prepare(request);
+        let request = self.prepare(request)?;
         self.client.chat_completions(request).await
     }
 
@@ -117,7 +131,7 @@ impl<'a> BalancedClient<'a> {
         &self,
         request: CreateChatCompletionRequest,
     ) -> Result<ChatCompletionStream> {
-        let request = self.prepare(request);
+        let request = self.prepare(request)?;
         self.client.chat_completions_stream(request).await
     }
 }

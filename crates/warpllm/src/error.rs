@@ -190,6 +190,41 @@ pub enum Error {
     /// Carries no claim either way — read the [`ProviderError`] and decide.
     #[error("{0}")]
     Unknown(Box<ProviderError>),
+
+    // ----------------------------------------- failover exhaustion
+    /// Every candidate in a per-request failover list has been tried and
+    /// failed. Carries every attempt in order — candidate string and the
+    /// failure it produced — because an exhausted-candidates error that
+    /// flattens distinct failures into one opaque message throws away the
+    /// only useful diagnostic.
+    #[error(
+        "all candidates exhausted for the {models:?} chain \
+         ({} attempted)",
+        tried.len()
+    )]
+    CandidatesExhausted {
+        /// The ordered candidate chain, deduplicated, as the caller sent it
+        /// (or the single `model` string). Unlike a `requested_model` echo,
+        /// this is never empty on the `models` path.
+        models: Vec<String>,
+        /// Each candidate attempted, in order, with the error it produced.
+        tried: Vec<(String, Box<Error>)>,
+    },
+    /// The per-request failover chain ran out of the deadline configured in
+    /// [`crate::ClientConfig::timeout_secs`] before any candidate finished.
+    ///
+    /// Distinct from [`Error::Network`] (a backend timeout is a network
+    /// failure) and from [`Error::InvalidInput`] (nothing about the caller's
+    /// body was wrong): an operational timeout is the provider's or the
+    /// network's fault — 504, not 400 — or client-side retry logic stops
+    /// firing exactly when upstream is degraded. Carries every attempt made
+    /// before the deadline elapsed.
+    #[error("failover deadline exceeded ({} attempted)", tried.len())]
+    DeadlineExceeded {
+        /// Each candidate attempted before the deadline, in order, with the
+        /// error it produced.
+        tried: Vec<(String, Box<Error>)>,
+    },
 }
 
 /// Who a failure came from.
@@ -259,7 +294,9 @@ impl Error {
             | Error::StreamStalled { .. }
             | Error::NotImplemented(_)
             | Error::Internal(_)
-            | Error::InvalidRoster(_) => Origin::Gateway,
+            | Error::InvalidRoster(_)
+            | Error::CandidatesExhausted { .. }
+            | Error::DeadlineExceeded { .. } => Origin::Gateway,
             Error::RateLimited(_)
             | Error::QuotaExceeded(_)
             | Error::Overloaded(_)
@@ -292,6 +329,10 @@ impl Error {
             | Error::ModelNotFound(e)
             | Error::InvalidRequest(e)
             | Error::Unknown(e) => Some(e),
+            // Aggregate failover failures are gateway-level; attaching one
+            // attempt's ProviderError — and with it its retry_after — would
+            // tell a caller to retry a chain that is already exhausted.
+            Error::CandidatesExhausted { .. } | Error::DeadlineExceeded { .. } => None,
             _ => None,
         }
     }
@@ -328,6 +369,8 @@ impl Error {
             Error::ModelNotFound(_) => "model_not_found",
             Error::InvalidRequest(_) => "provider_invalid_request",
             Error::Unknown(_) => "provider_unknown",
+            Error::CandidatesExhausted { .. } => "candidates_exhausted",
+            Error::DeadlineExceeded { .. } => "deadline_exceeded",
         }
     }
 

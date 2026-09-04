@@ -273,6 +273,21 @@ fn opinion(error: &Error) -> Opinion {
         // An unattributed 5xx is already the status OpenAI would send, and
         // which 5xx it is came from the provider — nothing to improve on.
         Error::ServerError(_) => (Upstream, Some("server_error"), None),
+        // All candidates in a failover list failed. A fixed 503 because no
+        // single provider produced this — it is service-unavailable at the
+        // gateway level, and borrowing one attempt's status would make the
+        // caller's HTTP status depend on candidate order, and its retry_after
+        // on a single provider's rate limit, for a failure that spans several
+        // providers. The per-attempt detail rides in the body instead.
+        Error::CandidatesExhausted { .. } => {
+            (Is(503), Some("server_error"), Some("candidates_exhausted"))
+        }
+        // The failover chain exceeded the configured total deadline. Same
+        // reasoning as StreamStalled below: an operational timeout is the
+        // backend's fault, never the caller's input.
+        Error::DeadlineExceeded { .. } => {
+            (Is(504), Some("server_error"), Some("deadline_exceeded"))
+        }
         // Nothing classified it. Everything the upstream said stands.
         _ => (Upstream, None, None),
     };
@@ -594,5 +609,52 @@ mod tests {
         let detail = err.provider_error().unwrap();
         assert_eq!(detail.retry_after, Some(Duration::from_secs(42)));
         assert_eq!(detail.request_id.as_deref(), Some("req-abc"));
+    }
+
+    /// An exhausted chain maps to a FIXED 503 — the gateway is unavailable,
+    /// not one provider — with warpllm's own slug. It has no retry-after: no
+    /// single provider produced this, so no single provider's backoff belongs
+    /// in the response.
+    #[test]
+    fn an_exhausted_chain_is_a_gateway_wide_503() {
+        let err = Error::CandidatesExhausted {
+            models: vec!["openai/gpt-5.6".into(), "deepseek/deepseek-v4-flash".into()],
+            tried: vec![
+                ("openai/gpt-5.6".into(), Box::new(classified(429, "{}"))),
+                (
+                    "deepseek/deepseek-v4-flash".into(),
+                    Box::new(classified(503, "{}")),
+                ),
+            ],
+        };
+        assert!(err.provider_error().is_none(), "no attempt IS the failure");
+        let rendered = to_openai(&err);
+        assert_eq!(rendered.status, Some(503));
+        assert_eq!(rendered.error.error_type, "server_error");
+        assert_eq!(rendered.error.code.as_deref(), Some("candidates_exhausted"));
+        assert_eq!(
+            rendered.headers.get("retry-after"),
+            None,
+            "one attempt's rate limit must not leak onto the gateway's verdict"
+        );
+        assert!(
+            !rendered.headers.contains_key("x-request-id"),
+            "same for a request id: several attempts, not one"
+        );
+    }
+
+    /// A chain that ran out of TIME is the backend's fault — never the
+    /// caller's payload — so it is a 504, and it carries no retry-after for
+    /// the same reason an exhausted chain carries none.
+    #[test]
+    fn a_chain_deadline_is_a_gateway_504() {
+        let err = Error::DeadlineExceeded {
+            tried: vec![("openai/gpt-5.6".into(), Box::new(classified(429, "{}")))],
+        };
+        let rendered = to_openai(&err);
+        assert_eq!(rendered.status, Some(504));
+        assert_eq!(rendered.error.error_type, "server_error");
+        assert_eq!(rendered.error.code.as_deref(), Some("deadline_exceeded"));
+        assert!(rendered.headers.is_empty(), "{:?}", rendered.headers);
     }
 }

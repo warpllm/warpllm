@@ -72,6 +72,20 @@ pub(crate) fn namespaced(fields: UnknownFields) -> ProviderExt {
 pub(crate) fn role_from_wire(role: String) -> (Role, Option<String>) {
     match role.as_str() {
         "system" => (Role::System, None),
+        // OpenAI's newer spelling for a system instruction, and the ONLY
+        // non-identity arm here. It lands on `Role::System` because that is
+        // what it means and what `Role::System`'s own doc has always claimed;
+        // the raw spelling rides the residue, so a same-protocol round trip
+        // still says `developer`.
+        //
+        // It used to fall through to the catch-all and land on `Role::User`,
+        // which was invisible for exactly as long as one protocol existed —
+        // the raw spelling was restored either way. A second protocol is what
+        // made it observable: the Anthropic renderer may not read this
+        // protocol's bag, so all it saw was a user turn, and a developer
+        // instruction reached Claude as an ordinary message instead of a
+        // top-level `system`.
+        "developer" => (Role::System, Some(role)),
         "user" => (Role::User, None),
         "assistant" => (Role::Assistant, None),
         "tool" => (Role::Tool, None),
@@ -201,15 +215,29 @@ mod tests {
     /// it and render can restore it — which is what makes a same-protocol round
     /// trip lossless whatever role it lands on.
     ///
-    /// NOTE: it lands on [`Role::User`], while `Role::System`'s own doc claims
-    /// System "covers OpenAI `system` AND `developer`". The two disagree. This
-    /// test pins the CODE's behaviour, not the doc's claim; nothing observable
-    /// differs until a second protocol renders this message, since the raw
-    /// spelling is restored verbatim for openai_compat either way.
     #[test]
     fn an_unknown_wire_role_returns_its_raw_spelling() {
-        let (role, raw) = role_from_wire("developer".into());
+        let (role, raw) = role_from_wire("captain".into());
         assert_eq!(role, Role::User);
+        assert_eq!(raw.as_deref(), Some("captain"));
+    }
+
+    /// `developer` is a SYSTEM instruction, which is what `Role::System`'s doc
+    /// has always claimed and what the code did not do.
+    ///
+    /// The note this test used to carry called its own shot: nothing
+    /// observable differed "until a second protocol renders this message",
+    /// because the raw spelling was restored verbatim either way. Anthropic is
+    /// that second protocol, and it may not read this one's bag — so all it saw
+    /// was `Role::User`, and a developer instruction reached Claude as an
+    /// ordinary user turn rather than a top-level `system`.
+    ///
+    /// The raw spelling still rides along, which is what keeps the
+    /// same-protocol round trip saying `developer` rather than `system`.
+    #[test]
+    fn a_developer_message_is_a_system_instruction() {
+        let (role, raw) = role_from_wire("developer".into());
+        assert_eq!(role, Role::System);
         assert_eq!(raw.as_deref(), Some("developer"));
     }
 }

@@ -10,4 +10,4 @@ mod stream;
 pub(crate) use exchange::{ChatChunkStream, exchange, exchange_stream};
 pub(crate) use request::{ingest_request, render_request};
 pub(crate) use response::{ingest_response, render_response};
-pub(crate) use stream::{ingest_chunk, render_chunk};
+pub(crate) use stream::{ToolCallOrdinals, ingest_chunk, render_chunk};

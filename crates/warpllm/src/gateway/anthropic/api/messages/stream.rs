@@ -508,6 +508,17 @@ fn delta_usage(usage: &MessageDeltaUsage, state: &StreamState) -> types::Usage {
 /// Reads only this protocol's namespace, through [`merged_ext`] — never
 /// `ext.get`, which would bypass [`Protocol::may_read`] and let another
 /// protocol's retained fields onto this wire.
+// Dead until an Anthropic-shaped INGRESS exists — a `client.messages()`
+// entrypoint and a `/v1/messages` route on the server — which is out of scope
+// for #23. warpllm is CALLED in chat completions and only SPEAKS this protocol,
+// so the reverse direction has no caller: this function is the inverse of the `ingest_event` that `ChatChunkStream`
+// does call, and is additionally what the round-trip tests are written against.
+//
+// On the ENTRY POINT rather than on its helpers, and that is the whole reason
+// three attributes cover what were twenty-eight warnings: an allowed item counts
+// as a live root, so everything it reaches is reachable again. A helper that goes
+// dead for its OWN reason still warns.
+#[allow(dead_code)]
 pub(crate) fn render_event(
     chunk: &types::ChatResponseChunk,
     provider: &str,

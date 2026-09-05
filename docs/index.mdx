@@ -60,16 +60,16 @@ honest version of what you can build on.
 | Bringing your own roster file | Released |
 | Weighted load balancing (Rust only) | Released |
 | OpenAI-compatible HTTP gateway | On `main`, unreleased |
-| Anthropic's Messages protocol | On `main`, not yet routable |
-| Claude direct on `api.anthropic.com` | Not yet — [#23](https://github.com/warpllm/warpllm/issues/23) |
+| Claude direct on `api.anthropic.com` | On `main`, unreleased |
 | Failover, retries, caching, metrics | Planned |
 
 <Note>
-  Those two Anthropic rows say different things. warpllm can now translate a
-  chat-completions request into Anthropic's `/messages` shape and read its
-  streamed reply back, but no model string routes there yet — so Claude is
-  still reached through OpenRouter. See
-  [Model routing](/concepts/model-routing).
+  Claude is the first model warpllm reaches over a protocol that is **not**
+  chat completions. You still write an OpenAI-shaped request and read an
+  OpenAI-shaped reply; warpllm translates to Anthropic's `/messages` on the way
+  out and back, streaming included. Two gaps are worth knowing before you
+  route production traffic there — see
+  [Model routing](/concepts/model-routing#claude-over-anthropics-own-protocol).
 </Note>
 
 <Info>

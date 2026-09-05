@@ -79,14 +79,50 @@ A model name may contain further slashes after the provider prefix —
 `openrouter/anthropic/claude-sonnet-4` is the OpenRouter provider serving the
 `anthropic/claude-sonnet-4` slug.
 
-<Note>
-  OpenRouter is the only route to Claude today. A direct `anthropic/` provider
-  is not yet registered, so `anthropic/claude-sonnet-4` fails the same way any
-  unknown string does. The protocol underneath it — translating your request
-  into Anthropic's `/messages` shape and its reply back — is on `main`;
-  routing to it is tracked in
-  [#23](https://github.com/warpllm/warpllm/issues/23).
-</Note>
+## Claude over Anthropic's own protocol
+
+`anthropic/` models go to `api.anthropic.com` directly, and they are the first
+on the roster reached over a protocol that is not chat completions. Nothing
+changes in your code: you send the same request shape and read the same reply
+shape, and warpllm translates both ways.
+
+```python Python
+# Claude direct — needs ANTHROPIC_API_KEY
+client.chat_completions({"model": "anthropic/claude-opus-5", "messages": messages})
+
+# The same model through OpenRouter — needs OPENROUTER_API_KEY
+client.chat_completions({"model": "openrouter/anthropic/claude-sonnet-4", "messages": messages})
+```
+
+Both routes work. Direct is one hop fewer and bills through Anthropic; the
+OpenRouter entry stays registered and unchanged.
+
+Two differences from a chat-completions provider are worth knowing:
+
+<AccordionGroup>
+  <Accordion title="max_tokens is always sent" icon="ruler">
+    Anthropic requires it and chat completions does not, so warpllm falls back
+    to the model's published output ceiling when you name none. Your own value
+    always wins. A model whose ceiling is undocumented and a request naming no
+    `max_tokens` is refused rather than given an invented default — truncating
+    a reply at a length nobody asked for looks like the model stopping early.
+  </Accordion>
+  <Accordion title="temperature, top_p and top_k are rejected by newer models" icon="triangle-exclamation">
+    Anthropic deprecated all three on Claude Opus 4.7 and later: a non-default
+    value returns a 400. warpllm forwards what you write rather than dropping
+    it, because dropping a parameter would change your request instead of
+    translating it — so the refusal is Anthropic's, with Anthropic's message.
+    Omit them for those models and steer with the prompt.
+  </Accordion>
+  <Accordion title="Extended thinking with tools is not yet complete" icon="brain">
+    Anthropic requires its own signed `thinking` blocks to be echoed back
+    alongside your tool results, and a chat-completions reply has nowhere to
+    carry them — so a *multi-turn* tool conversation with thinking enabled is
+    rejected by Anthropic on the second turn. Single-turn tool calls and
+    thinking-without-tools both work. Tracked in
+    [#23](https://github.com/warpllm/warpllm/issues/23).
+  </Accordion>
+</AccordionGroup>
 
 ## What the registry records
 

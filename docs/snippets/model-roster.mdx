@@ -2,6 +2,23 @@
     crates/warpllm/src/registry/specs.yaml. Do not edit by hand:
     run `uv run --with pyyaml docs/scripts/gen_model_roster.py`. */}
 
+### anthropic
+
+Base URL `https://api.anthropic.com/v1` &middot; API key `ANTHROPIC_API_KEY`
+
+| Model string | Sent upstream as | Context window | Max output | Streaming |
+| --- | --- | --- | --- | --- |
+| `anthropic/claude-fable-5` | `claude-fable-5` | 1,000,000 | 128,000 | Yes |
+| `anthropic/claude-haiku-4-5` | `claude-haiku-4-5-20251001` | 200,000 | 64,000 | Yes |
+| `anthropic/claude-opus-4-5` | `claude-opus-4-5-20251101` | 200,000 | 64,000 | Yes |
+| `anthropic/claude-opus-4-6` | `claude-opus-4-6` | 1,000,000 | 128,000 | Yes |
+| `anthropic/claude-opus-4-7` | `claude-opus-4-7` | 1,000,000 | 128,000 | Yes |
+| `anthropic/claude-opus-4-8` | `claude-opus-4-8` | 1,000,000 | 128,000 | Yes |
+| `anthropic/claude-opus-5` | `claude-opus-5` | 1,000,000 | 128,000 | Yes |
+| `anthropic/claude-sonnet-4-5` | `claude-sonnet-4-5-20250929` | 200,000 | 64,000 | Yes |
+| `anthropic/claude-sonnet-4-6` | `claude-sonnet-4-6` | 1,000,000 | 128,000 | Yes |
+| `anthropic/claude-sonnet-5` | `claude-sonnet-5` | 1,000,000 | 128,000 | Yes |
+
 ### deepseek
 
 Base URL `https://api.deepseek.com` &middot; API key `DEEPSEEK_API_KEY`

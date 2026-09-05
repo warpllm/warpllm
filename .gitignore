@@ -18,3 +18,7 @@ node_modules/
 
 # macOS
 .DS_Store
+
+# Tempest
+.tempest
+.tempest-pid

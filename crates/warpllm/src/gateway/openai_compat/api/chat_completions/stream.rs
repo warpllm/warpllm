@@ -223,9 +223,72 @@ fn ingest_tool_call_chunk(call: ChatCompletionMessageToolCallChunk) -> ContentDe
 
 /// Infallible: protocol fields restore from ext (a hook that corrupted a
 /// stashed value beyond its wire type falls back to dropping that field).
+/// One stream's map from the IR's tool-call correlation key to the ordinal
+/// this protocol requires.
+///
+/// The two are not the same number, and that is the whole reason this exists.
+/// [`ContentDelta::ToolCall::index`](types::ContentDelta) is documented as a
+/// stable CORRELATION KEY — it says which call a fragment belongs to and
+/// nothing more — while chat completions' `tool_calls[].index` is a 0-based
+/// index INTO the array a client assembles. Anthropic numbers every content
+/// block, so a reply that opens with text puts its first tool call at key 1;
+/// copying that through leaves a hole at 0, and openai-python's own streaming
+/// accumulator indexes `tool_calls` by that value — an out-of-range failure,
+/// not a cosmetic mismatch.
+///
+/// Scoped per CHOICE as well as per stream, because `tool_calls[].index` is
+/// numbered within one choice: two choices each opening a call would otherwise
+/// have the second one renumbered to 1. Anthropic has no multi-choice concept
+/// so its path never exercises that, but this renderer also serves `n > 1` on
+/// its own protocol, where it would be wrong.
+///
+/// On a same-protocol stream this is the IDENTITY, which is what makes it safe
+/// to apply everywhere rather than only on a translated path. Chat completions'
+/// own indices are already dense and 0-based in first-seen order, so mapping
+/// first-seen to position returns them unchanged.
+///
+/// Lives here rather than in the Anthropic gateway because the number being
+/// computed is THIS protocol's — the same seam `render_finish_reason` and
+/// `render_tool_call_kind` sit on. It is owned by
+/// [`ChatCompletionStream`](crate::ChatCompletionStream), the only scope that
+/// outlives a chunk.
+#[derive(Debug, Default)]
+pub(crate) struct ToolCallOrdinals {
+    /// `(choice, correlation key)` in first-seen order. An entry's POSITION
+    /// among the entries of its own choice IS the ordinal, so nothing is
+    /// counted or stored twice.
+    ///
+    /// A `Vec` rather than a `HashMap`: one reply holds a handful of tool
+    /// calls, so the scan is over that handful, and the length is bounded by
+    /// the reply rather than accumulating across them. A map would still need
+    /// a per-choice counter beside it to answer the same question.
+    seen: Vec<(u32, u32)>,
+}
+
+impl ToolCallOrdinals {
+    /// This key's ordinal within `choice`, assigning the next one if the key
+    /// is new. One pass, because finding the entry and counting the entries
+    /// before it are the same walk.
+    fn ordinal(&mut self, choice: u32, key: u32) -> u32 {
+        let mut ordinal = 0;
+        for &(seen_choice, seen_key) in &self.seen {
+            if seen_choice != choice {
+                continue;
+            }
+            if seen_key == key {
+                return ordinal;
+            }
+            ordinal += 1;
+        }
+        self.seen.push((choice, key));
+        ordinal
+    }
+}
+
 pub(crate) fn render_chunk(
     chunk: &types::ChatResponseChunk,
     provider: &str,
+    ordinals: &mut ToolCallOrdinals,
 ) -> CreateChatCompletionStreamResponse {
     let mut unknown_fields = merged_ext(&chunk.ext, provider);
     let object = take_string(&mut unknown_fields, "object")
@@ -244,7 +307,9 @@ pub(crate) fn render_chunk(
             .completions
             .iter()
             .enumerate()
-            .map(|(position, completion)| render_stream_choice(completion, position, provider))
+            .map(|(position, completion)| {
+                render_stream_choice(completion, position, provider, ordinals)
+            })
             .collect(),
         created: chunk.created.unwrap_or(0),
         model: chunk.model.clone(),
@@ -261,6 +326,7 @@ fn render_stream_choice(
     completion: &types::CompletionDelta,
     position: usize,
     provider: &str,
+    ordinals: &mut ToolCallOrdinals,
 ) -> StreamChoice {
     let mut unknown_fields = merged_ext(&completion.ext, provider);
     let index = unknown_fields
@@ -268,7 +334,10 @@ fn render_stream_choice(
         .and_then(|v| v.as_u64())
         .unwrap_or(position as u64) as u32;
     StreamChoice {
-        delta: render_delta(&completion.delta, provider),
+        // The choice index goes DOWN into the delta as well as onto the wire:
+        // a tool call's ordinal is numbered within its own choice. See
+        // [`ToolCallOrdinals`].
+        delta: render_delta(&completion.delta, provider, index, ordinals),
         finish_reason: render_delta_finish_reason(completion),
         index,
         logprobs: take_typed(&mut unknown_fields, "logprobs"),
@@ -317,7 +386,12 @@ fn render_tool_call_kind(kind: Option<&str>) -> Option<String> {
     })
 }
 
-fn render_delta(delta: &types::MessageDelta, provider: &str) -> ChatCompletionStreamResponseDelta {
+fn render_delta(
+    delta: &types::MessageDelta,
+    provider: &str,
+    choice: u32,
+    ordinals: &mut ToolCallOrdinals,
+) -> ChatCompletionStreamResponseDelta {
     let mut unknown_fields = merged_ext(&delta.ext, provider);
     let role = match unknown_fields.remove("role") {
         Some(Value::String(raw)) => Some(raw),
@@ -335,7 +409,10 @@ fn render_delta(delta: &types::MessageDelta, provider: &str) -> ChatCompletionSt
                 name,
                 arguments,
             } => tool_calls.push(ChatCompletionMessageToolCallChunk {
-                index: *index,
+                // The IR's value is a correlation key; this protocol's field is
+                // an ordinal. See [`ToolCallOrdinals`] for why they differ and
+                // why translating is an identity on a same-protocol stream.
+                index: ordinals.ordinal(choice, *index),
                 id: id.clone(),
                 function: Some(ToolCallChunkFunction {
                     arguments: arguments.clone(),
@@ -345,8 +422,23 @@ fn render_delta(delta: &types::MessageDelta, provider: &str) -> ChatCompletionSt
                 r#type: render_tool_call_kind(kind.as_deref()),
                 unknown_fields: UnknownFields::new(),
             }),
+            // Retained residue from THIS protocol, replayed verbatim — its
+            // `index` was already an ordinal when it arrived, and
+            // `Protocol::may_read` is what guarantees another protocol's
+            // residue never reaches here to be mistaken for one.
+            //
+            // It still has to CLAIM that ordinal. A passthrough call that took
+            // slot 0 without registering it left the slot free, so the next
+            // typed call was numbered 0 as well and the client merged two
+            // distinct calls into one array element. Registering is the
+            // identity for residue — first-seen order on a same-protocol
+            // stream is the order the indices already have — so this reserves
+            // the slot without renumbering anything.
             ContentDelta::Unknown(value) => {
-                if let Ok(call) = serde_json::from_value(value.clone()) {
+                if let Ok(mut call) =
+                    serde_json::from_value::<ChatCompletionMessageToolCallChunk>(value.clone())
+                {
+                    call.index = ordinals.ordinal(choice, call.index);
                     tool_calls.push(call);
                 }
             }
@@ -418,7 +510,11 @@ mod tests {
             ("refusal", FinishReason::ContentFilter, "content_filter"),
         ];
         for (raw, reason, expected) in rows {
-            let wire = render_chunk(&ending_chunk(raw, reason), "anthropic");
+            let wire = render_chunk(
+                &ending_chunk(raw, reason),
+                "anthropic",
+                &mut ToolCallOrdinals::default(),
+            );
             assert_eq!(
                 wire.choices[0].finish_reason.as_deref(),
                 Some(expected),
@@ -438,7 +534,11 @@ mod tests {
             ("stop", FinishReason::Stop),
             ("function_call", FinishReason::Other),
         ] {
-            let chunk = render_chunk(&ending_chunk(raw, reason), "anthropic");
+            let chunk = render_chunk(
+                &ending_chunk(raw, reason),
+                "anthropic",
+                &mut ToolCallOrdinals::default(),
+            );
             assert_eq!(
                 chunk.choices[0].finish_reason,
                 Some(super::super::response::render_finish_reason(raw, reason)),
@@ -455,14 +555,15 @@ mod tests {
         chunk.completions[0].finish_reason = None;
         chunk.completions[0].finish_reason_raw = None;
         assert_eq!(
-            render_chunk(&chunk, "anthropic").choices[0].finish_reason,
+            render_chunk(&chunk, "anthropic", &mut ToolCallOrdinals::default()).choices[0]
+                .finish_reason,
             None
         );
     }
 
     fn round_trip(body: Value, provider: &str) {
         let normalized = ingest_chunk(parse(body.clone()));
-        let rendered = render_chunk(&normalized, provider);
+        let rendered = render_chunk(&normalized, provider, &mut ToolCallOrdinals::default());
         assert_eq!(serde_json::to_value(&rendered).unwrap(), body);
     }
 
@@ -511,6 +612,199 @@ mod tests {
             },
             "obfuscation": "8Xk2p"
         })
+    }
+
+    /// A chunk carrying one tool-call fragment per `(choice, key)` pair given.
+    fn call_chunk(fragments: &[(u32, u32)]) -> types::ChatResponseChunk {
+        types::ChatResponseChunk {
+            id: "msg_1".into(),
+            model: "claude-opus-5".into(),
+            created: None,
+            completions: fragments
+                .iter()
+                .map(|&(choice, key)| {
+                    let mut ext = UnknownFields::new();
+                    ext.insert("index".into(), json!(choice));
+                    types::CompletionDelta {
+                        delta: types::MessageDelta {
+                            role: None,
+                            content: vec![ContentDelta::ToolCall {
+                                index: key,
+                                id: Some(format!("tu_{key}")),
+                                kind: Some("tool_use".into()),
+                                name: Some("get_weather".into()),
+                                arguments: None,
+                            }],
+                            ext: types::ProviderExt::new(),
+                        },
+                        finish_reason: None,
+                        finish_reason_raw: None,
+                        ext: namespaced(ext),
+                    }
+                })
+                .collect(),
+            usage: None,
+            ext: types::ProviderExt::new(),
+            source: None,
+        }
+    }
+
+    /// The wire `tool_calls[].index` of every fragment in one rendered chunk.
+    fn wire_indices(fragments: &[(u32, u32)], ordinals: &mut ToolCallOrdinals) -> Vec<Option<u32>> {
+        render_chunk(&call_chunk(fragments), "anthropic", ordinals)
+            .choices
+            .iter()
+            .map(|choice| choice.delta.tool_calls.as_ref().unwrap()[0].index.into())
+            .collect()
+    }
+
+    /// THE bug this whole map exists for. Anthropic numbers every content
+    /// block, so a reply that opens with text puts its first tool call at
+    /// key 1 — and `tool_calls[].index` is an index INTO the array a client
+    /// assembles, so copying 1 through leaves a hole at 0. openai-python's own
+    /// streaming accumulator indexes `tool_calls` by that value, which makes it
+    /// an out-of-range failure rather than a cosmetic mismatch.
+    #[test]
+    fn a_tool_calls_index_is_an_ordinal_not_the_correlation_key() {
+        let mut ordinals = ToolCallOrdinals::default();
+        assert_eq!(
+            wire_indices(&[(0, 1)], &mut ordinals),
+            vec![Some(0)],
+            "Anthropic's block index reached an OpenAI caller as an array index"
+        );
+    }
+
+    /// Every fragment of ONE call answers with the same ordinal, which is what
+    /// makes the ordinal usable as the array slot it claims to be. The opener
+    /// and its argument fragments arrive as separate chunks.
+    #[test]
+    fn every_fragment_of_one_call_keeps_its_ordinal() {
+        let mut ordinals = ToolCallOrdinals::default();
+        for _ in 0..3 {
+            assert_eq!(wire_indices(&[(0, 1)], &mut ordinals), vec![Some(0)]);
+        }
+    }
+
+    /// A second call takes the next slot, in the order the calls were first
+    /// seen rather than in the order of their keys.
+    #[test]
+    fn each_new_call_takes_the_next_slot() {
+        let mut ordinals = ToolCallOrdinals::default();
+        // Keys 5 then 2, deliberately not ascending: first-seen is the rule,
+        // so a version that sorted or subtracted a base would answer 3 and 0.
+        assert_eq!(wire_indices(&[(0, 5)], &mut ordinals), vec![Some(0)]);
+        assert_eq!(wire_indices(&[(0, 2)], &mut ordinals), vec![Some(1)]);
+        assert_eq!(wire_indices(&[(0, 5)], &mut ordinals), vec![Some(0)]);
+    }
+
+    /// On a SAME-protocol stream the map is the identity, which is what makes
+    /// it safe to apply on every path rather than only on a translated one.
+    /// This protocol's own indices are already dense and 0-based in first-seen
+    /// order, so first-seen-to-position returns them unchanged.
+    #[test]
+    fn a_same_protocol_streams_indices_are_unchanged() {
+        let mut ordinals = ToolCallOrdinals::default();
+        for key in 0..4 {
+            assert_eq!(
+                wire_indices(&[(0, key)], &mut ordinals),
+                vec![Some(key)],
+                "key {key} was renumbered on a stream that needed no remap"
+            );
+        }
+    }
+
+    /// One tool-call fragment on choice 0, as it arrives on the wire.
+    fn tool_call_chunk(call: Value) -> Value {
+        json!({
+            "id": "chatcmpl_1",
+            "created": 1_700_000_000,
+            "model": "gpt-5.6",
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": {"tool_calls": [call]}}]
+        })
+    }
+
+    /// The wire index a chunk's single tool call is rendered at, through the
+    /// REAL ingest path rather than a hand-built IR delta — which is the point
+    /// here, since the bug is about which path ingest chooses.
+    fn round_tripped_index(call: Value, ordinals: &mut ToolCallOrdinals) -> u32 {
+        render_chunk(
+            &ingest_chunk(parse(tool_call_chunk(call))),
+            "openai",
+            ordinals,
+        )
+        .choices[0]
+            .delta
+            .tool_calls
+            .as_ref()
+            .expect("the chunk carried a tool call")[0]
+            .index
+    }
+
+    /// A passthrough tool call OCCUPIES the slot it is replayed into.
+    ///
+    /// A `custom` tool is a `type` this protocol has but `ContentDelta::ToolCall`
+    /// cannot express, so ingest sends it down the verbatim path — and sent
+    /// whole in one chunk, NO fragment of that call ever takes the typed path
+    /// to register its key. A version that replayed it without claiming index 0
+    /// left the slot free, and the next typed call was numbered 0 as well:
+    /// two distinct calls merged into one element of the client's array.
+    #[test]
+    fn a_passthrough_tool_call_claims_its_ordinal() {
+        let mut ordinals = ToolCallOrdinals::default();
+        assert_eq!(
+            round_tripped_index(
+                json!({
+                    "index": 0,
+                    "id": "call_a",
+                    "type": "custom",
+                    "function": {"name": "run", "arguments": "{}"}
+                }),
+                &mut ordinals
+            ),
+            0,
+            "a verbatim replay renumbered the index it arrived with"
+        );
+        assert_eq!(
+            round_tripped_index(
+                json!({
+                    "index": 1,
+                    "id": "call_b",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": ""}
+                }),
+                &mut ordinals
+            ),
+            1,
+            "a typed call took the slot a passthrough call already held"
+        );
+    }
+
+    /// `tool_calls[].index` is numbered within ONE choice, so two choices each
+    /// opening a call are both slot 0. A map scoped per stream alone would
+    /// renumber the second choice's call to 1 and put it in a slot its own
+    /// array does not have.
+    ///
+    /// Anthropic has no multi-choice concept so its path never reaches this,
+    /// but the same renderer serves `n > 1` on its own protocol.
+    #[test]
+    fn ordinals_are_numbered_within_a_choice() {
+        let mut ordinals = ToolCallOrdinals::default();
+        // DIFFERENT keys per choice, and that is the whole design of this test.
+        // With the same key in both, a map that ignored the choice entirely
+        // would still answer 0 twice — the second lookup would find the first
+        // entry by key alone — and this would pass while proving nothing.
+        // Distinct keys are what force the scoping to be real.
+        assert_eq!(
+            wire_indices(&[(0, 5), (1, 9)], &mut ordinals),
+            vec![Some(0), Some(0)],
+            "a per-stream map renumbered a call that belongs to another choice"
+        );
+        // And within each of those choices, numbering still advances.
+        assert_eq!(
+            wire_indices(&[(0, 6), (1, 5)], &mut ordinals),
+            vec![Some(1), Some(1)]
+        );
     }
 
     /// The mandated test, chunk-side: an OpenAI-compatible chunk must survive
@@ -627,8 +921,11 @@ mod tests {
                 ext: types::ProviderExt::new(),
                 source: None,
             };
-            plain(&render_chunk(&chunk, "anthropic"))["choices"][0]["delta"]["tool_calls"][0]
-                ["type"]
+            plain(&render_chunk(
+                &chunk,
+                "anthropic",
+                &mut ToolCallOrdinals::default(),
+            ))["choices"][0]["delta"]["tool_calls"][0]["type"]
                 .clone()
         };
 
@@ -766,7 +1063,12 @@ mod tests {
         assert!(normalized.usage.is_none());
         assert_eq!(normalized.ext["openai_compat"]["usage"], Value::Null);
         assert_eq!(
-            serde_json::to_value(render_chunk(&normalized, "openai")).unwrap(),
+            serde_json::to_value(render_chunk(
+                &normalized,
+                "openai",
+                &mut ToolCallOrdinals::default()
+            ))
+            .unwrap(),
             nulled
         );
     }
@@ -812,7 +1114,7 @@ mod tests {
             "the answer must still follow the reasoning: {content:?}"
         );
 
-        let rendered = render_chunk(&normalized, "deepseek");
+        let rendered = render_chunk(&normalized, "deepseek", &mut ToolCallOrdinals::default());
         assert_eq!(
             rendered.choices[0].delta.unknown_fields["reasoning_content"],
             json!("step by step")
@@ -928,7 +1230,12 @@ mod tests {
                 let body: Value = serde_json::from_str(payload).unwrap();
                 let normalized = ingest_chunk(parse(body.clone()));
                 assert_eq!(
-                    serde_json::to_value(render_chunk(&normalized, provider)).unwrap(),
+                    serde_json::to_value(render_chunk(
+                        &normalized,
+                        provider,
+                        &mut ToolCallOrdinals::default()
+                    ))
+                    .unwrap(),
                     body,
                     "{name} lost something on the way through the IR"
                 );

@@ -553,7 +553,9 @@ unknown_means_an_unknown_tag!(ToolChoice {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolChoiceMode {
     /// Anthropic's inverted spelling of chat completions'
-    /// `parallel_tool_calls`. Neither has a gateway home, so both ride `ext`.
+    /// `parallel_tool_calls`. Typed on neither wire, but the two meet at
+    /// [`ChatRequest::parallel_tool_calls`](crate::gateway::types::ChatRequest),
+    /// which is what lets a caller forbid parallel calls across the seam.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_parallel_tool_use: Option<bool>,
     #[serde(flatten)]

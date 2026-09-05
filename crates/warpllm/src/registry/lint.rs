@@ -411,19 +411,26 @@ mod tests {
     /// contributor fix the line without opening `protocol/types.rs`.
     #[test]
     fn an_api_outside_the_vocabulary_fails_to_load() {
+        // `anthropic_messages` until that surface landed. A name warpllm has
+        // SINCE implemented would go on passing here only because it is a
+        // prefix of nothing, and then this test checks nothing — so the
+        // replacement is Anthropic's Message Batches API: a real surface, and
+        // not one on the way.
         let yaml = with(&model("demo/plain")).replace(
             "api: openai_compat_chat_completions",
-            "api: anthropic_messages",
+            "api: anthropic_messages_batches",
         );
         let err = load(&yaml).unwrap_err();
         assert!(
-            err.contains("unknown variant `anthropic_messages`"),
+            err.contains("unknown variant `anthropic_messages_batches`"),
             "{err}"
         );
         for known in [
             "openai_compat_chat_completions",
             "openai_compat_chat_completions_stream",
             "openai_compat_responses",
+            "anthropic_messages",
+            "anthropic_messages_stream",
         ] {
             assert!(err.contains(known), "vocabulary missing {known}: {err}");
         }

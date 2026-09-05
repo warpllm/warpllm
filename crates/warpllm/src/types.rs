@@ -150,6 +150,22 @@ pub enum Api {
     /// OpenAI's newer, stateful successor to chat completions.
     #[serde(rename = "openai_compat_responses")]
     OpenAiCompatResponses,
+    /// Anthropic's `/messages`: one request, one whole reply.
+    ///
+    /// A different PROTOCOL from the surfaces above, not another endpoint in
+    /// the same one — which is what makes it the first surface a caller can
+    /// reach without warpllm speaking the caller's protocol upstream. A
+    /// chat-completions request routed to a model serving this is translated
+    /// on the way out and back; see [`crate::Client::chat_completions`].
+    #[serde(rename = "anthropic_messages")]
+    AnthropicMessages,
+    /// The same request asked to stream, delivered as incremental chunks.
+    ///
+    /// Separate for the same reason the chat-completions pair is: a model can
+    /// serve one without the other, so declaring that one never implies this
+    /// one.
+    #[serde(rename = "anthropic_messages_stream")]
+    AnthropicMessagesStream,
 }
 
 impl Api {
@@ -166,6 +182,8 @@ impl Api {
             Api::OpenAiCompatChatCompletions => "openai_compat_chat_completions",
             Api::OpenAiCompatChatCompletionsStream => "openai_compat_chat_completions_stream",
             Api::OpenAiCompatResponses => "openai_compat_responses",
+            Api::AnthropicMessages => "anthropic_messages",
+            Api::AnthropicMessagesStream => "anthropic_messages_stream",
         }
     }
 }
@@ -236,6 +254,16 @@ mod tests {
             Api::OpenAiCompatResponses,
             Protocol::OpenAiCompat,
         ),
+        (
+            "anthropic_messages",
+            Api::AnthropicMessages,
+            Protocol::Anthropic,
+        ),
+        (
+            "anthropic_messages_stream",
+            Api::AnthropicMessagesStream,
+            Protocol::Anthropic,
+        ),
     ];
 
     /// The roster spells these by hand, and so do the `serde(rename)` on each
@@ -273,9 +301,16 @@ mod tests {
     /// A surface warpllm has never heard of fails to parse, which is what
     /// keeps a misspelling out of the roster. The message names the whole
     /// vocabulary so the line can be fixed without opening this file.
+    ///
+    /// The name here was `anthropic_messages` until that surface landed, which
+    /// is the hazard this comment exists for: the test goes on passing against
+    /// a name warpllm has SINCE implemented only because it also matches the
+    /// prefix of a longer unknown one, and then it is checking nothing.
+    /// Anthropic's Message Batches API is the replacement — a real surface,
+    /// and not one on the way.
     #[test]
     fn an_unknown_surface_is_rejected() {
-        let err = serde_json::from_value::<Api>(serde_json::json!("anthropic_messages"))
+        let err = serde_json::from_value::<Api>(serde_json::json!("anthropic_messages_batches"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown variant"), "{err}");

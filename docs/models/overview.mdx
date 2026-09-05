@@ -78,10 +78,14 @@ models Google's own shape. None of those have an `api:` here yet, and
 registering them would hand back a model string that resolves and then fails
 upstream on every request.
 
-`anthropic_messages` is the closest to arriving: the surface is implemented on
-`main` and nothing routes to it, which is the last step of
-[#23](https://github.com/warpllm/warpllm/issues/23). Registering these entries
-is what that step unblocks.
+`anthropic_messages` is now implemented and routable — the `anthropic` provider
+uses it — so Zen's Claude models are a data entry rather than a blocked one.
+What is missing is the endpoint mapping: Zen serves them at `/zen/v1/messages`
+and a provider entry carries ONE `base_url`, so registering them needs a second
+`anthropic`-speaking provider entry pointed at that path. Its GPT, Grok, Muse
+and Gemini models still wait on
+[#41](https://github.com/warpllm/warpllm/issues/41) and
+[#35](https://github.com/warpllm/warpllm/issues/35).
 
 No entry carries `capabilities`: Zen publishes a price per model and no context
 window, output ceiling, or concurrency figure. Every model is re-hosted, so the

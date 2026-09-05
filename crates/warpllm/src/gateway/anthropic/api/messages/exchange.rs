@@ -34,7 +34,7 @@ pub(crate) async fn exchange(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    auth: &Authenticator,
+    auth: Option<&Authenticator>,
     max_output_tokens: Option<u32>,
 ) -> Result<types::ChatResponse> {
     let wire = render_request(request, provider, max_output_tokens)?;
@@ -69,7 +69,7 @@ pub(crate) async fn exchange_stream(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    auth: &Authenticator,
+    auth: Option<&Authenticator>,
     max_output_tokens: Option<u32>,
     read_timeout: Option<Duration>,
 ) -> Result<ChatChunkStream> {
@@ -243,7 +243,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            &Authenticator::anthropic_api_key("sk-ant-demo".into()),
+            Some(&Authenticator::anthropic_api_key("sk-ant-demo".into())),
             None,
             None,
         )

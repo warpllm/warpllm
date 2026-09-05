@@ -36,7 +36,17 @@ BANNER = (
     "    run `uv run --with pyyaml docs/scripts/gen_model_roster.py`. */}"
 )
 
-STREAM_API = "openai_compat_chat_completions_stream"
+def streams(apis: set[str]) -> bool:
+    """Whether any surface this model serves is a streaming one.
+
+    A suffix test rather than a named surface. The column asks "can I stream
+    this?", which is a question about the model and not about a protocol — and
+    warpllm now speaks two, so a single hard-coded name answered "No" for every
+    Claude model while the roster listed `anthropic_messages_stream` beside it.
+    The suffix is the naming convention `Api` is checked against in
+    `client::tests::the_admission_lists_are_disjoint_and_correctly_halved`.
+    """
+    return any(api.endswith("_stream") for api in apis)
 
 
 def thousands(value: int | None) -> str:
@@ -87,7 +97,7 @@ def render_model_roster(registry: dict) -> str:
                 f"| `{upstream_name(model_key, model_spec)}` "
                 f"| {thousands(capabilities.get('max_input_tokens'))} "
                 f"| {thousands(capabilities.get('max_output_tokens'))} "
-                f"| {'Yes' if STREAM_API in apis else 'No'} |"
+                f"| {'Yes' if streams(apis) else 'No'} |"
             )
         lines.append("")
     return "\n".join(lines)

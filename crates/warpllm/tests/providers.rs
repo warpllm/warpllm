@@ -27,3 +27,9 @@ mod openrouter_chat_completions;
 
 #[path = "providers/mistral/chat_completions/mod.rs"]
 mod mistral_chat_completions;
+
+#[path = "providers/anthropic/messages/mod.rs"]
+mod anthropic_messages;
+
+#[path = "providers/anthropic/config_env.rs"]
+mod anthropic_config_env;

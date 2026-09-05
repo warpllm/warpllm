@@ -115,3 +115,31 @@ pub const MISTRAL_KEY: &str = "sk-test-mistral";
 pub fn with_mistral_key<F: Future<Output = ()>>(body: F) {
     with_env_key("MISTRAL_API_KEY", MISTRAL_KEY, body);
 }
+
+pub const ANTHROPIC_KEY: &str = "sk-ant-test";
+
+pub fn with_anthropic_key<F: Future<Output = ()>>(body: F) {
+    with_env_key("ANTHROPIC_API_KEY", ANTHROPIC_KEY, body);
+}
+
+/// A whole reply on Anthropic's wire, which is a different SHAPE from
+/// [`openai_completion_body`] rather than a renaming of it: no `created`, no
+/// `choices`, content as a block array, and usage counting the cache
+/// separately.
+pub fn anthropic_message_body() -> Value {
+    json!({
+        "id": "msg_013Zva2CMHLNnXjNJJKqJ2EF",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-5",
+        "content": [{"type": "text", "text": "Hello there!"}],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": 9,
+            "output_tokens": 12,
+            "cache_read_input_tokens": 3,
+            "cache_creation_input_tokens": 2
+        }
+    })
+}

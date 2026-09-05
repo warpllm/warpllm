@@ -351,6 +351,7 @@ mod tests {
         assert_eq!(
             providers(&registry),
             vec![
+                "anthropic",
                 "deepseek",
                 "kimi",
                 "mistral",
@@ -362,6 +363,16 @@ mod tests {
         assert_eq!(
             keys(&registry),
             vec![
+                "anthropic/claude-fable-5",
+                "anthropic/claude-haiku-4-5",
+                "anthropic/claude-opus-4-5",
+                "anthropic/claude-opus-4-6",
+                "anthropic/claude-opus-4-7",
+                "anthropic/claude-opus-4-8",
+                "anthropic/claude-opus-5",
+                "anthropic/claude-sonnet-4-5",
+                "anthropic/claude-sonnet-4-6",
+                "anthropic/claude-sonnet-5",
                 "deepseek/deepseek-v4-flash",
                 "deepseek/deepseek-v4-pro",
                 "kimi/kimi-k2.6",
@@ -526,31 +537,44 @@ mod tests {
     /// capability nothing can act on. This is what catches it being added
     /// early.
     ///
-    /// Both implemented surfaces are listed for every model because every
-    /// provider on the roster documents `stream` on the chat-completions
-    /// endpoint rather than per model — `specs.yaml` cites each one. A provider
-    /// whose models genuinely differ belongs in an exclusion here, the same way
-    /// a non-chat model would.
+    /// Both halves of a protocol's pair are listed for every model because
+    /// every provider on the roster documents `stream` on the ENDPOINT rather
+    /// than per model — `specs.yaml` cites each one. A provider whose models
+    /// genuinely differ belongs in an exclusion here, the same way a non-chat
+    /// model would.
     ///
     /// It also means the shipped roster can no longer show two models of one
     /// provider differing. That is proved over fixtures instead, by
     /// `load::tests::two_models_of_one_provider_serve_different_surfaces`.
+    ///
+    /// A whitelist of PAIRS rather than one fixed pair, now that warpllm
+    /// implements two protocols — and it checks strictly more than the single
+    /// pair did. A MIXED listing, `openai_compat_chat_completions` beside
+    /// `anthropic_messages_stream`, is in neither pair, so an entry that
+    /// straddled two protocols fails here too; that entry would otherwise load,
+    /// lint, and then send its streamed requests to a wire format the
+    /// non-streamed half does not speak. Nothing on a model says which protocol
+    /// it belongs to except these names, so the expected pair cannot be derived
+    /// from the entry without asserting the entry equals itself.
     #[test]
     fn every_shipped_model_serves_exactly_the_implemented_surfaces() {
+        let pairs = [
+            [
+                Api::OpenAiCompatChatCompletions,
+                Api::OpenAiCompatChatCompletionsStream,
+            ],
+            [Api::AnthropicMessages, Api::AnthropicMessagesStream],
+        ]
+        .map(|apis| apis.map(|api| SupportedApi { api }));
+
         assert!(!REGISTRY.models.is_empty(), "the registry is empty");
         for (model_str, spec) in &REGISTRY.models {
-            assert_eq!(
-                spec.supported_apis(),
-                [
-                    SupportedApi {
-                        api: Api::OpenAiCompatChatCompletions
-                    },
-                    SupportedApi {
-                        api: Api::OpenAiCompatChatCompletionsStream
-                    }
-                ],
-                "`{model_str}` lists a surface warpllm does not implement, or \
-                 omits one it does"
+            assert!(
+                pairs.iter().any(|pair| pair == spec.supported_apis()),
+                "`{model_str}` lists {:?}, which is not one of the implemented \
+                 protocol pairs: a surface warpllm does not implement, a missing \
+                 streamed half, or two protocols in one entry",
+                spec.supported_apis()
             );
         }
     }

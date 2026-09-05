@@ -75,7 +75,7 @@ pub(crate) async fn post(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    auth: &Authenticator,
+    auth: Option<&Authenticator>,
     body: &CreateMessageRequest,
 ) -> Result<Outcome> {
     if body.stream == Some(true) {
@@ -144,7 +144,7 @@ pub(crate) async fn post_stream(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    auth: &Authenticator,
+    auth: Option<&Authenticator>,
     body: &CreateMessageRequest,
     read_timeout: Option<Duration>,
 ) -> Result<StreamOutcome> {
@@ -203,11 +203,18 @@ pub(crate) async fn post_stream(
 /// body it has to sign; `reqwest`'s own `send` would have executed the request
 /// before anything could touch it. `anthropic-version` stays here, because that
 /// one IS a fact about this wire format.
+///
+/// `auth` is an [`Option`] for the same reason `openai_compat`'s is: the
+/// roster's `auth: none`, which a self-hosted box on a private network
+/// declares. `None` sends the request exactly as built, with no `x-api-key`
+/// rather than an empty one — the two are different requests, and a host that
+/// wants no credential should be sent none. Nothing on the shipped roster uses
+/// it for this protocol; a caller's own roster is what reaches it.
 async fn send(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    auth: &Authenticator,
+    auth: Option<&Authenticator>,
     body: &CreateMessageRequest,
 ) -> Result<reqwest::Response> {
     let request = http
@@ -220,7 +227,11 @@ async fn send(
         // looking at the provider's status page.
         .build()
         .map_err(|e| Error::Internal(format!("could not build the {provider} request: {e}")))?;
-    http.execute(auth.authenticate(request).await?)
+    let request = match auth {
+        Some(auth) => auth.authenticate(request).await?,
+        None => request,
+    };
+    http.execute(request)
         .await
         .map_err(|e| network_error(provider, e))
 }
@@ -416,7 +427,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            &key(),
+            Some(&key()),
             &CreateMessageRequest::default(),
         )
         .await
@@ -510,7 +521,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &format!("{}/", server.uri()),
-            &key(),
+            Some(&key()),
             &CreateMessageRequest::default(),
         )
         .await;
@@ -556,7 +567,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            &key(),
+            Some(&key()),
             &streamed(),
             // Unbounded, which is the default and what every test but the
             // stall one below wants: a mock answers instantly, so a limit
@@ -841,7 +852,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &format!("http://{addr}"),
-            &key(),
+            Some(&key()),
             &streamed(),
             Some(LIMIT),
         )
@@ -887,7 +898,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            &key(),
+            Some(&key()),
             &CreateMessageRequest {
                 model: "claude-opus-5".to_string(),
                 max_tokens: 7,
@@ -923,7 +934,7 @@ mod tests {
                 &reqwest::Client::new(),
                 "anthropic",
                 &server.uri(),
-                &key(),
+                Some(&key()),
                 &CreateMessageRequest {
                     stream,
                     ..Default::default()
@@ -953,7 +964,7 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            &key(),
+            Some(&key()),
             &CreateMessageRequest {
                 stream: Some(true),
                 ..Default::default()

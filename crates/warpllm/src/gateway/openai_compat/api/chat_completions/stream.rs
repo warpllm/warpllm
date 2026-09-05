@@ -167,9 +167,10 @@ fn ingest_delta(delta: ChatCompletionStreamResponseDelta) -> types::MessageDelta
 ///
 /// PROMOTE BUT RETAIN, exactly as [`super::response`] does it for a whole
 /// reply: the caller leaves `unknown_fields` intact, so the field still rides
-/// `ext["openai_compat"]` and the renderer replays it verbatim. Nothing could
-/// rebuild it from the delta — `render_delta` drops Reasoning, because the
-/// protocol has no field to render it into.
+/// `ext["openai_compat"]` and the renderer replays that copy verbatim, which is
+/// what keeps a same-protocol stream byte-identical. `render_delta` renders the
+/// delta itself only when no such copy exists — a fragment that arrived on
+/// ANOTHER protocol, where this one's bag is unreadable.
 ///
 /// The emptiness rule differs from the whole-reply one deliberately. There, an
 /// empty string means "the provider sent no thinking" and is not promoted.
@@ -398,6 +399,7 @@ fn render_delta(
         _ => delta.role.map(|role| role_to_wire(role).to_string()),
     };
     let mut content = None;
+    let mut reasoning = Vec::new();
     let mut tool_calls = Vec::new();
     for fragment in &delta.content {
         match fragment {
@@ -442,11 +444,19 @@ fn render_delta(
                     tool_calls.push(call);
                 }
             }
-            // A Reasoning fragment was lifted out of `reasoning_content`,
-            // which is still sitting in ext and about to be emitted verbatim —
-            // PROMOTE BUT RETAIN, read from the other end, so dropping it
-            // loses nothing.
-            ContentDelta::Reasoning { .. } => {}
+            // On a same-protocol stream this fragment was lifted OUT of
+            // `reasoning_content`, which is still sitting in ext and about to
+            // be emitted verbatim — PROMOTE BUT RETAIN, read from the other
+            // end, so dropping it there loses nothing. Cross-protocol there is
+            // no such copy: Anthropic's `thinking_delta` retains into the
+            // `anthropic` bag, which `Protocol::may_read` denies this renderer,
+            // and a streamed Claude reply reached callers with its thinking
+            // silently gone while the same reply unstreamed now carries it.
+            //
+            // So it is rendered, and what ARRIVED still wins below — the
+            // same rule `render_message` follows for a whole reply, and what
+            // keeps the same-protocol stream byte-identical.
+            ContentDelta::Reasoning { text, .. } => reasoning.push(text.as_str()),
         }
     }
     // A stashed null only stands in for content nothing else claimed.
@@ -457,6 +467,11 @@ fn render_delta(
     if !tool_calls.is_empty() {
         // Typed fragments are authoritative over any stashed empty array.
         unknown_fields.remove("tool_calls");
+    }
+    if !reasoning.is_empty() {
+        unknown_fields
+            .entry("reasoning_content".to_string())
+            .or_insert_with(|| Value::String(reasoning.concat()));
     }
     ChatCompletionStreamResponseDelta {
         content,

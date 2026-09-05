@@ -151,6 +151,11 @@ Two differences from a chat-completions provider are worth knowing:
     thinking off for a tool loop, or run the loop on a chat-completions
     provider. Tracked in
     [#23](https://github.com/warpllm/warpllm/issues/23).
+
+    The thinking itself does reach you, streamed or whole, under
+    `reasoning_content` — the same field DeepSeek and vLLM use. Its signature
+    does not, because chat completions has no field for one, and that missing
+    signature is exactly what the tool-result turn would need.
   </Accordion>
 </AccordionGroup>
 

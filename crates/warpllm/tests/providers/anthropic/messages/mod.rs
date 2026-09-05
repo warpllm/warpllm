@@ -410,6 +410,56 @@ fn forbidding_parallel_tool_calls_reaches_claude() {
     });
 }
 
+/// REPRODUCTION: what a caller actually receives when Claude thinks.
+#[test]
+fn claude_thinking_reaches_the_caller_as_reasoning_content() {
+    with_anthropic_key(async {
+        let mut reply = anthropic_message_body();
+        reply["content"] = json!([
+            {"type": "thinking", "thinking": "Counting the letters.", "signature": "sig_abc"},
+            {"type": "text", "text": "Hello there!"}
+        ]);
+
+        let (_, got) = exchange(request("anthropic/claude-opus-5"), reply).await;
+        let message = &got["choices"][0]["message"];
+
+        assert_eq!(message["content"], "Hello there!", "{message}");
+        assert_eq!(
+            message["reasoning_content"], "Counting the letters.",
+            "Claude's thinking never reached the caller: {message}"
+        );
+    });
+}
+
+/// A redacted block is NOT rendered as reasoning.
+///
+/// `redacted_thinking` is an encrypted payload meant to be replayed to the
+/// provider that issued it, not read. Putting its base64 in the field callers
+/// print would show them noise and label it the model's thinking — so it
+/// reaches this protocol as nothing, which is what it is worth here.
+#[test]
+fn a_redacted_thinking_block_is_not_shown_to_the_caller() {
+    with_anthropic_key(async {
+        let mut reply = anthropic_message_body();
+        reply["content"] = json!([
+            {"type": "redacted_thinking", "data": "EncryptedBase64=="},
+            {"type": "text", "text": "Hello there!"}
+        ]);
+
+        let (_, got) = exchange(request("anthropic/claude-opus-5"), reply).await;
+        let message = &got["choices"][0]["message"];
+
+        assert_eq!(message["content"], "Hello there!", "{message}");
+        assert!(message.get("reasoning_content").is_none(), "{message}");
+        assert!(
+            !serde_json::to_string(&got)
+                .unwrap()
+                .contains("EncryptedBase64"),
+            "an opaque payload reached the caller: {got}"
+        );
+    });
+}
+
 /// A first tool request with thinking reaches Claude; the request carrying the
 /// results BACK is refused before the network.
 ///
@@ -609,6 +659,59 @@ const TEXT_THEN_TOOL: &str = concat!(
     r#"data: {"type":"message_stop"}"#,
     "\n\n",
 );
+
+/// A streamed reply that THINKS before it answers.
+const THINKING_THEN_TEXT: &str = concat!(
+    r#"data: {"type":"message_start","message":{"id":"msg_1","type":"message","#,
+    r#""role":"assistant","model":"claude-opus-5","content":[],"#,
+    r#""stop_reason":null,"stop_sequence":null,"#,
+    r#""usage":{"input_tokens":4,"output_tokens":0}}}"#,
+    "\n\n",
+    r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+    "\n\n",
+    r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"counting"}}"#,
+    "\n\n",
+    r#"data: {"type":"content_block_stop","index":0}"#,
+    "\n\n",
+    r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+    "\n\n",
+    r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"three"}}"#,
+    "\n\n",
+    r#"data: {"type":"content_block_stop","index":1}"#,
+    "\n\n",
+    r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}"#,
+    "\n\n",
+    r#"data: {"type":"message_stop"}"#,
+    "\n\n",
+);
+
+/// A STREAMED Claude reply carries its thinking to the caller too.
+///
+/// The same drop as the whole-reply path and worth its own test, because the
+/// two renderers are separate code: fixing one and not the other would leave a
+/// caller reading reasoning when they ask for a whole reply and none when they
+/// stream the identical request.
+#[test]
+fn streamed_claude_thinking_reaches_the_caller() {
+    with_anthropic_key(async {
+        let chunks = stream_of(request("anthropic/claude-opus-5"), THINKING_THEN_TEXT).await;
+
+        let thinking: String = chunks
+            .iter()
+            .filter_map(|chunk| chunk["choices"][0]["delta"]["reasoning_content"].as_str())
+            .collect();
+        assert_eq!(
+            thinking, "counting",
+            "streamed thinking never reached the caller: {chunks:?}"
+        );
+
+        let answer: String = chunks
+            .iter()
+            .filter_map(|chunk| chunk["choices"][0]["delta"]["content"].as_str())
+            .collect();
+        assert_eq!(answer, "three", "{chunks:?}");
+    });
+}
 
 /// THE streamed blocker, closed. Anthropic numbers every content block, so a
 /// reply that opens with text puts its first tool call at index 1 — and

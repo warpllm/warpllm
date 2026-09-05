@@ -178,6 +178,27 @@ fn reasoning_block(fields: &UnknownFields) -> Option<ContentBlock> {
     })
 }
 
+/// The part of a reasoning block a caller on this protocol can read.
+///
+/// `reasoning_content` is a string of chain-of-thought, so only the kinds that
+/// ARE that are rendered. An encrypted payload is deliberately not: it is
+/// opaque bytes meant to be replayed to the provider that issued them, and
+/// putting base64 in a field callers print would show them noise and claim it
+/// was the model's thinking. It stays retained for a renderer that can replay
+/// it and reaches this protocol as nothing, which is what it is worth here.
+///
+/// The signature is dropped for a different reason — this protocol has no
+/// field for it — and that drop is what
+/// `anthropic::…::request::ensure_renderable` refuses the tool-result turn
+/// over.
+fn visible_reasoning(detail: &ReasoningDetail) -> Option<&str> {
+    match detail {
+        ReasoningDetail::Text { text, .. } => Some(text.as_str()),
+        ReasoningDetail::Summary { summary } => Some(summary.as_str()),
+        ReasoningDetail::Encrypted { .. } => None,
+    }
+}
+
 /// A plain function call becomes a typed block; anything else — custom
 /// tool calls, or calls carrying unknown fields at either level — passes
 /// through as an `Unknown` block, re-emitted verbatim in array order.
@@ -327,10 +348,12 @@ fn render_message(message: &types::Message, provider: &str) -> ChatCompletionRes
         _ => role_to_wire(message.role).to_string(),
     };
     let mut texts = Vec::new();
+    let mut reasoning = Vec::new();
     let mut tool_calls = Vec::new();
     for block in &message.content {
         match block {
             ContentBlock::Text { text, .. } => texts.push(text.as_str()),
+            ContentBlock::Reasoning { detail, .. } => reasoning.extend(visible_reasoning(detail)),
             ContentBlock::ToolCall {
                 id,
                 name,
@@ -375,16 +398,33 @@ fn render_message(message: &types::Message, provider: &str) -> ChatCompletionRes
             // that restates an unsigned `tool_use` turn — the one carrying tool
             // results back, which is the request this drop makes unbuildable.
             // Not the first request of the loop, which goes out whole and comes
-            // back whole. Dropping silently was the option that was not
-            // available, and it is not what happens. Carrying the blocks in a
-            // caller-visible form that round trips with the signature intact is
-            // still the larger fix, and it is what would lift that refusal.
+            // back whole. Carrying the blocks in a caller-visible form that
+            // round trips WITH THE SIGNATURE intact is still the larger fix,
+            // and it is what would lift that refusal — the reasoning TEXT now
+            // reaches the caller (see `reasoning_content` below), but a
+            // signature has no field on this protocol to survive in.
             _ => {}
         }
     }
     if !tool_calls.is_empty() {
         // Typed tool calls are authoritative over any stashed empty array.
         unknown_fields.remove("tool_calls");
+    }
+    // A caller on this protocol reads reasoning under `reasoning_content`, and
+    // a Claude reply used to arrive with none: the block was dropped here and
+    // `Protocol::may_read` denies this renderer the `anthropic` bag it was
+    // retained in, so thinking a caller paid for was invisible. DeepSeek's
+    // reasoning has always reached them, and nothing about Claude's is
+    // different from where a caller sits.
+    //
+    // What ARRIVED still wins, which keeps the same-protocol path untouched:
+    // this block came out of `reasoning_content`, that field is still in the
+    // residue, and rewriting it from the block would drop a provider's exact
+    // spelling in favour of a reconstruction.
+    if !reasoning.is_empty() {
+        unknown_fields
+            .entry("reasoning_content".to_string())
+            .or_insert_with(|| Value::String(reasoning.join("\n")));
     }
     ChatCompletionResponseMessage {
         // Same-protocol messages carry at most one text block, so the join

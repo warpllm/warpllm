@@ -53,6 +53,24 @@ warpllm-server --host 127.0.0.1 --port 9090 --timeout-secs 120 \
   </Warning>
 </ResponseField>
 
+<ResponseField name="--specs" type="path">
+  A roster file of your own, in the same schema as warpllm's built-in
+  `specs.yaml`. Its entries become routable beside the shipped ones, which is
+  how a self-hosted server — vLLM, Ollama, TGI, llama.cpp — becomes a model
+  string. See [Add a model](/models/add-a-model).
+
+  Read once, at startup. A file that is missing, malformed, or that leaves a
+  roster nothing can route to stops the gateway there rather than failing the
+  request that needed it.
+
+  Also settable as `WARPLLM_SPECS` in the environment; the flag wins when both
+  are set.
+
+  ```bash
+  warpllm-server --specs ./warpllm.yaml
+  ```
+</ResponseField>
+
 <ResponseField name="--help">
   Print usage and exit 0.
 </ResponseField>
@@ -80,7 +98,15 @@ Set the ones you route to; the rest can stay unset.
 <ProviderKeys />
 
 This table is generated from the model registry, so it is exactly what the
-gateway looks for.
+gateway looks for. A roster of your own can add rows to it — a provider you
+declare with `env_api_key` is read the same way, and one declared `auth: none`
+needs no variable at all.
+
+One more variable is read, and it is not a key:
+
+| Variable | Effect |
+| --- | --- |
+| `WARPLLM_SPECS` | Path to a roster file, as if `--specs` had been passed. The flag wins when both are set. |
 
 <Note>
   The gateway builds its client with no `base_url` override and no `providers`

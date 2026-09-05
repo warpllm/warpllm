@@ -132,8 +132,18 @@ exist is valid, and each request then says which variable it wanted.
 | Total request deadline | `timeout` | `timeout` | `timeout_secs` | 600 seconds |
 | Longest silence on a stream | `stream_read_timeout` | `streamReadTimeout` | `stream_read_timeout_secs` | Unbounded |
 | Providers this client serves | `providers` | `providers` | `providers` | The whole roster |
+| A roster file of your own | `specs_path` | `specsPath` | `specs_path` | The built-in roster |
 
 All timeouts are seconds, in every language. See [Timeouts](/concepts/timeouts).
+
+<Note>
+  `specs_path` points at a YAML file whose entries are merged over the built-in
+  roster, which is how a self-hosted server becomes a routable model string. It
+  is read once, when the client is built, and a file that will not load raises
+  there rather than on the first request. `WARPLLM_SPECS` sets it for every
+  client in the process; the explicit setting wins. See
+  [Add a model](/models/add-a-model).
+</Note>
 
 <Note>
   `base_url` overrides the routed provider's base URL — a corporate proxy, or a

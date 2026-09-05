@@ -4,15 +4,32 @@ description: "Edit one YAML file, cite the provider's docs, and let the tests ch
 icon: "plus"
 ---
 
-Adding, changing, or removing a routable model is an edit to one file:
+There are two ways to make a model routable, and which you want depends on who
+it is for.
+
+<CardGroup cols={2}>
+  <Card title="For everyone" icon="code-pull-request">
+    A provider the world can reach — a new hosted API, or a model it just
+    launched. Edit warpllm's own roster and open a PR. That is the rest of this
+    page.
+  </Card>
+  <Card title="For yourself" icon="server">
+    A server only you can reach — vLLM, Ollama, TGI, llama.cpp, an internal
+    proxy. Write your own roster file and point warpllm at it. No fork, no
+    release, and see [the roster file](#a-roster-file-of-your-own) below.
+  </Card>
+</CardGroup>
+
+## Editing warpllm's roster
+
+Adding, changing, or removing a model warpllm ships is an edit to one file:
 
 ```text
 crates/warpllm/src/registry/specs.yaml
 ```
 
 It is compiled into the binary with `include_str!` and parsed once on first
-lookup, so there is no runtime configuration to deploy — a roster change ships
-with a release.
+lookup, so a change to *this* file ships with a release.
 
 ## Adding a model to an existing provider
 
@@ -137,6 +154,93 @@ uv run --with pyyaml docs/scripts/gen_model_roster.py
 
 Commit the regenerated snippets alongside the registry edit. `--check` fails
 instead of rewriting, for CI.
+
+## A roster file of your own
+
+For a server nobody else can reach, none of the above applies: write the same
+schema in a file of your own and hand warpllm its path. Nothing is forked and
+nothing waits for a release.
+
+```yaml
+# ./warpllm.yaml
+providers:
+  local:
+    base_url: "http://localhost:8000/v1"
+    auth: none # the box is on a private network
+    models:
+      local/llama-3.3-70b:
+        model: "meta-llama/Llama-3.3-70B-Instruct"
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+```
+
+<CodeGroup>
+```python Python
+client = WarpLLM(specs_path="./warpllm.yaml")
+```
+
+```typescript TypeScript
+const client = new WarpLLM({ specsPath: './warpllm.yaml' })
+```
+
+```rust Rust
+Client::new(ClientConfig {
+    specs_path: Some("./warpllm.yaml".into()),
+    ..Default::default()
+})?
+```
+
+```bash Gateway
+warpllm-server --specs ./warpllm.yaml
+```
+</CodeGroup>
+
+`WARPLLM_SPECS` sets the path for every client in the process; an explicit
+setting wins over it.
+
+### What the fold does
+
+Your file is **merged** over the built-in roster, so `local/` becomes routable
+and `openai/` stays exactly where it was — one client routes both.
+
+Reusing a name warpllm already ships replaces that provider, in one of two ways:
+
+<ResponseField name="Your entry lists its own models:">
+  A whole replacement. That provider serves the models you listed and no
+  others.
+</ResponseField>
+<ResponseField name="Your entry names no models:">
+  Only the transport is replaced. Every model warpllm ships under that provider
+  carries over and now routes to your address — which is what makes pointing
+  `openai` at an internal proxy three lines rather than a copy of its whole
+  catalogue. An explicit `models: {}` is a statement of *none*, and is refused
+  rather than inherited.
+</ResponseField>
+
+warpllm warns which of the two happened rather than shadowing a provider
+quietly. The warning travels over `tracing`, which `warpllm-server` surfaces
+and a Rust client does once it installs a subscriber; the Python and Node
+bindings install none yet, so there it goes nowhere — reuse a name from those
+two deliberately.
+
+<Warning>
+  The file is read once, when the client is built. One that is missing,
+  malformed, or that leaves a provider nothing can route to raises there —
+  `InvalidRoster`, surfaced as a 500 with `warpllm_code: invalid_roster` — and
+  never as a surprise on the request that needed it. See
+  [Errors](/concepts/errors).
+</Warning>
+
+<Note>
+  There is no wildcard. `local/*` is an error, not a catch-all: `supported_apis`
+  and `capabilities` are per model, and a pattern would have to claim both on
+  behalf of models nobody listed. If your server's model set moves often,
+  generate the file from its own `GET /v1/models`.
+</Note>
+
+A worked file with three providers and comments is in
+[`examples/warpllm.yaml`](https://github.com/warpllm/warpllm/blob/main/examples/warpllm.yaml).
 
 ## Next
 

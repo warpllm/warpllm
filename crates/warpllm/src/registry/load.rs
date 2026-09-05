@@ -12,6 +12,7 @@
 //! missing one — and be told so, by serde, with a line and a column.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::LazyLock;
 
 use serde::Deserialize;
 
@@ -25,7 +26,7 @@ use super::types::{Capabilities, Credential, ModelSpec, ProviderSpec, Registry, 
 /// into the registry — so a sorted map would buy a string comparison per
 /// level on every insert and nothing else. What keeps the FILE readable is
 /// `lint`'s ordering check, which reads the text rather than any map.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct RegistryFile {
     providers: HashMap<String, ProviderEntry>,
@@ -40,7 +41,7 @@ struct RegistryFile {
 /// error rather than a silently ignored one — a surface names its own protocol
 /// now, and a roster still recording it per provider is stale rather than
 /// merely verbose.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct ProviderEntry {
     base_url: String,
@@ -54,12 +55,36 @@ struct ProviderEntry {
     /// rather than one with a fallback. A forgotten `env_api_key:` line must
     /// not quietly become an unauthenticated request.
     auth: Option<Auth>,
-    /// `Option`, and defaulted, so that both ways of writing "no models yet" —
-    /// omitting the key and leaving it empty — reach the lint, which says what
-    /// is wrong with that in its own words. Neither is a load failure, because
-    /// both leave a perfectly buildable pair of tables.
-    #[serde(default)]
-    models: Option<HashMap<String, ModelEntry>>,
+    /// Present-and-null is distinguished from absent, and nothing else here
+    /// needs that — which is the whole reason for the second `Option`.
+    ///
+    /// The outer layer is WHETHER THE LINE WAS WRITTEN. It has to be, because
+    /// only an entry that mentions no models at all inherits the ones it
+    /// replaces (see [`load_all`]). A bare `models:` is a half-written line,
+    /// not a decision to keep eighteen models somebody never listed, and
+    /// reading the two the same way would let a forgotten key silently
+    /// redirect every model under a shipped provider to a new host.
+    ///
+    /// So a written `models:` is always a statement, and a valueless one
+    /// states nothing — [`build_provider`] settles it to an empty map, which
+    /// reaches the lint and is refused there in its own words, exactly as
+    /// `models: {}` is. Same judgement a valueless `auth:` gets, and for the
+    /// same reason: when a line is half-typed, take the safe reading.
+    #[serde(default, deserialize_with = "written")]
+    models: Option<Option<HashMap<String, ModelEntry>>>,
+}
+
+/// Records that a field was WRITTEN, whatever it was written as.
+///
+/// `#[serde(default)]` leaves the outer `Option` `None` when the key is
+/// absent; reaching this at all means the key is there, so the value — `null`
+/// included — comes back wrapped.
+fn written<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// The `auth:` vocabulary, closed at one word.
@@ -68,7 +93,7 @@ struct ProviderEntry {
 /// second scheme — a custom header, a query parameter — and `auth: none`
 /// reads the same before and after one lands, where `unauthenticated: true`
 /// would have to be deprecated to make room.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 enum Auth {
     None,
@@ -76,7 +101,7 @@ enum Auth {
 
 /// One model as written: which surfaces it serves, what it ships upstream if
 /// that differs from its key, and whatever limits are published for it.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct ModelEntry {
     /// REQUIRED, and the reason a model entry is never bare `{}`.
@@ -114,38 +139,113 @@ pub(super) fn load(yaml: &str) -> Result<Registry, String> {
         label: "specs.yaml",
         yaml,
     }])
-    .map(|(registry, _)| registry)
+    .map(|fold| fold.registry)
+}
+
+/// What a fold produced, and what it wrote over on the way.
+///
+/// A struct rather than a tuple because the two kinds of override are not the
+/// same event and must not be announced as one: [`Fold::replaced`] dropped
+/// models, [`Fold::retargeted`] kept them.
+pub(super) struct Fold {
+    pub registry: Registry,
+    /// Providers whose entry was replaced OUTRIGHT — the later entry listed
+    /// its own models, so the earlier one's are gone.
+    pub replaced: Vec<String>,
+    /// Providers whose transport was replaced while their models carried
+    /// over, because the later entry said nothing about models.
+    pub retargeted: Vec<String>,
 }
 
 /// Folds several rosters into one pair of tables, later sources winning.
 ///
-/// The unit of replacement is a WHOLE provider entry, models included. Nothing
-/// in a roster is inherited — not between the two levels, not between models —
-/// and a deep merge would break that in the way that matters most: it would
-/// produce a provider spec that appears in neither file, so "which `base_url`
-/// did my model actually get" would stop being answerable by reading one. A
-/// user naming `openai:` is describing their `openai`, whole.
+/// The unit of replacement is a WHOLE provider entry. Nothing in a roster is
+/// inherited between fields — a deep merge would produce a provider spec that
+/// appears in neither file, so "which `base_url` did my model actually get"
+/// would stop being answerable by reading one. A user naming `openai:` is
+/// describing their `openai`, whole.
 ///
-/// Every entry is merged before any is built, so a provider that loses only
-/// ever contributed its name to the map — its models never reach the table and
-/// cannot outlive the entry that declared them.
+/// ONE exception, and it is about the difference between overriding a value
+/// and never mentioning it. `models` is the only optional map here, and a
+/// later entry that OMITS it keeps the models it replaced. Without that, the
+/// three lines it takes to point a shipped provider at an internal proxy
+/// instead take a restatement of every model under it — and, worse, a file
+/// that merely forgets the key does not misroute but fails to start, telling
+/// its author to "delete it" when what they wanted was to keep it.
 ///
-/// Also hands back the names that were replaced, in order. Reporting them
-/// rather than logging them here keeps this a pure function, and makes "an
-/// override is announced" a plain assertion rather than a test that has to
-/// capture a `tracing` subscriber.
-pub(super) fn load_all(sources: &[Source]) -> Result<(Registry, Vec<String>), String> {
+/// Writing the key is still a statement, and still replaces: `models:` with
+/// entries means those and no others, and an explicit `models: {}` means none
+/// at all, which the lint refuses in its own words. Only silence inherits.
+///
+/// Every entry is merged before any is built, so a provider that loses
+/// outright only ever contributed its name to the map — its models never reach
+/// the table and cannot outlive the entry that declared them.
+///
+/// Also hands back what it overrode. Reporting rather than logging here keeps
+/// this a pure function, and makes "an override is announced" a plain
+/// assertion rather than a test that has to capture a `tracing` subscriber.
+pub(super) fn load_all(sources: &[Source]) -> Result<Fold, String> {
+    let parsed: Vec<(&str, RegistryFile)> = sources
+        .iter()
+        .map(|source| {
+            parse(source.yaml)
+                .map(|file| (source.label, file))
+                .map_err(|e| format!("{}: {e}", source.label))
+        })
+        .collect::<Result<_, _>>()?;
+    fold(parsed)
+}
+
+/// The shipped roster, parsed once.
+///
+/// A client that supplies a roster of its own folds it over this one, and
+/// re-reading 39 KB of CONSTANT YAML to do it cost about a millisecond per
+/// client — a hundred and forty times what building a client without a roster
+/// costs. Parsing is the expensive half and the answer never varies, so it is
+/// done once and the entries are cloned into each fold. Cloning a few dozen
+/// small structs is the cheap half.
+///
+/// Deliberately NOT the built [`Registry`](super::REGISTRY) next door: the fold
+/// replaces entries as WRITTEN, before a provider name is interned or a model
+/// key is checked against the provider holding it, so it is the schema shape
+/// this needs and not the read surface.
+static SHIPPED: LazyLock<RegistryFile> =
+    LazyLock::new(|| parse(super::SHIPPED_YAML).unwrap_or_else(|e| panic!("specs.yaml: {e}")));
+
+/// One roster folded over the shipped one, which is the only fold that ships.
+///
+/// Exists so the shipped half is not re-parsed per client; the fold itself is
+/// [`load_all`]'s, and `one_source_folds_to_itself` plus
+/// `folding_over_the_shipped_roster_matches_parsing_it` keep the two honest.
+pub(super) fn load_over_shipped(label: &str, yaml: &str) -> Result<Fold, String> {
+    let user = parse(yaml).map_err(|e| format!("{label}: {e}"))?;
+    fold(vec![("specs.yaml", SHIPPED.clone()), (label, user)])
+}
+
+/// The fold itself, over already-parsed sources.
+fn fold(sources: Vec<(&str, RegistryFile)>) -> Result<Fold, String> {
     // Sorted, so a file with two bad providers names the same one every run.
     // The build below is where a message comes from, and a `HashMap` there
     // would pick whichever came up first.
     let mut merged: BTreeMap<String, (&str, ProviderEntry)> = BTreeMap::new();
     let mut replaced = Vec::new();
-    for source in sources {
-        let file = parse(source.yaml).map_err(|e| format!("{}: {e}", source.label))?;
-        for (name, entry) in file.providers {
-            if merged.insert(name.clone(), (source.label, entry)).is_some() {
-                replaced.push(name);
+    let mut retargeted = Vec::new();
+    for (label, file) in sources {
+        for (name, mut entry) in file.providers {
+            if let Some((_, previous)) = merged.remove(&name) {
+                // Silence inherits; a stated `models:` replaces. The label
+                // moves to the winning source either way, so a malformed
+                // inherited model would be blamed on the file that kept it —
+                // reachable only if an EARLIER source held a bad model, which
+                // for the one fold that ships is the roster CI already gates.
+                if entry.models.is_none() {
+                    entry.models = previous.models;
+                    retargeted.push(name.clone());
+                } else {
+                    replaced.push(name.clone());
+                }
             }
+            merged.insert(name, (label, entry));
         }
     }
 
@@ -154,7 +254,12 @@ pub(super) fn load_all(sources: &[Source]) -> Result<(Registry, Vec<String>), St
         build_provider(&mut registry, &name, entry).map_err(|e| format!("{label}: {e}"))?;
     }
     replaced.sort_unstable();
-    Ok((registry, replaced))
+    retargeted.sort_unstable();
+    Ok(Fold {
+        registry,
+        replaced,
+        retargeted,
+    })
 }
 
 /// One provider entry and its models, checked and filed into both tables.
@@ -167,14 +272,18 @@ fn build_provider(registry: &mut Registry, name: &str, entry: ProviderEntry) -> 
         models,
     } = entry;
     let credential = credential(name, env_api_key, auth)?;
-    for (key, model) in models.unwrap_or_default() {
+    // A written-but-valueless `models:` settles to an empty map here rather
+    // than to "unstated": the fold above has already had its say about
+    // inheritance, and what is left is a provider that lists no models, which
+    // the lint refuses in its own words.
+    for (key, model) in models.flatten().unwrap_or_default() {
         let spec = build(&key, name, model).map_err(|e| format!("`{key}`: {e}"))?;
         registry.models.insert(key, spec);
     }
     registry.providers.insert(
         name.to_string(),
         ProviderSpec {
-            name: intern(name),
+            name: intern(name)?,
             base_url,
             credential,
         },
@@ -199,7 +308,7 @@ fn credential(
              there is no variable for it to read — drop whichever of the two \
              lines is wrong"
         )),
-        (Some(var), None) => Ok(Credential::EnvVar(intern(&var))),
+        (Some(var), None) => Ok(Credential::EnvVar(intern(&var)?)),
         (None, Some(Auth::None)) => Ok(Credential::NotRequired),
         (None, None) => Ok(Credential::Unavailable),
     }
@@ -379,6 +488,29 @@ mod tests {
     /// incomplete one: such a provider authenticates only with a key the
     /// caller supplies.
     ///
+    /// An `auth:` written with NO VALUE is silence, not `auth: none`.
+    ///
+    /// YAML reads a bare `auth:` as null, and `Option<Auth>` reads null as
+    /// absent — so a half-typed line lands on `Unavailable` rather than
+    /// declaring the provider needs no credential. That is the safe direction
+    /// and the whole reason the two are separate fields, but nothing pinned it
+    /// until now: the alternative reading would turn a forgotten word into an
+    /// unauthenticated request against a paid host.
+    #[test]
+    fn a_bare_auth_key_is_not_auth_none() {
+        let registry = clean(&format!(
+            "{}{}",
+            without("env_api_key").replace("    models:\n", "    auth:\n    models:\n"),
+            model("demo/plain")
+        ));
+        let provider = registry.providers.get("demo").unwrap();
+        assert!(
+            !provider.unauthenticated(),
+            "a valueless `auth:` must read as silence, never as `auth: none`"
+        );
+        assert_eq!(provider.env_api_key(), None);
+    }
+
     /// Distinct from `auth: none`, and that is the point of having both:
     /// silence still means "this cannot be authenticated", so a forgotten line
     /// on a paid provider never becomes an unauthenticated request.
@@ -406,16 +538,20 @@ mod tests {
     /// provider the first does not, and both survive.
     #[test]
     fn a_second_roster_adds_its_providers() {
-        let (registry, replaced) = merged(&[&with(&model("demo/plain")), LOCAL_ROSTER]);
-        assert_eq!(providers(&registry), vec!["demo", "local"]);
-        assert_eq!(keys(&registry), vec!["demo/plain", "local/llama-3.3-70b"]);
-        assert!(replaced.is_empty(), "nothing was replaced: {replaced:?}");
+        let fold = merged(&[&with(&model("demo/plain")), LOCAL_ROSTER]);
+        assert_eq!(providers(&fold.registry), vec!["demo", "local"]);
+        assert_eq!(
+            keys(&fold.registry),
+            vec!["demo/plain", "local/llama-3.3-70b"]
+        );
+        assert!(fold.replaced.is_empty() && fold.retargeted.is_empty());
     }
 
-    /// A provider entry is replaced WHOLE, models included. Nothing in a roster
-    /// is inherited, so a half-merged entry would describe a provider that
-    /// appears in neither file — and "which `base_url` did my model get" would
-    /// stop being answerable by reading one.
+    /// A provider entry that STATES its models is replaced whole, models
+    /// included. Nothing is merged field by field, so a half-merged entry
+    /// would describe a provider that appears in neither file — and "which
+    /// `base_url` did my model get" would stop being answerable by reading
+    /// one.
     #[test]
     fn a_later_roster_replaces_a_provider_whole() {
         // `local` renamed to `demo` at the two places it is a KEY, leaving
@@ -423,16 +559,98 @@ mod tests {
         let shadowing = LOCAL_ROSTER
             .replace("  local:", "  demo:")
             .replace("local/llama", "demo/llama");
-        let (registry, replaced) =
-            merged(&[&with(&models(&["demo/keep", "demo/plain"])), &shadowing]);
-        assert_eq!(providers(&registry), vec!["demo"]);
+        let fold = merged(&[&with(&models(&["demo/keep", "demo/plain"])), &shadowing]);
+        assert_eq!(providers(&fold.registry), vec!["demo"]);
         // The earlier entry's models are GONE, not merged alongside.
-        assert_eq!(keys(&registry), vec!["demo/llama-3.3-70b"]);
+        assert_eq!(keys(&fold.registry), vec!["demo/llama-3.3-70b"]);
         assert_eq!(
-            registry.providers.get("demo").unwrap().base_url(),
+            fold.registry.providers.get("demo").unwrap().base_url(),
             "http://localhost:8000/v1"
         );
-        assert_eq!(replaced, vec!["demo"]);
+        assert_eq!(fold.replaced, vec!["demo"]);
+        assert!(fold.retargeted.is_empty());
+    }
+
+    /// The one thing a later entry inherits: models it says NOTHING about.
+    ///
+    /// Pointing a shipped provider at an internal proxy is the case, and it is
+    /// three lines rather than a restatement of every model under it. Before
+    /// this, such a file did not misroute — it failed to start, telling its
+    /// author to "delete it" when what they meant was to keep it.
+    #[test]
+    fn a_later_entry_that_names_no_models_keeps_the_ones_it_replaced() {
+        let fold = merged(&[
+            &with(&models(&["demo/keep", "demo/plain"])),
+            "providers:\n  demo:\n    base_url: \"http://proxy.internal/v1\"\n    \
+             env_api_key: DEMO_API_KEY\n",
+        ]);
+        // Both models still route — and they route to the NEW host.
+        assert_eq!(keys(&fold.registry), vec!["demo/keep", "demo/plain"]);
+        assert_eq!(
+            fold.registry.providers.get("demo").unwrap().base_url(),
+            "http://proxy.internal/v1"
+        );
+        // Announced as its own kind of override: this one kept the models,
+        // and saying "replaced, models included" would be a lie.
+        assert!(fold.replaced.is_empty());
+        assert_eq!(fold.retargeted, vec!["demo"]);
+    }
+
+    /// A valueless `models:` is a half-written line, not a decision to keep
+    /// models somebody never listed.
+    ///
+    /// The dangerous reading is the permissive one: `openai:` with a new
+    /// `base_url` and a bare `models:` would silently send every shipped
+    /// OpenAI model to that host. So a written key is always a statement, and
+    /// this one states nothing — refused, exactly as `models: {}` is.
+    #[test]
+    fn a_valueless_models_key_inherits_nothing() {
+        let fold = merged(&[
+            &with(&models(&["demo/keep", "demo/plain"])),
+            "providers:\n  demo:\n    base_url: \"http://proxy.internal/v1\"\n    \
+             env_api_key: DEMO_API_KEY\n    models:\n",
+        ]);
+        assert!(
+            keys(&fold.registry).is_empty(),
+            "a bare `models:` must not carry the replaced models over"
+        );
+        assert_eq!(fold.replaced, vec!["demo"]);
+        assert!(fold.retargeted.is_empty());
+        let error = super::super::lint::usable(&fold.registry).unwrap_err();
+        assert!(error.contains("registers no models"), "{error}");
+    }
+
+    /// Inheritance is for SILENCE only. Writing the key is a statement, and an
+    /// explicitly empty map states none — which the lint refuses in its own
+    /// words rather than this quietly handing the shipped models back.
+    #[test]
+    fn an_explicitly_empty_models_map_states_none_and_inherits_nothing() {
+        let fold = merged(&[
+            &with(&model("demo/plain")),
+            "providers:\n  demo:\n    base_url: \"http://proxy.internal/v1\"\n    \
+             env_api_key: DEMO_API_KEY\n    models: {}\n",
+        ]);
+        assert!(keys(&fold.registry).is_empty());
+        assert_eq!(fold.replaced, vec!["demo"]);
+        assert!(super::super::lint::usable(&fold.registry).is_err());
+    }
+
+    /// A provider the earlier source never had is an addition, not an
+    /// override — so an entry with no models is exactly what it looks like,
+    /// and there is nothing to inherit.
+    #[test]
+    fn a_new_provider_with_no_models_inherits_nothing() {
+        let fold = merged(&[
+            &with(&model("demo/plain")),
+            "providers:\n  fresh:\n    base_url: \"http://fresh.internal/v1\"\n    \
+             auth: none\n",
+        ]);
+        assert!(fold.replaced.is_empty());
+        assert!(fold.retargeted.is_empty());
+        // Nothing routes to it, and the lint says so rather than the fold.
+        assert_eq!(keys(&fold.registry), vec!["demo/plain"]);
+        let error = super::super::lint::usable(&fold.registry).unwrap_err();
+        assert!(error.contains("fresh"), "{error}");
     }
 
     /// The replacement is reported so a client can say so out loud. Silently
@@ -440,7 +658,7 @@ mod tests {
     /// outcome nobody could debug.
     #[test]
     fn every_replacement_is_reported_once() {
-        let (_, replaced) = merged(&[
+        let fold = merged(&[
             &format!("{}{OTHER_PROVIDER}", with(&model("demo/plain"))),
             &format!(
                 "{}{}",
@@ -448,7 +666,7 @@ mod tests {
                 OTHER_PROVIDER.replace("api.other.test", "api.replaced.test")
             ),
         ]);
-        assert_eq!(replaced, vec!["demo", "other"]);
+        assert_eq!(fold.replaced, vec!["demo", "other"]);
     }
 
     /// A message names the file it came from, which is the whole reason a
@@ -456,8 +674,68 @@ mod tests {
     /// to read warpllm's own.
     #[test]
     fn a_failure_names_the_source_it_came_from() {
-        let err = merge(&[&with(&model("demo/plain")), "providers: [not, a, map]\n"]).unwrap_err();
+        let err = merge(&[&with(&model("demo/plain")), "providers: [not, a, map]\n"])
+            .err()
+            .expect("a sequence where a provider map belongs cannot load");
         assert!(err.starts_with("second.yaml:"), "{err}");
+    }
+
+    /// The cached shipped half and a freshly parsed one fold to the same
+    /// thing, so the shortcut `load_for_client` takes cannot drift from the
+    /// general fold it stands in for.
+    ///
+    /// Worth pinning because the shortcut exists purely for speed: nothing
+    /// about the result is supposed to differ, and a divergence would show up
+    /// as a roster behaving one way in a client and another in every test.
+    #[test]
+    fn folding_over_the_shipped_roster_matches_parsing_it() {
+        let user = "providers:\n  local:\n    base_url: \"http://127.0.0.1:1/v1\"\n    \
+                    auth: none\n    models:\n      local/m:\n        supported_apis:\n          \
+                    - {api: openai_compat_chat_completions}\n";
+        let cached = load_over_shipped("warpllm.yaml", user).unwrap();
+        let fresh = load_all(&[
+            Source {
+                label: "specs.yaml",
+                yaml: super::super::SHIPPED_YAML,
+            },
+            Source {
+                label: "warpllm.yaml",
+                yaml: user,
+            },
+        ])
+        .unwrap();
+        assert_eq!(keys(&cached.registry), keys(&fresh.registry));
+        assert_eq!(providers(&cached.registry), providers(&fresh.registry));
+        assert_eq!(cached.replaced, fresh.replaced);
+        assert_eq!(cached.retargeted, fresh.retargeted);
+    }
+
+    /// The shortcut carries the retarget rule too — it is the same fold, and
+    /// the case a client is most likely to hit.
+    #[test]
+    fn the_shipped_shortcut_retargets_like_any_other_fold() {
+        let fold = load_over_shipped(
+            "warpllm.yaml",
+            "providers:\n  openai:\n    base_url: \"http://proxy.internal/v1\"\n    \
+             env_api_key: OPENAI_API_KEY\n",
+        )
+        .unwrap();
+        assert_eq!(fold.retargeted, vec!["openai"]);
+        assert_eq!(
+            fold.registry.providers.get("openai").unwrap().base_url(),
+            "http://proxy.internal/v1"
+        );
+        assert!(fold.registry.models.contains_key("openai/gpt-5.6"));
+    }
+
+    /// A bad user file is still blamed on the user file, not on the cached
+    /// half it was folded over.
+    #[test]
+    fn the_shipped_shortcut_still_names_the_users_file() {
+        let err = load_over_shipped("warpllm.yaml", "providers: [not, a, map]\n")
+            .err()
+            .expect("a sequence where a provider map belongs cannot load");
+        assert!(err.starts_with("warpllm.yaml:"), "{err}");
     }
 
     /// One roster is the same fold with one source, so `load` and `load_all`
@@ -465,7 +743,10 @@ mod tests {
     #[test]
     fn one_source_folds_to_itself() {
         let yaml = with(&model("demo/plain"));
-        assert_eq!(keys(&merged(&[&yaml]).0), keys(&load(&yaml).unwrap()));
+        assert_eq!(
+            keys(&merged(&[&yaml]).registry),
+            keys(&load(&yaml).unwrap())
+        );
     }
 
     // ---------------------------------------------------------- model rows

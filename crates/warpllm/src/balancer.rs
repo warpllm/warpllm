@@ -19,6 +19,8 @@
 /// request to that provider), but the distribution remains correct over the cycle.
 use std::sync::atomic::{AtomicI32, Ordering};
 
+use crate::error::{Error, Result};
+
 /// One candidate in a balanced model's rotation.
 ///
 /// The `model_str` and its weight, and nothing else. It used to carry the
@@ -69,14 +71,52 @@ impl Balancer {
     ///
     /// Candidates must be non-empty — validated by
     /// [`BalancedClient::new`](crate::balanced::BalancedClient::new).
-    pub fn new(candidates: Vec<Candidate>) -> Self {
-        let total = candidates.iter().map(|c| c.weight as i32).sum();
+    ///
+    /// This is the ONE place weight arithmetic is validated. Both
+    /// `BalancedClient` (Rust callers) and `JsonBalancedClient` (Python and
+    /// Node, where a caller-supplied `weight` arrives as an unvalidated `u32`
+    /// straight from JSON) build their candidate list and call through here,
+    /// so a bindings caller cannot reach `select()`'s `i32` arithmetic with a
+    /// value it was never checked against.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] if any candidate's weight exceeds `i32::MAX`
+    /// (the type `select()` computes in), if the weights sum to more than
+    /// `i32::MAX` (`total` would overflow), or if every candidate is
+    /// weight-0 (a single zero-weight candidate among positive ones is a
+    /// coherent "never pick this one"; an all-zero set has no candidate
+    /// left to pick, so `select()` would silently always return the first
+    /// entry regardless of what the caller asked for).
+    pub fn new(candidates: Vec<Candidate>) -> Result<Self> {
+        let mut total: i32 = 0;
+        for c in &candidates {
+            let weight = i32::try_from(c.weight).map_err(|_| {
+                Error::InvalidInput(format!(
+                    "candidate {:?} has weight {}, which exceeds the maximum of {}",
+                    c.model_str,
+                    c.weight,
+                    i32::MAX
+                ))
+            })?;
+            total = total.checked_add(weight).ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "candidate weights sum to more than {}; reduce them so the total fits",
+                    i32::MAX
+                ))
+            })?;
+        }
+        if total == 0 {
+            return Err(Error::InvalidInput(
+                "all candidates have weight 0; at least one needs a positive weight".into(),
+            ));
+        }
         let current = candidates.iter().map(|_| AtomicI32::new(0)).collect();
-        Self {
+        Ok(Self {
             candidates,
             current,
             total,
-        }
+        })
     }
 
     /// Select the next candidate via smooth weighted round-robin.
@@ -122,7 +162,7 @@ mod tests {
 
     #[test]
     fn single_candidate_always_selects() {
-        let balancer = Balancer::new(vec![candidate("a", 1)]);
+        let balancer = Balancer::new(vec![candidate("a", 1)]).unwrap();
         for _ in 0..100 {
             assert_eq!(balancer.select().model_str, "a");
         }
@@ -130,7 +170,7 @@ mod tests {
 
     #[test]
     fn two_equal_weight_candidates_alternate() {
-        let balancer = Balancer::new(vec![candidate("a", 1), candidate("b", 1)]);
+        let balancer = Balancer::new(vec![candidate("a", 1), candidate("b", 1)]).unwrap();
         let picks: Vec<&str> = (0..6)
             .map(|_| balancer.select().model_str.as_str())
             .collect();
@@ -139,7 +179,7 @@ mod tests {
 
     #[test]
     fn three_to_one_ratio() {
-        let balancer = Balancer::new(vec![candidate("a", 3), candidate("b", 1)]);
+        let balancer = Balancer::new(vec![candidate("a", 3), candidate("b", 1)]).unwrap();
         let mut counts = [0u32; 2];
         for _ in 0..1000 {
             let c = balancer.select();
@@ -167,7 +207,8 @@ mod tests {
             candidate("a", 2),
             candidate("b", 1),
             candidate("c", 1),
-        ]);
+        ])
+        .unwrap();
         let mut counts = [0u32; 3];
         for _ in 0..4 {
             let c = balancer.select();
@@ -185,7 +226,7 @@ mod tests {
     #[test]
     fn smoothness_no_two_identical_picks_are_far_apart() {
         // Weights [5, 1], total = 6. Max gap between A picks is ceil(6/5) = 2.
-        let balancer = Balancer::new(vec![candidate("a", 5), candidate("b", 1)]);
+        let balancer = Balancer::new(vec![candidate("a", 5), candidate("b", 1)]).unwrap();
         let picks: Vec<&str> = (0..12)
             .map(|_| balancer.select().model_str.as_str())
             .collect();
@@ -203,5 +244,48 @@ mod tests {
                 "gap between A picks should be at most 2, got {gap}: {picks:?}"
             );
         }
+    }
+
+    /// A single zero-weight candidate among positive ones is coherent — it
+    /// is simply never picked — so construction succeeds and `select()`
+    /// never returns it.
+    #[test]
+    fn a_single_zero_weight_candidate_is_never_selected() {
+        let balancer = Balancer::new(vec![candidate("a", 1), candidate("b", 0)]).unwrap();
+        for _ in 0..100 {
+            assert_eq!(balancer.select().model_str, "a");
+        }
+    }
+
+    /// An all-zero candidate set has no positive weight to pick by, which
+    /// would otherwise make `select()` silently always return the first
+    /// entry regardless of what the caller asked for.
+    #[test]
+    fn an_all_zero_candidate_set_is_rejected() {
+        let err = Balancer::new(vec![candidate("a", 0), candidate("b", 0)]).unwrap_err();
+        assert!(err.to_string().contains("weight 0"), "{err}");
+    }
+
+    /// A weight the balancer's `i32` arithmetic cannot represent is rejected
+    /// at construction rather than silently inverting the distribution —
+    /// `u32::MAX as i32` is `-1`, which would make this candidate lose every
+    /// round instead of winning almost every one.
+    #[test]
+    fn a_weight_exceeding_i32_max_is_rejected() {
+        let err = Balancer::new(vec![candidate("a", u32::MAX), candidate("b", 1)]).unwrap_err();
+        assert!(err.to_string().contains("exceeds the maximum"), "{err}");
+    }
+
+    /// Weights that individually fit `i32` but overflow it once summed are
+    /// rejected rather than panicking (`overflow-checks` on) or silently
+    /// wrapping `total` negative (release, `overflow-checks` off).
+    #[test]
+    fn weights_summing_past_i32_max_are_rejected() {
+        let err = Balancer::new(vec![
+            candidate("a", 2_000_000_000),
+            candidate("b", 2_000_000_000),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("sum to more than"), "{err}");
     }
 }

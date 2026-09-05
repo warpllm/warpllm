@@ -24,7 +24,7 @@ pub use error::{Error, Origin, Result};
 /// provider-driven [`Error`] variant carries. `gateway` itself stays private,
 /// exactly as `registry` does; this is its only public shape.
 pub use gateway::types::ProviderError;
-pub use json_client::{JsonChatStream, JsonClient};
+pub use json_client::{JsonBalancedClient, JsonChatStream, JsonClient};
 /// Everything a caller must NAME to make a call and hold its result: the
 /// request, everything it is built from, and the response handed back by
 /// [`Client::chat_completions`].

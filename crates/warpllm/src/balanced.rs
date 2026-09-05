@@ -84,16 +84,14 @@ impl<'a> BalancedClient<'a> {
         }
         Ok(Self {
             client,
-            balancer: Balancer::new(resolved),
+            balancer: Balancer::new(resolved)?,
         })
     }
 
     /// Selects the next candidate and returns a new request with the
     /// `model` field rewritten to match.
     fn prepare(&self, request: CreateChatCompletionRequest) -> CreateChatCompletionRequest {
-        let mut request = request;
-        request.model.clone_from(&self.balancer.select().model_str);
-        request
+        prepare_balanced(&self.balancer, request)
     }
 
     /// Performs a non-streaming chat completion via the next balanced candidate.
@@ -120,6 +118,26 @@ impl<'a> BalancedClient<'a> {
         let request = self.prepare(request);
         self.client.chat_completions_stream(request).await
     }
+}
+
+/// Selects the next candidate and returns a new request with the `model`
+/// field rewritten to match.
+///
+/// Shared by [`BalancedClient::prepare`] and
+/// [`JsonBalancedClient`](crate::json_client::JsonBalancedClient), which
+/// wraps the same selection logic for the JSON boundary the bindings use but
+/// cannot hold a borrowed `&Client` the way `BalancedClient` does. A free
+/// function rather than two copies of `request.model.clone_from(...)`: this
+/// one line is the entire routing decision, and every language a caller
+/// might come from needs to make it identically — a future gate added here
+/// (or removed) reaches both without anyone having to remember the second
+/// copy exists.
+pub(crate) fn prepare_balanced(
+    balancer: &Balancer,
+    mut request: CreateChatCompletionRequest,
+) -> CreateChatCompletionRequest {
+    request.model.clone_from(&balancer.select().model_str);
+    request
 }
 
 #[cfg(test)]
@@ -154,7 +172,8 @@ mod tests {
                 model_str: "b/test".into(),
                 weight: 1,
             },
-        ]);
+        ])
+        .unwrap();
         let mut counts = [0u32; 2];
         for _ in 0..1000 {
             let c = balancer.select();
@@ -166,5 +185,25 @@ mod tests {
         }
         assert_eq!(counts[0], 750);
         assert_eq!(counts[1], 250);
+    }
+
+    /// The core contract of `prepare_balanced`: the request's `model` is
+    /// overwritten with the selected candidate's, whatever the caller sent
+    /// in that field. Deleting the `clone_from` in `prepare_balanced` would
+    /// leave every other test in this module green, since none of them
+    /// inspect the request that comes back.
+    #[test]
+    fn prepare_balanced_rewrites_the_request_model() {
+        let balancer = Balancer::new(vec![Candidate {
+            model_str: "a/test".into(),
+            weight: 1,
+        }])
+        .unwrap();
+        let request = CreateChatCompletionRequest {
+            model: "caller/group-name".into(),
+            ..Default::default()
+        };
+        let prepared = prepare_balanced(&balancer, request);
+        assert_eq!(prepared.model, "a/test");
     }
 }

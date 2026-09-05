@@ -3,9 +3,12 @@ from warpllm._warpllm import version
 from ._client import (
     AsyncChatCompletionStream,
     AsyncWarpLLM,
+    AsyncWarpLLMBalanced,
+    BalancedCandidate,
     ChatCompletionStream,
     ProviderOptions,
     WarpLLM,
+    WarpLLMBalanced,
 )
 from ._exceptions import (
     APIConnectionError,
@@ -35,11 +38,13 @@ __all__ = [
     "APIStatusError",
     "AsyncChatCompletionStream",
     "AsyncWarpLLM",
+    "AsyncWarpLLMBalanced",
     "AuthenticationError",
     "BadRequestError",
-    "ConflictError",
+    "BalancedCandidate",
     "ChatCompletionRequestMessage",
     "ChatCompletionStream",
+    "ConflictError",
     "CreateChatCompletionRequest",
     "CreateChatCompletionResponse",
     "CreateChatCompletionStreamResponse",
@@ -50,6 +55,7 @@ __all__ = [
     "RateLimitError",
     "UnprocessableEntityError",
     "WarpLLM",
+    "WarpLLMBalanced",
     "__version__",
     "version",
 ]

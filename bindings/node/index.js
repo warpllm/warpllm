@@ -587,6 +587,7 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.BalancedClient = nativeBinding.BalancedClient
 module.exports.ChatStream = nativeBinding.ChatStream
 module.exports.Client = nativeBinding.Client
 module.exports.version = nativeBinding.version

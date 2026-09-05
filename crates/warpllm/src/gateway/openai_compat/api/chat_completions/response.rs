@@ -371,12 +371,14 @@ fn render_message(message: &types::Message, provider: &str) -> ChatCompletionRes
             // rejects.
             //
             // Of the two ways out that comment named, the SECOND is taken:
-            // `anthropic::…::request::ensure_renderable` refuses thinking
-            // paired with tools, at the first request rather than the second.
-            // Dropping silently was the option that was not available, and it
-            // is not what happens. Carrying the blocks in a caller-visible form
-            // that round trips with the signature intact is still the larger
-            // fix, and it is what would lift that refusal.
+            // `anthropic::…::request::ensure_renderable` refuses the request
+            // that restates an unsigned `tool_use` turn — the one carrying tool
+            // results back, which is the request this drop makes unbuildable.
+            // Not the first request of the loop, which goes out whole and comes
+            // back whole. Dropping silently was the option that was not
+            // available, and it is not what happens. Carrying the blocks in a
+            // caller-visible form that round trips with the signature intact is
+            // still the larger fix, and it is what would lift that refusal.
             _ => {}
         }
     }

@@ -114,12 +114,17 @@ Two differences from a chat-completions provider are worth knowing:
     translating it — so the refusal is Anthropic's, with Anthropic's message.
     Omit them for those models and steer with the prompt.
   </Accordion>
-  <Accordion title="Extended thinking with tools is not yet complete" icon="brain">
-    Anthropic requires its own signed `thinking` blocks to be echoed back
-    alongside your tool results, and a chat-completions reply has nowhere to
-    carry them — so a *multi-turn* tool conversation with thinking enabled is
-    rejected by Anthropic on the second turn. Single-turn tool calls and
-    thinking-without-tools both work. Tracked in
+  <Accordion title="Extended thinking cannot be combined with tool results" icon="brain">
+    Anthropic requires the assistant turn holding a tool call to open with its
+    own signed `thinking` block, and a chat-completions reply has nowhere to
+    carry one — so the request that sends your tool results back cannot be
+    built. warpllm refuses it with a `NotImplemented` error rather than letting
+    Anthropic answer it with a 400.
+
+    A single-turn tool call with thinking works, and so does
+    thinking-without-tools; it is sending the results back that stops. Turn
+    thinking off for a tool loop, or run the loop on a chat-completions
+    provider. Tracked in
     [#23](https://github.com/warpllm/warpllm/issues/23).
   </Accordion>
 </AccordionGroup>

@@ -472,6 +472,36 @@ fn arrived_on_this_protocol(request: &types::ChatRequest) -> bool {
         .is_some_and(|source| source.protocol == Protocol::Anthropic)
 }
 
+/// Whether the conversation already restates an assistant turn that Anthropic
+/// would demand a `thinking` block in front of.
+///
+/// That turn is the one a thinking tool loop actually breaks on. Anthropic
+/// requires the assistant message carrying a `tool_use` to OPEN with its own
+/// signed thinking block, and a caller translated onto this protocol was handed
+/// none to put there — so the request restating that turn cannot be built,
+/// whatever warpllm does with it.
+///
+/// A first request holds no such turn and is not refused: it is an ordinary
+/// single-turn tool call, it goes out whole and comes back whole.
+///
+/// A message that DOES carry reasoning is left alone. Nothing on chat
+/// completions produces one today, but the question this asks is whether the
+/// block is missing, and a caller who somehow has one is not the caller this
+/// refusal is about.
+fn holds_an_unsigned_tool_turn(request: &types::ChatRequest) -> bool {
+    request.messages.iter().any(|message| {
+        message.role == Role::Assistant
+            && message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolCall { .. }))
+            && !message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Reasoning { .. }))
+    })
+}
+
 /// Whether this request turns extended thinking ON.
 ///
 /// Asked once so that a refusal cannot disagree with what would actually be
@@ -517,27 +547,34 @@ fn ensure_renderable(request: &types::ChatRequest) -> Result<()> {
     // correctly denies it the `anthropic` bag the signature was retained in, so
     // nothing a caller can echo ever reaches them.
     //
-    // Which means the conversation cannot COMPLETE. The first exchange looks
-    // fine and answers with tool calls; the request carrying the results back
-    // has no thinking block to put before them and Anthropic rejects it. So the
-    // refusal is here, at the first request, rather than at the second: a
-    // caller told now loses only a turn they could not have used, and a caller
-    // told later has already built the loop around it.
+    // So the SECOND request of a tool loop cannot be built. Anthropic answers
+    // the first with thinking and a tool_use, the caller reads tool_calls and
+    // sends the results back, and that request has to restate the assistant
+    // turn -- now a tool_use with no thinking in front of it.
+    //
+    // Refused there and not before, because the first request is not broken:
+    // it goes out whole, it comes back whole, and a single-turn tool call is a
+    // real thing to want. Refusing it too would take away a case that works to
+    // make the failure of a different case arrive sooner.
     //
     // The counterpart comment in `openai_compat::…::response` records the other
     // half of this and says dropping silently is the one option not available.
-    // This is that promise being kept. Carrying the blocks in a caller-visible,
-    // round-trippable form is the larger fix that would lift the refusal.
+    // This is that promise being kept: the caller is told, in the request that
+    // is actually unbuildable, instead of reading Anthropic's 400 for it.
+    // Carrying the blocks in a caller-visible, round-trippable form is the
+    // larger fix that would lift the refusal entirely.
     //
     // And ONLY for a caller who cannot carry them. A request that ARRIVED on
     // this protocol keeps its signed blocks in the retained residue and hands
     // them straight back untouched, so the loop was never broken for them —
     // refusing it would turn away the one caller this all works for.
-    if !arrived_on_this_protocol(request) && !request.tools.is_empty() && thinks(request) {
+    if !arrived_on_this_protocol(request) && thinks(request) && holds_an_unsigned_tool_turn(request)
+    {
         return Err(Error::NotImplemented(
-            "extended thinking with tools on the anthropic renderer: Anthropic \
-             wants its signed thinking blocks back alongside the tool results \
-             and chat completions has no field to carry them",
+            "extended thinking with a tool result on the anthropic renderer: \
+             Anthropic wants the assistant turn holding a tool call to open \
+             with its own signed thinking block, and chat completions has no \
+             field to carry one back",
         ));
     }
     // Anthropic's base64 source REQUIRES a media type — `application/pdf`,
@@ -1358,18 +1395,18 @@ mod tests {
         );
     }
 
-    /// Thinking and tools cannot round trip on this route, so the pair is
-    /// refused rather than sent.
+    /// The request that CARRIES TOOL RESULTS BACK cannot be built, so it is
+    /// refused rather than sent to collect Anthropic's 400.
     ///
-    /// Anthropic wants the assistant turn holding a `tool_use` to START with
-    /// its own signed `thinking` block, and a chat-completions caller is never
+    /// Anthropic wants the assistant turn holding a `tool_use` to OPEN with its
+    /// own signed `thinking` block, and a chat-completions caller is never
     /// given one to return — the reply renderer drops it and `may_read` denies
-    /// it the bag the signature was kept in. Sent anyway, the FIRST exchange
-    /// succeeds and the second is rejected upstream, which is the shape this
-    /// fixture used to have: it asked for `reasoning_effort` alongside tools
-    /// and asserted the result was a valid Anthropic body. It was not.
+    /// it the bag the signature was kept in. `openai_tool_conversation` is
+    /// exactly that second request: an assistant `tool_calls` turn and the
+    /// results answering it. The fixture used to ask for `reasoning_effort`
+    /// here and assert the render was a valid Anthropic body. It was not.
     #[test]
-    fn thinking_with_tools_is_refused_rather_than_sent_to_be_rejected() {
+    fn a_thinking_tool_result_turn_is_refused_rather_than_sent_to_be_rejected() {
         let mut request = openai_tool_conversation();
         request.reasoning = Some(types::ReasoningConfig {
             effort: Some("medium".into()),
@@ -1392,9 +1429,36 @@ mod tests {
         ));
     }
 
-    /// The refusal is about the PAIR. Tools without thinking is the ordinary
-    /// tool call this whole path exists to serve, and thinking without tools
-    /// has no blocks to hand back, so neither is turned away.
+    /// A FIRST tool request with thinking is not refused, and that is the
+    /// point of scoping the refusal to the turn rather than to the pair.
+    ///
+    /// It holds no assistant turn yet, so there is no `tool_use` missing a
+    /// thinking block in front of it: the request goes out whole and comes
+    /// back whole. A refusal keyed on "tools and thinking together" turned this
+    /// away too, which took a working single-turn tool call off the table to
+    /// make a different request's failure arrive one turn sooner.
+    #[test]
+    fn a_first_tool_request_with_thinking_still_renders() {
+        let mut request = openai_tool_conversation();
+        // Keep the tools and the thinking; drop back to the opening turn.
+        request
+            .messages
+            .retain(|message| message.role == Role::User);
+        request.messages.truncate(1);
+        request.reasoning = Some(types::ReasoningConfig {
+            effort: Some("medium".into()),
+            ..Default::default()
+        });
+
+        let body = rendered(&request);
+        assert_eq!(body["output_config"]["effort"], json!("medium"), "{body}");
+        assert!(body["tools"].is_array(), "{body}");
+    }
+
+    /// The refusal is about the TURN, not about thinking or tools as such.
+    /// Tools without thinking is the ordinary tool call this whole path exists
+    /// to serve, and thinking without tools has no blocks to hand back, so
+    /// neither is turned away.
     #[test]
     fn thinking_and_tools_are_each_fine_alone() {
         assert!(render_request(&openai_tool_conversation(), "anthropic", None).is_ok());
@@ -1402,11 +1466,38 @@ mod tests {
         let mut thinking_only = openai_tool_conversation();
         thinking_only.tools.clear();
         thinking_only.tool_choice = None;
+        // The TURN has to go too, not just the tool declarations. An assistant
+        // turn restating a `tool_use` is what Anthropic wants a thinking block
+        // in front of, and it wants that whether or not this request happens to
+        // declare the tools that produced it.
+        thinking_only
+            .messages
+            .retain(|message| message.role == Role::User);
+        thinking_only.messages.truncate(1);
         thinking_only.reasoning = Some(types::ReasoningConfig {
             effort: Some("medium".into()),
             ..Default::default()
         });
         assert!(render_request(&thinking_only, "anthropic", None).is_ok());
+    }
+
+    /// Clearing `tools` does NOT lift the refusal, which is the same claim from
+    /// the other side. The unbuildable request is the one restating an
+    /// unsigned `tool_use` turn; whether it also re-declares the tools that
+    /// produced that turn is not what Anthropic is checking.
+    #[test]
+    fn dropping_the_tool_declarations_does_not_make_the_turn_buildable() {
+        let mut request = openai_tool_conversation();
+        request.tools.clear();
+        request.tool_choice = None;
+        request.reasoning = Some(types::ReasoningConfig {
+            effort: Some("medium".into()),
+            ..Default::default()
+        });
+        assert!(matches!(
+            render_request(&request, "anthropic", None),
+            Err(Error::NotImplemented(_))
+        ));
     }
 
     /// The refusal is for callers who were TRANSLATED onto this protocol. One

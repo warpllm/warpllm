@@ -410,6 +410,66 @@ fn forbidding_parallel_tool_calls_reaches_claude() {
     });
 }
 
+/// A first tool request with thinking reaches Claude; the request carrying the
+/// results BACK is refused before the network.
+///
+/// Both halves in one test, because each is what makes the other meaningful. A
+/// refusal keyed on "thinking and tools together" passes the second assertion
+/// and silently takes away the first — a single-turn tool call with thinking,
+/// which works and which the docs promise. Anthropic wants the assistant turn
+/// holding a `tool_use` to open with its own signed `thinking` block, and a
+/// chat-completions caller is handed none, so it is only the turn RESTATING
+/// that tool call that cannot be built.
+#[test]
+fn thinking_survives_the_first_tool_turn_and_stops_at_the_results() {
+    with_anthropic_key(async {
+        let tools = json!([{
+            "type": "function",
+            "function": {"name": "weather", "parameters": {"type": "object"}}
+        }]);
+
+        let (sent, _) = exchange(
+            from_json(json!({
+                "model": "anthropic/claude-opus-5",
+                "messages": [{"role": "user", "content": "weather in SF?"}],
+                "tools": tools,
+                "reasoning_effort": "medium"
+            })),
+            anthropic_message_body(),
+        )
+        .await;
+        assert_eq!(sent["output_config"]["effort"], json!("medium"), "{sent}");
+        assert!(sent["tools"].is_array(), "{sent}");
+
+        // The same conversation one turn on, and now unbuildable.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_message_body()))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let err = client_for(&server)
+            .chat_completions(from_json(json!({
+                "model": "anthropic/claude-opus-5",
+                "messages": [
+                    {"role": "user", "content": "weather in SF?"},
+                    {"role": "assistant", "content": null, "tool_calls": [
+                        {"id": "call_a", "type": "function",
+                         "function": {"name": "weather", "arguments": "{}"}}
+                    ]},
+                    {"role": "tool", "tool_call_id": "call_a", "content": "18C"}
+                ],
+                "tools": tools,
+                "reasoning_effort": "medium"
+            })))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::NotImplemented(_)), "{err:?}");
+    });
+}
+
 /// The test the neutral tool path was built for, and the one Responses will
 /// copy. An OpenAI-shaped conversation with tools, an assistant `tool_calls`
 /// turn, and TWO consecutive `role: "tool"` results renders to a valid

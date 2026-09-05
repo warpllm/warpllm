@@ -4,6 +4,27 @@
 //! round-robin selection via [`Balancer`](crate::balancer::Balancer). The
 //! candidate set is fixed at construction; each call picks one candidate and
 //! delegates to the inner client's normal 4-gate validation.
+//!
+//! # The candidate list is the caller's, not the roster's
+//!
+//! An earlier draft put a `balance:` key in `specs.yaml`. It was refused: the
+//! roster ships with the crate, so such a key would state to every consumer
+//! that one model may be billed to another provider, and it would contradict
+//! [`ClientConfig::providers`](crate::ClientConfig), which exists so a client
+//! can withhold a vendor deliberately. Which models are interchangeable is an
+//! application judgement, so it lives where the application is.
+//!
+//! # Boundaries
+//!
+//! - **This is not failover.** One candidate is selected per request, and if
+//!   that provider fails the caller sees the failure. Retrying the next
+//!   candidate is issue #27, and the two are meant to compose — selection picks
+//!   the head of the chain — rather than to reorder candidates independently.
+//! - **State is per process.** Two warpllm instances balance independently, and
+//!   their combined split is only as even as the traffic split between them.
+//!   Anything better needs state shared across instances.
+//! - **No metrics yet.** The realized distribution is not observable from
+//!   outside, which is issue #29.
 
 use crate::balancer::Balancer;
 use crate::client::{ChatCompletionStream, Client};
@@ -56,7 +77,8 @@ impl<'a> BalancedClient<'a> {
     ///
     /// * `client` — The underlying client used for every request.
     /// * `candidates` — Non-empty list of `(model_str, weight)` pairs. Each
-    ///   `model_str` must exist in the registry. Weight determines the relative
+    ///   `model_str` must exist in the roster this client loaded, which may be a
+    ///   roster file of the caller's own. Weight determines the relative
     ///   proportion of requests routed to that candidate.
     ///
     /// # Errors

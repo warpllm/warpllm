@@ -400,6 +400,7 @@ mod tests {
                 "openai/gpt-5.6-luna",
                 "openai/gpt-5.6-sol",
                 "openai/gpt-5.6-terra",
+                "openai/gpt-6-astra",
                 "openai/o3",
                 "opencode/big-pickle",
                 "opencode/deepseek-v4-flash",

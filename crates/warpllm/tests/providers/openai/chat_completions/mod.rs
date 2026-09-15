@@ -61,6 +61,34 @@ fn openai_happy_path() {
     });
 }
 
+/// The newest OpenAI entry routes like the rest of the roster. `gpt-6-astra` is
+/// OpenAI's own name for the model rather than an alias for another one, so no
+/// `model:` override sits behind it: the key's last segment goes on the wire.
+#[test]
+fn openai_routes_gpt_6_astra() {
+    with_openai_key(async {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer sk-test-openai"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openai_completion_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let completion = client_for(&server)
+            .chat_completions(request("openai/gpt-6-astra"))
+            .await
+            .unwrap();
+
+        assert_eq!(completion.model, "openai/gpt-6-astra");
+
+        let sent: serde_json::Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+        assert_eq!(sent["model"], "gpt-6-astra");
+    });
+}
+
 #[test]
 fn unknown_request_fields_are_forwarded() {
     with_openai_key(async {

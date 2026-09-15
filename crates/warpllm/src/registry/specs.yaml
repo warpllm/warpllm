@@ -685,6 +685,20 @@ providers:
         capabilities:
           max_input_tokens: 1050000
           max_output_tokens: 128000
+      # Checked 2026-09-16 rather than with the sweep above: GPT-6 Astra did not
+      # exist on 2026-08-11. Its page marks `v1/chat/completions` supported, and
+      # the deprecations page names it nowhere. 1,050,000 context and 128,000
+      # max output — the same pair the 5.6 family carries, and the 922,000 its
+      # page calls "maximum input tokens" is that window minus the output
+      # ceiling, as the header above says.
+      # <https://developers.openai.com/api/docs/models/gpt-6-astra>
+      openai/gpt-6-astra:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        capabilities:
+          max_input_tokens: 1050000
+          max_output_tokens: 128000
       # The last o-series model here: o4-mini shuts down, and every `-pro`
       # sibling serves the Responses API instead.
       # <https://developers.openai.com/api/docs/models/o3>

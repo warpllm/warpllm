@@ -31,6 +31,7 @@ pub(crate) async fn chat_completions(State(state): State<AppState>, body: Bytes)
     // Never log headers or bodies: they carry credentials and prompts.
     tracing::info!(
         model = %request.model,
+        models = ?request.models,
         stream = request.stream.unwrap_or(false),
         "chat completion request"
     );

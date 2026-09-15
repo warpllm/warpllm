@@ -259,6 +259,14 @@ doesn't know is an error, not a surprise upstream bill.
 1.  **Warp-speed execution** - What we named ourselves after. Machine level code, faster than a typescript or python native library.
 1.  **Compact file size** - Pre-compiled into binary format, not verbose text files.
 
+## Partners
+
+<a href="https://github.com/tempestai-dev/tempest">
+  <img src="https://raw.githubusercontent.com/warpllm/warpllm/main/media/tempest-wordmark.png" alt="Tempest" height="48" />
+</a>
+
+**[Tempest](https://github.com/tempestai-dev/tempest)** - run Claude Code, Codex, Gemini and other CLI agents in parallel, with up to 86% fewer tokens and 92% fewer tool calls. Agent orchestration on the desktop, model routing in the runtime - the same refusal to be locked to one vendor, one layer apart.
+
 ## Roadmap
 
 The roadmap lives in [GitHub issues](https://github.com/warpllm/warpllm/issues) — one issue per item, so direction is discussed where the work happens. Add a comment if you see something missing, or if something there matters enough to you that it should move up.

@@ -371,7 +371,9 @@ def test_stream_read_timeout_reaches_the_native_config(
     """
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
     _serve_stream(httpserver)
-    bounded = WarpLLM(base_url=base_url, timeout=5, stream_read_timeout=30)
+    bounded = WarpLLM(
+        timeout=5, stream_read_timeout=30, providers={"openai": {"base_url": base_url}}
+    )
 
     assert len(list(bounded.chat_completions_stream(request()))) == 2
 
@@ -433,7 +435,7 @@ def test_declared_providers_narrow_what_this_client_routes(
     """
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-deepseek")
-    client = WarpLLM(base_url=base_url, timeout=5, providers={"openai": {}})
+    client = WarpLLM(timeout=5, providers={"openai": {"base_url": base_url}})
 
     with pytest.raises(BadRequestError) as exc_info:
         client.chat_completions(request(model="deepseek/deepseek-v4-flash"))
@@ -455,9 +457,8 @@ def test_an_inline_key_reaches_the_upstream_request(
         openai_completion_body
     )
     client = WarpLLM(
-        base_url=base_url,
         timeout=5,
-        providers={"openai": {"api_key": "sk-from-the-config"}},
+        providers={"openai": {"api_key": "sk-from-the-config", "base_url": base_url}},
     )
 
     client.chat_completions(request())
@@ -475,7 +476,7 @@ def test_an_unknown_declared_provider_raises_at_construction(
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
 
     with pytest.raises(BadRequestError, match="openia"):
-        WarpLLM(base_url=base_url, timeout=5, providers={"openia": {}})
+        WarpLLM(timeout=5, providers={"openia": {"base_url": base_url}})
 
 
 def test_providers_accepts_any_mapping_not_only_a_dict(
@@ -491,9 +492,8 @@ def test_providers_accepts_any_mapping_not_only_a_dict(
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
 
     client = WarpLLM(
-        base_url=base_url,
         timeout=5,
-        providers=MappingProxyType({"openai": {}}),
+        providers=MappingProxyType({"openai": {"base_url": base_url}}),
     )
 
     # And it really narrowed, rather than being dropped on the way across.

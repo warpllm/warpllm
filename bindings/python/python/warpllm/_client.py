@@ -31,20 +31,24 @@ class ProviderOptions(TypedDict, total=False):
     `api_key` is for callers holding keys somewhere this process's environment
     cannot reach -- a secret manager, a per-tenant record. It wins over the
     variable the provider's registry entry names.
+
+    `base_url` overrides this provider's base URL -- proxies, self-hosted
+    deployments, or a provider like Vertex whose address is per-deployment.
+    Per-provider only: setting it here affects this provider alone, never
+    any other.
     """
 
     api_key: str
+    base_url: str
 
 
 def _native_client(
-    base_url: str | None,
     specs_path: str | None,
     timeout: int | None,
     stream_read_timeout: int | None,
     providers: Mapping[str, ProviderOptions] | None,
 ) -> _NativeClient:
     config = {
-        "base_url": base_url,
         "specs_path": specs_path,
         "timeout_secs": timeout,
         "stream_read_timeout_secs": stream_read_timeout,
@@ -140,7 +144,6 @@ class WarpLLM:
     def __init__(
         self,
         *,
-        base_url: str | None = None,
         specs_path: str | None = None,
         timeout: int | None = None,
         stream_read_timeout: int | None = None,
@@ -189,7 +192,7 @@ class WarpLLM:
         upstream. A name the registry does not hold raises here, not later.
         """
         self._native = _native_client(
-            base_url, specs_path, timeout, stream_read_timeout, providers
+            specs_path, timeout, stream_read_timeout, providers
         )
 
     # Signatures 1 and 2 overlap on purpose: a `_StreamingRequest` IS a
@@ -269,7 +272,6 @@ class AsyncWarpLLM:
     def __init__(
         self,
         *,
-        base_url: str | None = None,
         specs_path: str | None = None,
         timeout: int | None = None,
         stream_read_timeout: int | None = None,
@@ -281,7 +283,7 @@ class AsyncWarpLLM:
         providers it names.
         """
         self._native = _native_client(
-            base_url, specs_path, timeout, stream_read_timeout, providers
+            specs_path, timeout, stream_read_timeout, providers
         )
 
     # Overlapping on purpose; see `WarpLLM.chat_completions`.

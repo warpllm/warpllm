@@ -62,16 +62,24 @@ struct ProviderEntry {
     models: Option<HashMap<String, ModelEntry>>,
 }
 
-/// The `auth:` vocabulary, closed at one word.
+/// The `auth:` vocabulary.
 ///
-/// An enum rather than a `bool` because there is every reason to expect a
-/// second scheme — a custom header, a query parameter — and `auth: none`
-/// reads the same before and after one lands, where `unauthenticated: true`
-/// would have to be deprecated to make room.
+/// An enum rather than a `bool` because there is every reason to expect
+/// more schemes than these two — a custom header, a query parameter — and
+/// `auth: none` reads the same before and after one lands, where
+/// `unauthenticated: true` would have to be deprecated to make room.
+/// `OAuth` is the first proof of that: Vertex (#25) mints its own token
+/// rather than reading one from the environment, and needed a third word
+/// rather than overloading either of the first two.
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Auth {
     None,
+    /// Spelled `OAuth` in Rust (proper acronym casing); `rename_all` alone
+    /// would map that to `o_auth` on the wire, so this pins it back to the
+    /// `auth: oauth` the roster schema actually uses.
+    #[serde(rename = "oauth")]
+    OAuth,
 }
 
 /// One model as written: which surfaces it serves, what it ships upstream if
@@ -199,8 +207,14 @@ fn credential(
              there is no variable for it to read — drop whichever of the two \
              lines is wrong"
         )),
+        (Some(_), Some(Auth::OAuth)) => Err(format!(
+            "`{name}`: `auth: oauth` says this provider mints its own token, so \
+             there is no variable for it to read — drop whichever of the two \
+             lines is wrong"
+        )),
         (Some(var), None) => Ok(Credential::EnvVar(intern(&var))),
         (None, Some(Auth::None)) => Ok(Credential::NotRequired),
+        (None, Some(Auth::OAuth)) => Ok(Credential::OAuth),
         (None, None) => Ok(Credential::Unavailable),
     }
 }

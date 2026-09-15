@@ -15,11 +15,16 @@ export interface ProviderOptions {
    * cannot reach; it wins over that variable when both have one.
    */
   apiKey?: string
+  /**
+   * Overrides this provider's base URL — proxies, self-hosted deployments, or
+   * a provider like Vertex whose address is per-deployment. Per-provider
+   * only: setting it here affects this provider alone, never any other.
+   */
+  baseUrl?: string
 }
 
 /** Constructor options. Mirrors Rust's `ClientConfig`. */
 export interface WarpLLMOptions {
-  baseUrl?: string
   /**
    * A roster of your own, in the same schema as warpllm's built-in
    * `specs.yaml`, merged over it. How a self-hosted OpenAI-compatible server —
@@ -83,12 +88,11 @@ export class WarpLLM {
     try {
       this.native = new NativeClient(
         JSON.stringify({
-          base_url: options.baseUrl,
           specs_path: options.specsPath,
           timeout_secs: options.timeout,
           stream_read_timeout_secs: options.streamReadTimeout,
-          // Entries are rebuilt rather than passed through, because the key
-          // inside one is renamed too. `undefined` when absent, so
+          // Entries are rebuilt rather than passed through, because the keys
+          // inside one are renamed too. `undefined` when absent, so
           // `JSON.stringify` drops it and Rust sees "no declaration" — while
           // `{}` survives as `{}`, which is the different claim it is.
           providers:
@@ -96,7 +100,7 @@ export class WarpLLM {
             Object.fromEntries(
               Object.entries(options.providers).map(([name, entry]) => [
                 name,
-                { api_key: entry.apiKey },
+                { api_key: entry.apiKey, base_url: entry.baseUrl },
               ]),
             ),
         }),

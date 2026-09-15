@@ -53,7 +53,7 @@ beforeEach(async () => {
   server = await MockServer.start()
   // The native client reads OPENAI_API_KEY at construction, so set it first.
   process.env.OPENAI_API_KEY = 'sk-test-openai'
-  client = new WarpLLM({ baseUrl: server.url, timeout: 5 })
+  client = new WarpLLM({ timeout: 5, providers: { openai: { baseUrl: server.url } } })
 })
 
 afterEach(async () => {
@@ -289,7 +289,7 @@ test('a stream is iterated with for await', async () => {
 // this a real check that the option arrives, not just that it is accepted here.
 test('streamReadTimeout reaches the native config', async () => {
   server.respondWithStream(OPENAI_STREAM)
-  const bounded = new WarpLLM({ baseUrl: server.url, timeout: 5, streamReadTimeout: 30 })
+  const bounded = new WarpLLM({ timeout: 5, streamReadTimeout: 30, providers: { openai: { baseUrl: server.url } } })
 
   const chunks = []
   for await (const chunk of await bounded.chatCompletions({
@@ -340,9 +340,8 @@ test('declaring providers narrows what this client routes', async () => {
   // wrong question: the deepseek key is right there, and deliberately unused.
   process.env.DEEPSEEK_API_KEY = 'sk-test-deepseek'
   const narrowed = new WarpLLM({
-    baseUrl: server.url,
     timeout: 5,
-    providers: { openai: {} },
+    providers: { openai: { baseUrl: server.url } },
   })
 
   const err = await narrowed
@@ -359,9 +358,8 @@ test('an inline key authenticates a provider the environment cannot', async () =
   delete process.env.OPENAI_API_KEY
   server.respondWith(200, OPENAI_COMPLETION)
   const configured = new WarpLLM({
-    baseUrl: server.url,
     timeout: 5,
-    providers: { openai: { apiKey: 'sk-from-the-config' } },
+    providers: { openai: { apiKey: 'sk-from-the-config', baseUrl: server.url } },
   })
 
   await configured.chatCompletions(request())
@@ -371,6 +369,6 @@ test('an inline key authenticates a provider the environment cannot', async () =
 
 test('an unknown declared provider throws from the constructor', () => {
   expect(
-    () => new WarpLLM({ baseUrl: server.url, timeout: 5, providers: { openia: {} } }),
+    () => new WarpLLM({ timeout: 5, providers: { openia: { baseUrl: server.url } } }),
   ).toThrow(/openia/)
 })

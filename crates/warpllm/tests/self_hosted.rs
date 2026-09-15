@@ -376,6 +376,7 @@ fn an_inline_key_is_sent_to_a_provider_the_roster_calls_unauthenticated() {
                 "local".to_string(),
                 ProviderConfig {
                     api_key: Some("sk-in-front-of-the-box".into()),
+                    base_url: None,
                 },
             )])),
             timeout_secs: Some(5),

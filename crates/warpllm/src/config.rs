@@ -21,14 +21,6 @@ pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 600;
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
-    /// Overrides the provider's default base URL (proxies, tests). Absent
-    /// means each provider talks to its own API.
-    ///
-    /// Global, and worth saying plainly now that a client can carry providers
-    /// of its own: this redirects EVERY provider, including the self-hosted one
-    /// whose whole point was its own address. Setting both is almost always a
-    /// mistake, and the client says so in its logs when it sees them together.
-    pub base_url: Option<String>,
     /// A roster of your own, in the same schema as warpllm's shipped
     /// `specs.yaml`, folded over it when this client is built.
     ///
@@ -132,6 +124,24 @@ pub struct ProviderConfig {
     /// their config would otherwise disable a provider whose key is sitting
     /// right there.
     pub api_key: Option<String>,
+
+    /// Overrides this provider's base URL — a proxy in front of it, a test
+    /// double, or (Vertex, #25) an address the roster cannot hold a single
+    /// universal value for at all, since it carries a caller's own project
+    /// and region.
+    ///
+    /// Per-provider rather than client-wide: an earlier, global `base_url`
+    /// redirected every provider a client held, self-hosted entries
+    /// included, whose whole point was their own address. That coupling
+    /// meant pointing one provider elsewhere silently broke every other one
+    /// in the same client — removed in favor of this field, which can only
+    /// ever affect the provider it is declared under.
+    ///
+    /// Wins over the roster's own `base_url:` for this provider, on the
+    /// same reasoning [`api_key`](Self::api_key) wins over the environment:
+    /// this is the more specific statement, made for this client in this
+    /// process.
+    pub base_url: Option<String>,
 }
 
 /// PRESENCE only, never the value. A derived `Debug` would print an inline key

@@ -1,10 +1,13 @@
 // Shared across test binaries; not every binary uses every helper.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::future::Future;
 
 use serde_json::{Value, json};
-use warpllm::{ChatCompletionRequestMessage, Client, ClientConfig, CreateChatCompletionRequest};
+use warpllm::{
+    ChatCompletionRequestMessage, Client, ClientConfig, CreateChatCompletionRequest, ProviderConfig,
+};
 use wiremock::MockServer;
 
 /// The keys the helpers below put in the environment. Tests assert on these as
@@ -14,14 +17,30 @@ pub const DEEPSEEK_KEY: &str = "sk-test-deepseek";
 pub const OPENROUTER_KEY: &str = "sk-test-openrouter";
 pub const OPENCODE_KEY: &str = "sk-test-opencode";
 
-/// Client with the base URL pointed at the mock server. It carries no key —
-/// the client reads the environment as it is BUILT, resolving every provider
-/// it can authenticate once — so every test using this must run inside
-/// [`with_openai_key`] or [`with_deepseek_key`], and must construct the client
-/// inside that closure rather than before it.
+/// Client with every provider's base URL pointed at the mock server. It
+/// carries no key — the client reads the environment as it is BUILT,
+/// resolving every provider it can authenticate once — so every test using
+/// this must run inside the matching `with_*_key` helper, and must construct
+/// the client inside that closure rather than before it.
+///
+/// Redirects all providers this helper is used for (openai, deepseek,
+/// openrouter, opencode, anthropic, mistral), not just openai/deepseek —
+/// otherwise a provider's test would sail past the mock and hit the real API.
 pub fn client_for(server: &MockServer) -> Client {
+    let base_url = Some(server.uri());
+    let provider = |base_url: &Option<String>| ProviderConfig {
+        api_key: None,
+        base_url: base_url.clone(),
+    };
     Client::new(ClientConfig {
-        base_url: Some(server.uri()),
+        providers: Some(BTreeMap::from([
+            ("openai".to_string(), provider(&base_url)),
+            ("deepseek".to_string(), provider(&base_url)),
+            ("openrouter".to_string(), provider(&base_url)),
+            ("opencode".to_string(), provider(&base_url)),
+            ("anthropic".to_string(), provider(&base_url)),
+            ("mistral".to_string(), provider(&base_url)),
+        ])),
         timeout_secs: Some(5),
         ..Default::default()
     })

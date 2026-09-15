@@ -55,7 +55,13 @@ fn without_key<F: Future<Output = ()>>(body: F) {
 /// Serves the gateway against the given upstream, returning its base URL.
 async fn spawn_app(upstream_uri: &str) -> String {
     let client = warpllm::Client::new(warpllm::ClientConfig {
-        base_url: Some(upstream_uri.to_string()),
+        providers: Some(std::collections::BTreeMap::from([(
+            "openai".to_string(),
+            warpllm::ProviderConfig {
+                api_key: None,
+                base_url: Some(upstream_uri.to_string()),
+            },
+        )])),
         timeout_secs: Some(5),
         ..Default::default()
     })
@@ -733,10 +739,18 @@ fn a_roster_file_leaves_the_gateways_built_in_providers_routable() {
         )
         .unwrap();
 
-        // The global override still points every provider at the mock, which
-        // is what lets a SHIPPED model be exercised without a real key.
+        // Redirects the shipped "openai" provider to the mock, which is
+        // what lets a SHIPPED model be exercised without a real key. The
+        // "local" entry above needs no override here — its own roster line
+        // already points it at http://127.0.0.1:1/v1.
         let client = warpllm::Client::new(warpllm::ClientConfig {
-            base_url: Some(upstream.uri()),
+            providers: Some(std::collections::BTreeMap::from([(
+                "openai".to_string(),
+                warpllm::ProviderConfig {
+                    api_key: None,
+                    base_url: Some(upstream.uri()),
+                },
+            )])),
             specs_path: Some(roster),
             timeout_secs: Some(5),
             ..Default::default()

@@ -360,6 +360,7 @@ mod tests {
                     (*name).to_string(),
                     ProviderConfig {
                         api_key: key.map(str::to_string),
+                        base_url: None,
                     },
                 )
             })
@@ -487,6 +488,7 @@ mod tests {
                     &spec,
                     Some(&ProviderConfig {
                         api_key: Some("sk-inline".into()),
+                        base_url: None,
                     }),
                 )
                 .as_deref(),

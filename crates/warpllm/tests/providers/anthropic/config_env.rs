@@ -4,7 +4,9 @@
 use crate::openai_common::{
     ANTHROPIC_KEY, anthropic_message_body, client_for, request, with_anthropic_key,
 };
-use warpllm::{Client, ClientConfig, Error};
+use std::collections::BTreeMap;
+
+use warpllm::{Client, ClientConfig, Error, ProviderConfig};
 use wiremock::matchers::{header, header_exists, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -64,7 +66,13 @@ fn another_providers_key_does_not_reach_anthropic() {
                     .mount(&server)
                     .await;
                 let client = Client::new(ClientConfig {
-                    base_url: Some(server.uri()),
+                    providers: Some(BTreeMap::from([(
+                        "anthropic".to_string(),
+                        ProviderConfig {
+                            api_key: None,
+                            base_url: Some(server.uri()),
+                        },
+                    )])),
                     ..Default::default()
                 })
                 .unwrap();

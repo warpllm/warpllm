@@ -57,9 +57,9 @@ pub fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli, String> {
 
 impl ServerConfig {
     /// No key is set here: the client reads one per provider from the
-    /// environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, …) when it is built,
-    /// and `base_url` stays absent so every provider talks to its own API —
-    /// which includes any address `--specs` named.
+    /// environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, …) when it is built.
+    /// No per-provider `base_url` override either, so every provider talks to
+    /// its own API — which includes any address `--specs` named.
     ///
     /// `providers` stays absent too, so the gateway serves the whole roster it
     /// loaded, `--specs` entries included. Narrowing it is a client-side
@@ -67,7 +67,6 @@ impl ServerConfig {
     /// would sit in `ps` for a benefit the environment already provides.
     pub fn client_config(&self) -> ClientConfig {
         ClientConfig {
-            base_url: None,
             specs_path: self.specs.clone(),
             timeout_secs: Some(self.timeout_secs),
             stream_read_timeout_secs: self.stream_read_timeout_secs,

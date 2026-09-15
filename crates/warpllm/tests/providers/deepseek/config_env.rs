@@ -1,5 +1,7 @@
 use crate::openai_common::{openai_completion_body, request};
-use warpllm::{Client, ClientConfig, Error};
+use std::collections::BTreeMap;
+
+use warpllm::{Client, ClientConfig, Error, ProviderConfig};
 use wiremock::matchers::{header, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -20,7 +22,13 @@ fn deepseek_key_resolves_per_provider() {
                 .mount(&server)
                 .await;
             let client = Client::new(ClientConfig {
-                base_url: Some(server.uri()),
+                providers: Some(BTreeMap::from([(
+                    "deepseek".to_string(),
+                    ProviderConfig {
+                        api_key: None,
+                        base_url: Some(server.uri()),
+                    },
+                )])),
                 ..Default::default()
             })
             .unwrap();
@@ -52,7 +60,13 @@ fn deepseek_key_resolves_per_provider() {
                     .mount(&server)
                     .await;
                 let client = Client::new(ClientConfig {
-                    base_url: Some(server.uri()),
+                    providers: Some(BTreeMap::from([(
+                        "deepseek".to_string(),
+                        ProviderConfig {
+                            api_key: None,
+                            base_url: Some(server.uri()),
+                        },
+                    )])),
                     ..Default::default()
                 })
                 .unwrap();

@@ -68,14 +68,15 @@ pub struct ProviderSpec {
     pub(crate) credential: Credential,
 }
 
-/// How a provider authenticates, with all three states named.
+/// How a provider authenticates, with all four states named.
 ///
-/// Three, not two, because "the roster names a variable" and "the roster says
-/// this host wants nothing" and "the roster has no answer" are different
-/// situations with different remedies — and the third has to stay reachable,
-/// since it is what an entry means today when it simply says nothing. Folding
-/// it into the second would make a forgotten `env_api_key:` line silently send
-/// a prompt to a paid host with no credential.
+/// Four, not three, because "the roster names a variable", "the roster says
+/// this host wants nothing", "the roster has no answer", and "the roster
+/// mints its own token" are different situations with different remedies —
+/// and the third has to stay reachable, since it is what an entry means
+/// today when it simply says nothing. Folding it into the second would make
+/// a forgotten `env_api_key:` line silently send a prompt to a paid host
+/// with no credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Credential {
     /// `env_api_key: FOO` — read `FOO` from the environment.
@@ -84,6 +85,13 @@ pub(crate) enum Credential {
     /// header is sent at all. What a self-hosted box on a private network
     /// declares.
     NotRequired,
+    /// `auth: oauth` — the provider is reached with a minted OAuth token
+    /// rather than a static key, so there is no environment variable to
+    /// read at all. Vertex (#25) is the case that needs this: an
+    /// `env_api_key:` line has nothing to name, since the credential comes
+    /// from Application Default Credentials, not a secret sitting in the
+    /// environment.
+    OAuth,
     /// Neither field. The provider cannot be authenticated, and a request
     /// routed to it says so rather than naming a variable nothing reads.
     Unavailable,
@@ -123,7 +131,7 @@ impl ProviderSpec {
     pub fn env_api_key(&self) -> Option<&'static str> {
         match self.credential {
             Credential::EnvVar(var) => Some(var),
-            Credential::NotRequired | Credential::Unavailable => None,
+            Credential::NotRequired | Credential::OAuth | Credential::Unavailable => None,
         }
     }
 
@@ -142,6 +150,20 @@ impl ProviderSpec {
     /// of their own box has said something the roster file could not.
     pub fn unauthenticated(&self) -> bool {
         self.credential == Credential::NotRequired
+    }
+
+    /// Whether this provider is reached with a minted OAuth token rather
+    /// than a static key — the roster's `auth: oauth`.
+    ///
+    /// A third answer alongside [`env_api_key`](Self::env_api_key) and
+    /// [`unauthenticated`](Self::unauthenticated): this provider DOES need
+    /// a credential, unlike `unauthenticated`, but there is no variable to
+    /// read one from, unlike `env_api_key`. [`crate::credentials`] is where
+    /// that distinction turns into an actual `Authenticator::OAuth` rather
+    /// than a `MissingApiKey`.
+    #[allow(dead_code)]
+    pub(crate) fn oauth(&self) -> bool {
+        self.credential == Credential::OAuth
     }
 }
 

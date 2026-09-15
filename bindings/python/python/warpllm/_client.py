@@ -164,9 +164,12 @@ class WarpLLM:
 
         The built-in providers survive the merge, so adding `local/` leaves
         `openai/` exactly where it was. Reusing a built-in provider's name
-        replaces that provider whole, models included, and does so SILENTLY
-        here: warpllm warns over Rust's `tracing`, which this binding installs
-        no subscriber for. The file is read HERE, when the client is built, so
+        replaces that provider: whole, models included, if your entry lists its
+        own `models:`; transport only, if it names none, in which case every
+        model warpllm ships under that provider carries over and now routes to
+        your address. Either way it happens SILENTLY here -- warpllm warns over
+        Rust's `tracing`, which this binding installs no subscriber for, so
+        reuse a built-in name deliberately. The file is read HERE, when the client is built, so
         a roster that cannot be used raises now rather than failing a request
         later. Unset falls back to the `WARPLLM_SPECS` environment variable,
         and then to the built-in roster alone.

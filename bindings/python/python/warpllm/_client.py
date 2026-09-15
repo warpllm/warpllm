@@ -14,6 +14,7 @@ from typing import (
 
 from warpllm._warpllm import ChatStream as _NativeChatStream
 from warpllm._warpllm import Client as _NativeClient
+from warpllm._warpllm import BalancedClient as _NativeBalancedClient
 from warpllm._warpllm import WarpLLMNativeError
 
 from ._exceptions import raise_from_wire
@@ -36,13 +37,21 @@ class ProviderOptions(TypedDict, total=False):
     api_key: str
 
 
-def _native_client(
+class BalancedCandidate(TypedDict):
+    """One candidate in a weighted round-robin group."""
+
+    model: str
+    weight: int
+
+
+def _build_config(
     base_url: str | None,
     specs_path: str | None,
     timeout: int | None,
     stream_read_timeout: int | None,
     providers: Mapping[str, ProviderOptions] | None,
-) -> _NativeClient:
+) -> str:
+    """Build the `ClientConfig` JSON shared by all client constructors."""
     config = {
         "base_url": base_url,
         "specs_path": specs_path,
@@ -54,13 +63,83 @@ def _native_client(
         # distinction below survives it.
         "providers": None if providers is None else dict(providers),
     }
+    # `is not None`, not truthiness: `providers={}` is a declaration of
+    # none and has to survive, while `providers=None` is no declaration at
+    # all and has to be dropped. Rust reads the difference.
+    return json.dumps({k: v for k, v in config.items() if v is not None})
+
+
+def _native_client(
+    base_url: str | None,
+    specs_path: str | None,
+    timeout: int | None,
+    stream_read_timeout: int | None,
+    providers: Mapping[str, ProviderOptions] | None,
+) -> _NativeClient:
     try:
-        # `is not None`, not truthiness: `providers={}` is a declaration of
-        # none and has to survive, while `providers=None` is no declaration at
-        # all and has to be dropped. Rust reads the difference.
         return _NativeClient(
-            json.dumps({k: v for k, v in config.items() if v is not None})
+            _build_config(base_url, specs_path, timeout, stream_read_timeout, providers)
         )
+    except WarpLLMNativeError as e:
+        raise_from_wire(str(e))
+
+
+def _native_balanced_client(
+    base_url: str | None,
+    specs_path: str | None,
+    timeout: int | None,
+    stream_read_timeout: int | None,
+    providers: Mapping[str, ProviderOptions] | None,
+    candidates: list[BalancedCandidate],
+) -> _NativeBalancedClient:
+    for i, candidate in enumerate(candidates):
+        if "model" not in candidate or "weight" not in candidate:
+            raise TypeError(f"candidates[{i}] needs both 'model' and 'weight': {candidate!r}")
+    try:
+        return _NativeBalancedClient(
+            _build_config(base_url, specs_path, timeout, stream_read_timeout, providers),
+            json.dumps(candidates),
+        )
+    except WarpLLMNativeError as e:
+        raise_from_wire(str(e))
+
+
+# Either native client type exposes the same four methods -- this is the
+# structural interface the four helpers below actually need, in place of
+# `Any` and a runtime `assert hasattr` that `python -O` strips and that
+# nothing but these two types could ever fail anyway. Mirrors the Node side's
+# `NativeChatClient` (`client.ts`), which took this approach from the start.
+_NativeChatClient = _NativeClient | _NativeBalancedClient
+
+
+def _sync_chat_completions(native: _NativeChatClient, request_json: str) -> str:
+    try:
+        return native.chat_completions(request_json)
+    except WarpLLMNativeError as e:
+        raise_from_wire(str(e))
+
+
+async def _async_chat_completions(native: _NativeChatClient, request_json: str) -> str:
+    try:
+        return await native.async_chat_completions(request_json)
+    except WarpLLMNativeError as e:
+        raise_from_wire(str(e))
+
+
+def _sync_chat_completions_stream(
+    native: _NativeChatClient, request_json: str
+) -> _NativeChatStream:
+    try:
+        return native.chat_completions_stream(request_json)
+    except WarpLLMNativeError as e:
+        raise_from_wire(str(e))
+
+
+async def _async_chat_completions_stream(
+    native: _NativeChatClient, request_json: str
+) -> _NativeChatStream:
+    try:
+        return await native.async_chat_completions_stream(request_json)
     except WarpLLMNativeError as e:
         raise_from_wire(str(e))
 
@@ -239,10 +318,7 @@ class WarpLLM:
         # above cannot resolve.
         if request.get("stream") is True:
             return self.chat_completions_stream(request)
-        try:
-            raw = self._native.chat_completions(json.dumps(dict(request)))
-        except WarpLLMNativeError as e:
-            raise_from_wire(str(e))
+        raw = _sync_chat_completions(self._native, json.dumps(dict(request)))
         return cast("CreateChatCompletionResponse", json.loads(raw))
 
     def chat_completions_stream(
@@ -254,12 +330,9 @@ class WarpLLM:
         callers who need a checker to agree with it. `stream` is set here, so
         the request need not say so.
         """
-        try:
-            native = self._native.chat_completions_stream(
-                json.dumps({**dict(request), "stream": True})
-            )
-        except WarpLLMNativeError as e:
-            raise_from_wire(str(e))
+        native = _sync_chat_completions_stream(
+            self._native, json.dumps({**dict(request), "stream": True})
+        )
         return ChatCompletionStream(native)
 
 
@@ -303,12 +376,7 @@ class AsyncWarpLLM:
         """
         if request.get("stream") is True:
             return await self.chat_completions_stream(request)
-        try:
-            raw = await self._native.async_chat_completions(
-                json.dumps(dict(request))
-            )
-        except WarpLLMNativeError as e:
-            raise_from_wire(str(e))
+        raw = await _async_chat_completions(self._native, json.dumps(dict(request)))
         return cast("CreateChatCompletionResponse", json.loads(raw))
 
     async def chat_completions_stream(
@@ -320,10 +388,115 @@ class AsyncWarpLLM:
         stream is a request whose headers a provider may sit on, and blocking
         on that inside a coroutine stops the whole event loop until it answers.
         """
-        try:
-            native = await self._native.async_chat_completions_stream(
-                json.dumps({**dict(request), "stream": True})
-            )
-        except WarpLLMNativeError as e:
-            raise_from_wire(str(e))
+        native = await _async_chat_completions_stream(
+            self._native, json.dumps({**dict(request), "stream": True})
+        )
+        return AsyncChatCompletionStream(native)
+
+
+class WarpLLMBalanced:
+    """Synchronous load-balanced client. Distributes requests across
+    candidates via weighted round-robin. Model strings in requests are
+    rewritten to the selected candidate on each call.
+
+    ```python
+    client = WarpLLMBalanced(
+        candidates=[
+            {"model": "openai/gpt-5.6", "weight": 3},
+            {"model": "deepseek/deepseek-v4-pro", "weight": 1},
+        ],
+        providers={"openai": {}, "deepseek": {}},
+    )
+    ```
+    """
+
+    def __init__(
+        self,
+        *,
+        candidates: list[BalancedCandidate],
+        base_url: str | None = None,
+        specs_path: str | None = None,
+        timeout: int | None = None,
+        stream_read_timeout: int | None = None,
+        providers: Mapping[str, ProviderOptions] | None = None,
+    ) -> None:
+        self._native = _native_balanced_client(
+            base_url, specs_path, timeout, stream_read_timeout, providers, candidates
+        )
+
+    @overload
+    def chat_completions(  # type: ignore[overload-overlap]
+        self, request: _StreamingRequest
+    ) -> ChatCompletionStream: ...
+
+    @overload
+    def chat_completions(
+        self, request: Mapping[str, object]
+    ) -> CreateChatCompletionResponse: ...
+
+    def chat_completions(
+        self, request: Mapping[str, object]
+    ) -> CreateChatCompletionResponse | ChatCompletionStream:
+        """One method, mirroring `WarpLLM.chat_completions`. The request's
+        `model` field is overwritten with the selected candidate before each
+        call."""
+        if request.get("stream") is True:
+            return self.chat_completions_stream(request)
+        raw = _sync_chat_completions(self._native, json.dumps(dict(request)))
+        return cast("CreateChatCompletionResponse", json.loads(raw))
+
+    def chat_completions_stream(
+        self, request: Mapping[str, object]
+    ) -> ChatCompletionStream:
+        """Streaming, precisely typed. `stream` is set here."""
+        native = _sync_chat_completions_stream(
+            self._native, json.dumps({**dict(request), "stream": True})
+        )
+        return ChatCompletionStream(native)
+
+
+class AsyncWarpLLMBalanced:
+    """Async load-balanced client; `await client.chat_completions(...)`."""
+
+    def __init__(
+        self,
+        *,
+        candidates: list[BalancedCandidate],
+        base_url: str | None = None,
+        specs_path: str | None = None,
+        timeout: int | None = None,
+        stream_read_timeout: int | None = None,
+        providers: Mapping[str, ProviderOptions] | None = None,
+    ) -> None:
+        self._native = _native_balanced_client(
+            base_url, specs_path, timeout, stream_read_timeout, providers, candidates
+        )
+
+    @overload
+    async def chat_completions(  # type: ignore[overload-overlap]
+        self, request: _StreamingRequest
+    ) -> AsyncChatCompletionStream: ...
+
+    @overload
+    async def chat_completions(
+        self, request: Mapping[str, object]
+    ) -> CreateChatCompletionResponse: ...
+
+    async def chat_completions(
+        self, request: Mapping[str, object]
+    ) -> CreateChatCompletionResponse | AsyncChatCompletionStream:
+        """See `WarpLLMBalanced.chat_completions`. `stream=True` returns an
+        `AsyncChatCompletionStream`."""
+        if request.get("stream") is True:
+            return await self.chat_completions_stream(request)
+        raw = await _async_chat_completions(self._native, json.dumps(dict(request)))
+        return cast("CreateChatCompletionResponse", json.loads(raw))
+
+    async def chat_completions_stream(
+        self, request: Mapping[str, object]
+    ) -> AsyncChatCompletionStream:
+        """Streaming, precisely typed."""
+        native = await _async_chat_completions_stream(
+            self._native, json.dumps({**dict(request), "stream": True})
+        )
         return AsyncChatCompletionStream(native)

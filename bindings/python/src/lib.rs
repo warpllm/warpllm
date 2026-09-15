@@ -27,6 +27,16 @@ async fn run_chat(
         .map_err(|error| error.to_openai_json())
 }
 
+async fn run_balanced_chat(
+    client: Arc<warpllm::JsonBalancedClient>,
+    request_json: String,
+) -> Result<String, String> {
+    client
+        .chat_completions(&request_json)
+        .await
+        .map_err(|error| error.to_openai_json())
+}
+
 #[pyclass]
 struct Client {
     inner: Arc<warpllm::JsonClient>,
@@ -106,8 +116,86 @@ impl Client {
     }
 }
 
+#[pyclass]
+struct BalancedClient {
+    inner: Arc<warpllm::JsonBalancedClient>,
+}
+
+#[pymethods]
+impl BalancedClient {
+    #[new]
+    fn new(config_json: String, candidates_json: String) -> PyResult<Self> {
+        let inner = warpllm::JsonBalancedClient::new(&config_json, &candidates_json)
+            .map_err(|error| WarpLLMNativeError::new_err(error.to_openai_json()))?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    fn chat_completions(&self, py: Python<'_>, request_json: String) -> PyResult<String> {
+        let client = self.inner.clone();
+        py.detach(move || {
+            pyo3_async_runtimes::tokio::get_runtime()
+                .block_on(run_balanced_chat(client, request_json))
+                .map_err(WarpLLMNativeError::new_err)
+        })
+    }
+
+    fn async_chat_completions<'p>(
+        &self,
+        py: Python<'p>,
+        request_json: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            run_balanced_chat(client, request_json)
+                .await
+                .map_err(WarpLLMNativeError::new_err)
+        })
+    }
+
+    fn chat_completions_stream(
+        &self,
+        py: Python<'_>,
+        request_json: String,
+    ) -> PyResult<ChatStream> {
+        let client = self.inner.clone();
+        py.detach(move || {
+            pyo3_async_runtimes::tokio::get_runtime()
+                .block_on(open_balanced_stream(client, request_json))
+                .map_err(WarpLLMNativeError::new_err)
+        })
+    }
+
+    fn async_chat_completions_stream<'p>(
+        &self,
+        py: Python<'p>,
+        request_json: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let client = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            open_balanced_stream(client, request_json)
+                .await
+                .map_err(WarpLLMNativeError::new_err)
+        })
+    }
+}
+
 async fn open_stream(
     client: Arc<warpllm::JsonClient>,
+    request_json: String,
+) -> Result<ChatStream, String> {
+    client
+        .chat_completions_stream(&request_json)
+        .await
+        .map(|inner| ChatStream {
+            inner: Arc::new(Mutex::new(inner)),
+        })
+        .map_err(|error| error.to_openai_json())
+}
+
+async fn open_balanced_stream(
+    client: Arc<warpllm::JsonBalancedClient>,
     request_json: String,
 ) -> Result<ChatStream, String> {
     client
@@ -167,6 +255,7 @@ impl ChatStream {
 fn _warpllm(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_class::<Client>()?;
+    m.add_class::<BalancedClient>()?;
     m.add_class::<ChatStream>()?;
     m.add(
         "WarpLLMNativeError",

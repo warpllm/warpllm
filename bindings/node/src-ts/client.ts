@@ -1,4 +1,8 @@
-import { ChatStream as NativeChatStream, Client as NativeClient } from '../index.js'
+import {
+  ChatStream as NativeChatStream,
+  Client as NativeClient,
+  BalancedClient as NativeBalancedClient,
+} from '../index.js'
 
 import { throwFromWire } from './errors.js'
 import type {
@@ -71,6 +75,61 @@ export interface WarpLLMOptions {
   providers?: Record<string, ProviderOptions>
 }
 
+interface NativeChatClient {
+  chatCompletions(json: string): Promise<string>
+  chatCompletionsStream(json: string): Promise<NativeChatStream>
+}
+
+function serializeConfig(options: WarpLLMOptions): string {
+  return JSON.stringify({
+    base_url: options.baseUrl,
+    specs_path: options.specsPath,
+    timeout_secs: options.timeout,
+    stream_read_timeout_secs: options.streamReadTimeout,
+    // Entries are rebuilt rather than passed through, because the key
+    // inside one is renamed too. `undefined` when absent, so
+    // `JSON.stringify` drops it and Rust sees "no declaration" — while
+    // `{}` survives as `{}`, which is the different claim it is.
+    providers:
+      options.providers &&
+      Object.fromEntries(
+        Object.entries(options.providers).map(([name, entry]) => [
+          name,
+          { api_key: entry.apiKey },
+        ]),
+      ),
+  })
+}
+
+// Runtime dispatch is on the VALUE, so behaviour is right even where the
+// overload above cannot resolve — a request built as a variable, or handed
+// through a helper that widened `stream` to `boolean`.
+async function chatCompletionsImpl<T extends CreateChatCompletionRequest>(
+  native: NativeChatClient,
+  request: T,
+): Promise<CreateChatCompletionResponse | ChatCompletionStream> {
+  if (request.stream === true) {
+    try {
+      return new ChatCompletionStream(
+        await native.chatCompletionsStream(JSON.stringify(request)),
+      )
+    } catch (err) {
+      throw throwFromWire(err)
+    }
+  }
+  let raw: string
+  try {
+    raw = await native.chatCompletions(JSON.stringify(request))
+  } catch (err) {
+    // `throw` here, not a bare call: `throwFromWire` is declared `never`, so
+    // `raw` below is sound only as long as it never returns. `throw`ing its
+    // result keeps that true even if the signature ever loosens to `void`,
+    // at zero cost today.
+    throw throwFromWire(err)
+  }
+  return JSON.parse(raw) as CreateChatCompletionResponse
+}
+
 /**
  * Model strings are `provider/model`, e.g. `"openai/gpt-5.6"`. API keys come
  * from the environment (`OPENAI_API_KEY`); a provider's key is only required
@@ -81,26 +140,7 @@ export class WarpLLM {
 
   constructor(options: WarpLLMOptions = {}) {
     try {
-      this.native = new NativeClient(
-        JSON.stringify({
-          base_url: options.baseUrl,
-          specs_path: options.specsPath,
-          timeout_secs: options.timeout,
-          stream_read_timeout_secs: options.streamReadTimeout,
-          // Entries are rebuilt rather than passed through, because the key
-          // inside one is renamed too. `undefined` when absent, so
-          // `JSON.stringify` drops it and Rust sees "no declaration" — while
-          // `{}` survives as `{}`, which is the different claim it is.
-          providers:
-            options.providers &&
-            Object.fromEntries(
-              Object.entries(options.providers).map(([name, entry]) => [
-                name,
-                { api_key: entry.apiKey },
-              ]),
-            ),
-        }),
-      )
+      this.native = new NativeClient(serializeConfig(options))
     } catch (err) {
       throwFromWire(err)
     }
@@ -140,25 +180,7 @@ export class WarpLLM {
   async chatCompletions<T extends CreateChatCompletionRequest>(
     request: T,
   ): Promise<CreateChatCompletionResponse | ChatCompletionStream> {
-    // Runtime dispatch is on the VALUE, so behaviour is right even where the
-    // overload above cannot resolve — a request built as a variable, or handed
-    // through a helper that widened `stream` to `boolean`.
-    if (request.stream === true) {
-      try {
-        return new ChatCompletionStream(
-          await this.native.chatCompletionsStream(JSON.stringify(request)),
-        )
-      } catch (err) {
-        throwFromWire(err)
-      }
-    }
-    let raw: string
-    try {
-      raw = await this.native.chatCompletions(JSON.stringify(request))
-    } catch (err) {
-      throwFromWire(err)
-    }
-    return JSON.parse(raw) as CreateChatCompletionResponse
+    return chatCompletionsImpl(this.native, request)
   }
 }
 
@@ -195,5 +217,68 @@ export class ChatCompletionStream implements AsyncIterable<CreateChatCompletionS
       if (raw === null) return
       yield JSON.parse(raw) as CreateChatCompletionStreamResponse
     }
+  }
+}
+
+/** One candidate in a weighted round-robin group. */
+export interface BalancedCandidate {
+  /** Model string, e.g. `"openai/gpt-5.6"`. */
+  model: string
+  /** Relative weight — higher means more requests routed here. */
+  weight: number
+}
+
+/**
+ * Load-balanced client. Distributes requests across candidates via weighted
+ * round-robin. The request's `model` field is rewritten to the selected
+ * candidate on each call.
+ *
+ * ```ts
+ * const client = new WarpLLMBalanced(
+ *   [
+ *     { model: 'openai/gpt-5.6', weight: 3 },
+ *     { model: 'deepseek/deepseek-v4-pro', weight: 1 },
+ *   ],
+ *   { providers: { openai: {}, deepseek: {} } },
+ * )
+ * ```
+ */
+export class WarpLLMBalanced {
+  private readonly native: NativeBalancedClient
+
+  constructor(candidates: BalancedCandidate[], options: WarpLLMOptions = {}) {
+    // TypeScript's checker only helps a caller who is one; the object
+    // crossing to Rust below is plain JS at runtime, so a caller assembling
+    // it dynamically (or calling from plain JS at all) gets a message
+    // naming what they actually did wrong, not a Rust-side JSON-offset error
+    // about a document they never saw.
+    candidates.forEach((candidate, i) => {
+      if (candidate.model === undefined || candidate.weight === undefined) {
+        throw new TypeError(`candidates[${i}] needs both 'model' and 'weight': ${JSON.stringify(candidate)}`)
+      }
+    })
+    try {
+      this.native = new NativeBalancedClient(
+        serializeConfig(options),
+        JSON.stringify(candidates),
+      )
+    } catch (err) {
+      throwFromWire(err)
+    }
+  }
+
+  async chatCompletions<T extends CreateChatCompletionRequest & { stream: true }>(
+    request: T,
+  ): Promise<ChatCompletionStream>
+  async chatCompletions<
+    T extends CreateChatCompletionRequest & { stream?: false | null | undefined },
+  >(request: T): Promise<CreateChatCompletionResponse>
+  async chatCompletions<T extends CreateChatCompletionRequest>(
+    request: T,
+  ): Promise<CreateChatCompletionResponse | ChatCompletionStream>
+  async chatCompletions<T extends CreateChatCompletionRequest>(
+    request: T,
+  ): Promise<CreateChatCompletionResponse | ChatCompletionStream> {
+    return chatCompletionsImpl(this.native, request)
   }
 }

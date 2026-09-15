@@ -13,10 +13,10 @@
 //! both bindings and the server, and it keeps a tool-call fixture readable.
 
 use crate::openai_common::{
-    ANTHROPIC_KEY, anthropic_message_body, client_for, request, with_anthropic_key,
+    ANTHROPIC_KEY, OPENAI_KEY, anthropic_message_body, client_for, request, with_anthropic_key,
 };
 use serde_json::{Value, json};
-use warpllm::{CreateChatCompletionRequest, Error};
+use warpllm::{ChatCompletionRequestMessage, CreateChatCompletionRequest, Error};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -839,4 +839,69 @@ fn the_routed_models_surface_picks_the_protocol_not_the_entrypoint() {
             "a second request went out"
         );
     });
+}
+
+/// Failover's whole reason to exist, proven ACROSS protocols: a
+/// provider-scoped failure on an openai_compat candidate must not stop at
+/// that protocol. The next candidate in `models` is reached over Anthropic's
+/// own wire, translated exactly as a direct request to it would be, and the
+/// reply comes back chat-completions-shaped with the winning candidate's own
+/// string on it.
+#[test]
+fn a_provider_scoped_failure_fails_over_from_openai_compat_to_anthropic() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    temp_env::with_vars(
+        [
+            ("OPENAI_API_KEY", Some(OPENAI_KEY)),
+            ("ANTHROPIC_API_KEY", Some(ANTHROPIC_KEY)),
+            ("WARPLLM_SPECS", None),
+        ],
+        || {
+            runtime.block_on(async {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/chat/completions"))
+                    .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+                        "error": {
+                            "message": "slow down",
+                            "type": "rate_limit_error",
+                            "code": "rate_limit_exceeded"
+                        }
+                    })))
+                    .mount(&server)
+                    .await;
+                Mock::given(method("POST"))
+                    .and(path("/messages"))
+                    .and(header("x-api-key", ANTHROPIC_KEY))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(anthropic_message_body()),
+                    )
+                    .mount(&server)
+                    .await;
+
+                let completion = client_for(&server)
+                    .chat_completions(CreateChatCompletionRequest {
+                        models: Some(vec![
+                            "openai/gpt-5.6".into(),
+                            "anthropic/claude-opus-5".into(),
+                        ]),
+                        messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("the anthropic candidate serves the chain");
+
+                assert_eq!(completion.model, "anthropic/claude-opus-5");
+                assert_eq!(
+                    completion.choices[0].message.content,
+                    Some("Hello there!".into())
+                );
+
+                let requests = server.received_requests().await.unwrap();
+                assert_eq!(requests.len(), 2, "both candidates were tried, in order");
+                assert_eq!(requests[0].url.path(), "/chat/completions");
+                assert_eq!(requests[1].url.path(), "/messages");
+            });
+        },
+    );
 }

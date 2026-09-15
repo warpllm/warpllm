@@ -8,6 +8,15 @@ from typing import Any, TypeAlias, TypedDict
 from typing_extensions import NotRequired
 
 
+class ModelCandidate1(TypedDict):
+    model: str
+    weight: NotRequired[int | None]
+    failover: NotRequired[int | None]
+
+
+ModelCandidate: TypeAlias = str | ModelCandidate1
+
+
 class ChatCompletionRequestMessageContentPartText(TypedDict):
     type: str
     text: str
@@ -138,7 +147,8 @@ class ChatCompletionRequestMessage(TypedDict):
 
 
 class CreateChatCompletionRequest(TypedDict):
-    model: str
+    model: NotRequired[str]
+    models: NotRequired[list[ModelCandidate] | None]
     messages: list[ChatCompletionRequestMessage]
     temperature: NotRequired[float | None]
     max_tokens: NotRequired[int | None]

@@ -2,17 +2,19 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 use crate::auth::Authenticator;
+use crate::balancer;
 use crate::config::{ClientConfig, DEFAULT_TIMEOUT_SECS};
 use crate::credentials::Credentials;
 use crate::error::{Error, Result};
 use crate::gateway::{anthropic, openai_compat};
 use crate::protocol::openai_compat::chat_completions::types::{
     CreateChatCompletionRequest, CreateChatCompletionResponse, CreateChatCompletionStreamResponse,
+    ModelCandidate,
 };
 use crate::registry::{self, ModelSpec, ProviderSpec, Registry};
 use crate::types::{Api, Protocol};
@@ -326,64 +328,114 @@ impl Client {
         request: CreateChatCompletionRequest,
     ) -> Result<CreateChatCompletionResponse> {
         if request.stream == Some(true) {
-            // Not "unimplemented": it IS implemented, on a method whose return
-            // type can carry chunks. A whole reply cannot, so this entrypoint
-            // says where to go rather than quietly serving the wrong shape.
             return Err(Error::InvalidInput(
                 "stream: true asks for chunks; call chat_completions_stream".into(),
             ));
         }
-        let requested_model = request.model.clone();
-        let ModelDefinition {
-            provider,
-            model,
-            auth,
-            egress,
-        } = self.validate(&requested_model, Self::WHOLE_REPLY)?;
+        let candidates = build_candidates(&request)?;
+        let (validated, mut failover) = self.prepare_failover(&candidates, Self::WHOLE_REPLY)?;
 
-        // Ingest answers to the protocol warpllm was CALLED with, which is
-        // openai_compat and only ever will be for this entrypoint. The ENTRY's
-        // model name goes in, not the caller's string: they differ whenever
-        // warpllm's routing alias differs from the provider's own name.
-        let normalized =
-            openai_compat::api::chat_completions::ingest_request(request, model.model());
-        // Ingress by entrypoint, EGRESS by the routed model's surface. Both
-        // arms take and return gateway types, which is what keeps this a
-        // two-line choice rather than two request paths.
-        let response = match egress {
-            Egress::OpenAiCompat => {
-                openai_compat::api::chat_completions::exchange(
-                    &normalized,
-                    &self.http,
-                    provider.name(),
-                    self.base_url(provider),
-                    auth,
-                )
-                .await?
-            }
-            Egress::Anthropic => {
-                reject_untranslatable(&normalized)?;
-                anthropic::api::messages::exchange(
-                    &normalized,
-                    &self.http,
-                    provider.name(),
-                    self.base_url(provider),
-                    auth,
-                    // Anthropic REQUIRES a `max_tokens` and the gateway form's
-                    // is optional, so the roster's ceiling is the fallback. A
-                    // model documenting none and a caller naming none is a
-                    // refusal, not an invented default — see
-                    // `anthropic::…::request::resolve_max_tokens`.
-                    model.capabilities().max_output_tokens(),
-                )
-                .await?
+        // A single candidate gets NO chain deadline. Its guarantee is the
+        // reqwest per-request timeout, exactly as before this feature
+        // existed: a slow upstream reports Network, never a gateway-claimed
+        // timeout that might surface as the caller's fault. The chain
+        // deadline exists for failover to bound the TOTAL across candidates.
+        let multi = failover.candidates.len() > 1;
+        // Snapshot BEFORE `run` borrows `failover` mutably. The chain clock
+        // starts at construction; microseconds of setup don't change the
+        // deadline meaningfully.
+        let remaining = failover.remaining();
+
+        let run = async {
+            loop {
+                let (candidate, def) = match failover.next() {
+                    // The index IS the lookup: `validated` and
+                    // `failover.candidates` share one order.
+                    Some((idx, c)) => (c.to_string(), &validated[idx].1),
+                    None => break Err(failover.exhausted()),
+                };
+
+                let normalized = openai_compat::api::chat_completions::ingest_request(
+                    request.clone(),
+                    def.model.model(),
+                );
+
+                // Ingress by entrypoint, EGRESS by the routed candidate's
+                // surface. Both arms return the same gateway type, which is
+                // what lets both share one `render_response` and one
+                // failover disposition below.
+                let outcome = match def.egress {
+                    Egress::OpenAiCompat => {
+                        openai_compat::api::chat_completions::exchange(
+                            &normalized,
+                            &self.http,
+                            def.provider.name(),
+                            self.base_url(def.provider),
+                            def.auth,
+                        )
+                        .await
+                    }
+                    Egress::Anthropic => match reject_untranslatable(&normalized) {
+                        Ok(()) => {
+                            anthropic::api::messages::exchange(
+                                &normalized,
+                                &self.http,
+                                def.provider.name(),
+                                self.base_url(def.provider),
+                                def.auth,
+                                // Anthropic REQUIRES a `max_tokens` and the
+                                // gateway form's is optional, so the
+                                // roster's ceiling is the fallback. A model
+                                // documenting none and a caller naming none
+                                // is a refusal, not an invented default —
+                                // see `anthropic::…::request::resolve_max_tokens`.
+                                def.model.capabilities().max_output_tokens(),
+                            )
+                            .await
+                        }
+                        Err(e) => Err(e),
+                    },
+                };
+
+                match outcome {
+                    Ok(response) => {
+                        let mut completion = openai_compat::api::chat_completions::render_response(
+                            &response,
+                            def.provider.name(),
+                        );
+                        // Echo the candidate that served, not the caller's
+                        // original model string.
+                        completion.model = candidate;
+                        tracing::info!(
+                            candidate = %completion.model,
+                            "failover candidate serving"
+                        );
+                        break Ok(completion);
+                    }
+                    Err(e) => {
+                        if is_retriable(&e) {
+                            tracing::warn!(
+                                candidate = %candidate,
+                                error = %e,
+                                "failover candidate failed, trying next"
+                            );
+                            failover.record_failure(candidate, e);
+                            continue;
+                        }
+                        break Err(e);
+                    }
+                }
             }
         };
-        let mut completion =
-            openai_compat::api::chat_completions::render_response(&response, provider.name());
-        // Echo the caller's provider-prefixed string, not the upstream echo.
-        completion.model = requested_model;
-        Ok(completion)
+
+        if multi {
+            match tokio::time::timeout(remaining, run).await {
+                Ok(r) => r,
+                Err(_elapsed) => Err(failover.deadline()),
+            }
+        } else {
+            run.await
+        }
     }
 
     /// Serves one OpenAI-compatible chat completion as a stream of chunks.
@@ -403,54 +455,169 @@ impl Client {
         mut request: CreateChatCompletionRequest,
     ) -> Result<ChatCompletionStream> {
         request.stream = Some(true);
-        let requested_model = request.model.clone();
-        let ModelDefinition {
-            provider,
-            model,
-            auth,
-            egress,
-        } = self.validate(&requested_model, Self::STREAMED)?;
+        let built = build_candidates(&request)?;
+        let (validated, mut failover) = self.prepare_failover(&built, Self::STREAMED)?;
 
-        let normalized =
-            openai_compat::api::chat_completions::ingest_request(request, model.model());
+        // Same single-candidate rule as chat_completions: no chain deadline
+        // when there is no chain, so the streaming path's guarantee for one
+        // candidate is exactly what it was before failover existed.
+        let multi = failover.candidates.len() > 1;
+        let remaining = failover.remaining();
         let read_timeout = self
             .config
             .stream_read_timeout_secs
             .map(Duration::from_secs);
-        let chunks = match egress {
-            Egress::OpenAiCompat => Chunks::OpenAiCompat(Box::new(
-                openai_compat::api::chat_completions::exchange_stream(
-                    &normalized,
-                    &self.http,
-                    provider.name(),
-                    self.base_url(provider),
-                    auth,
-                    read_timeout,
-                )
-                .await?,
-            )),
-            Egress::Anthropic => {
-                reject_untranslatable(&normalized)?;
-                Chunks::Anthropic(Box::new(
-                    anthropic::api::messages::exchange_stream(
+
+        let run = async {
+            loop {
+                let (candidate, def) = match failover.next() {
+                    // The index IS the lookup: `validated` and
+                    // `failover.candidates` share one order.
+                    Some((idx, c)) => (c.to_string(), &validated[idx].1),
+                    None => break Err(failover.exhausted()),
+                };
+
+                let normalized = openai_compat::api::chat_completions::ingest_request(
+                    request.clone(),
+                    def.model.model(),
+                );
+
+                // Same egress dispatch as chat_completions, wrapping each
+                // protocol's stream type in `Chunks` so both arms return
+                // one type the commit-boundary logic below can share.
+                let opened = match def.egress {
+                    Egress::OpenAiCompat => openai_compat::api::chat_completions::exchange_stream(
                         &normalized,
                         &self.http,
-                        provider.name(),
-                        self.base_url(provider),
-                        auth,
-                        model.capabilities().max_output_tokens(),
+                        def.provider.name(),
+                        self.base_url(def.provider),
+                        def.auth,
                         read_timeout,
                     )
-                    .await?,
-                ))
+                    .await
+                    .map(|chunks| Chunks::OpenAiCompat(Box::new(chunks))),
+                    Egress::Anthropic => match reject_untranslatable(&normalized) {
+                        Ok(()) => anthropic::api::messages::exchange_stream(
+                            &normalized,
+                            &self.http,
+                            def.provider.name(),
+                            self.base_url(def.provider),
+                            def.auth,
+                            def.model.capabilities().max_output_tokens(),
+                            read_timeout,
+                        )
+                        .await
+                        .map(|chunks| Chunks::Anthropic(Box::new(chunks))),
+                        Err(e) => Err(e),
+                    },
+                };
+
+                match opened {
+                    Ok(mut chunks) => {
+                        // COMMIT BOUNDARY. A stream is committed only once its
+                        // first chunk is in hand; until then nothing has
+                        // reached the caller, so a pre-first-chunk failure is
+                        // an ordinary failed attempt — record it and try the
+                        // next candidate. Once an item is yielded the
+                        // candidate is locked in and the rest of the chain is
+                        // moot: chunks already emitted cannot be unsent, and
+                        // failing over mid-stream would splice a second reply
+                        // onto the first.
+                        let mut ordinals =
+                            openai_compat::api::chat_completions::ToolCallOrdinals::default();
+                        let first_item = match &mut chunks {
+                            Chunks::OpenAiCompat(stream) => stream.next().await,
+                            Chunks::Anthropic(stream) => stream.next().await,
+                        };
+                        match first_item {
+                            Some(Ok(first)) => {
+                                let mut rendered =
+                                    openai_compat::api::chat_completions::render_chunk(
+                                        &first,
+                                        def.provider.name(),
+                                        &mut ordinals,
+                                    );
+                                rendered.model = candidate.clone();
+                                tracing::info!(
+                                    candidate = %candidate,
+                                    "failover candidate serving (stream)"
+                                );
+                                break Ok(ChatCompletionStream {
+                                    chunks,
+                                    provider: def.provider.name(),
+                                    model: candidate,
+                                    ordinals,
+                                    first: Some(Some(Ok(rendered))),
+                                });
+                            }
+                            Some(Err(e)) if fails_over_before_first_chunk(&e) => {
+                                tracing::warn!(
+                                    candidate = %candidate,
+                                    error = %e,
+                                    "failover stream candidate failed before its first chunk, \
+                                     trying next"
+                                );
+                                failover.record_failure(candidate, e);
+                                continue;
+                            }
+                            // A non-retryable error (an event that will not
+                            // decode, or a billed one) or a clean-but-empty
+                            // stream is a committed outcome. An error is
+                            // replayed as the stream's first item and an empty
+                            // stream ends as a complete one — both exactly as
+                            // they would have using a single candidate, which
+                            // is what keeps this path backward compatible.
+                            outcome => {
+                                tracing::info!(
+                                    candidate = %candidate,
+                                    "failover candidate serving (stream)"
+                                );
+                                let model = candidate.clone();
+                                break Ok(ChatCompletionStream {
+                                    chunks,
+                                    provider: def.provider.name(),
+                                    model,
+                                    first: Some(outcome.map(|item| {
+                                        item.map(|chunk| {
+                                            let mut rendered =
+                                                openai_compat::api::chat_completions::render_chunk(
+                                                    &chunk,
+                                                    def.provider.name(),
+                                                    &mut ordinals,
+                                                );
+                                            rendered.model = candidate.clone();
+                                            rendered
+                                        })
+                                    })),
+                                    ordinals,
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if is_retriable(&e) {
+                            tracing::warn!(
+                                candidate = %candidate,
+                                error = %e,
+                                "failover stream candidate failed, trying next"
+                            );
+                            failover.record_failure(candidate, e);
+                            continue;
+                        }
+                        break Err(e);
+                    }
+                }
             }
         };
-        Ok(ChatCompletionStream {
-            chunks,
-            provider: provider.name(),
-            model: requested_model,
-            ordinals: openai_compat::api::chat_completions::ToolCallOrdinals::default(),
-        })
+
+        if multi {
+            match tokio::time::timeout(remaining, run).await {
+                Ok(r) => r,
+                Err(_elapsed) => Err(failover.deadline()),
+            }
+        } else {
+            run.await
+        }
     }
 
     /// The whole validation sequence, in the one order that keeps each refusal
@@ -484,6 +651,36 @@ impl Client {
             auth: self.authenticator(provider)?,
             egress,
         })
+    }
+
+    /// Validates every candidate against `admitted` and builds the
+    /// [`Failover`] chain over them — the setup [`Client::chat_completions`]
+    /// and [`Client::chat_completions_stream`] share verbatim, before their
+    /// loops diverge on how each surface commits to a winner.
+    ///
+    /// Validates ALL candidates before any exchange. An unroutable
+    /// candidate fails the whole request — it is not skipped. Each of the
+    /// four [`Client::validate`] gates is a caller mistake, not a transient
+    /// upstream condition, and a typo in candidate 3 believes they have
+    /// three-way redundancy and has two — that is worth a refusal at
+    /// admission, where the message can name the candidate and the gate it
+    /// failed.
+    fn prepare_failover(
+        &self,
+        candidates: &Candidates,
+        admitted: &[(Api, Egress)],
+    ) -> Result<(Vec<(String, ModelDefinition<'_>)>, Failover)> {
+        let validated: Vec<(String, ModelDefinition<'_>)> = candidates
+            .list
+            .iter()
+            .map(|c| self.validate(c, admitted).map(|def| (c.clone(), def)))
+            .collect::<Result<Vec<_>>>()?;
+        let failover = Failover::new(
+            validated.iter().map(|(c, _)| c.clone()).collect(),
+            self.config.timeout_secs,
+            candidates.requested_models,
+        );
+        Ok((validated, failover))
     }
 
     /// Whether this client serves the routed provider at all.
@@ -608,6 +805,296 @@ impl Client {
     }
 }
 
+/// Whether this error is worth trying the next candidate on.
+///
+/// The axis is REQUEST-scoped vs PROVIDER-scoped, not retryable vs fatal.
+/// A request-scoped failure reproduces identically on every candidate —
+/// changing provider changes nothing, so it stops the chain. A
+/// provider-scoped failure belongs to the credentials or account of the
+/// candidate that reported it, so the next candidate — especially across
+/// providers — has a real chance.
+///
+/// Provider-scoped, fail over: `Network` (unreachable), `RateLimited`,
+/// `Overloaded`, `ServerError` (transient load), `ModelNotFound` (the list
+/// may name different models at different hosts), and `Authentication`,
+/// `PermissionDenied`, `QuotaExceeded` — a revoked key or emptied quota on
+/// provider A is exactly the outage a `[openai/..., anthropic/...]` list
+/// exists to survive.
+///
+/// Request-scoped or otherwise unrecoverable, fatal: `InvalidRequest`,
+/// `ContextLengthExceeded`, `ContentFilter` (any candidate rejects the same
+/// body), `Decode` (the winner returned 200 and billed — the next candidate
+/// only buys a silent second completion, and schema drift is deterministic
+/// across a provider's own OpenAI-compatible surface), and `Unknown`
+/// (failing over turns one unexplained failure into several billed ones).
+/// Anything warpllm itself decided (`Gateway` origin) is also fatal.
+fn is_retriable(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Network { .. }
+            | Error::RateLimited(_)
+            | Error::Overloaded(_)
+            | Error::ServerError(_)
+            | Error::ModelNotFound(_)
+            | Error::Authentication(_)
+            | Error::PermissionDenied(_)
+            | Error::QuotaExceeded(_)
+    )
+}
+
+/// Whether an error read off a stream that has not yet delivered a single
+/// chunk justifies trying the next candidate.
+///
+/// The prefetch boundary grants what the exchange-level table grants, plus the
+/// stream-endpoint failures that a still-silent connection can report:
+/// [`Error::StreamTruncated`] (the socket closed before any content) and
+/// [`Error::StreamStalled`] (it went quiet on the read timeout). Only here,
+/// where zero chunks have reached the caller, are those safe to fail over on —
+/// after the first chunk there is content on the wire and a truncated or
+/// stalled stream must surface to the caller as itself, never as another
+/// candidate spliced in.
+fn fails_over_before_first_chunk(err: &Error) -> bool {
+    is_retriable(err)
+        || matches!(
+            err,
+            Error::StreamTruncated { .. } | Error::StreamStalled { .. }
+        )
+}
+
+/// Maximum number of failover candidates a request may name.
+///
+/// A bounded connection budget at admission: one request must not be able to
+/// drive unbounded sequential upstream attempts. Small bounds also make the
+/// dedup above trivial.
+pub const MAX_FAILOVER_CANDIDATES: usize = 8;
+
+/// The ordered candidate chain for a request, decided at admission.
+#[derive(Debug)]
+struct Candidates {
+    /// Model strings, deduplicated, in caller order.
+    list: Vec<String>,
+    /// Whether the caller used the `models` field rather than the single
+    /// `model` one. Everything downstream — failover semantics, exhaustion
+    /// error shape — keys off this, so it must be derived by the same code
+    /// that builds the list, never re-derived from `request.models.is_some()`.
+    requested_models: bool,
+}
+
+/// Build the candidate list from a request's `model` / `models` fields.
+///
+/// Exactly one must be non-empty; both or neither is
+/// [`Error::InvalidInput`]. `models: []` is refused outright rather than
+/// treated as absent — "empty" must never silently mean "absent", because
+/// that is what lets single-model backward compatibility and failover
+/// semantics disagree about the same request. Deduplicates (a repeated
+/// candidate burns two attempts on the same endpoint and telling a caller
+/// they have a four-chain when they have two) and caps the chain at
+/// [`MAX_FAILOVER_CANDIDATES`].
+fn build_candidates(request: &CreateChatCompletionRequest) -> Result<Candidates> {
+    let has_model = !request.model.is_empty();
+    let models = request.models.as_deref();
+    let has_models = models.is_some_and(|m| !m.is_empty());
+
+    if models == Some(&[]) {
+        return Err(Error::InvalidInput("models must not be empty".into()));
+    }
+
+    let list = match (has_model, has_models) {
+        (true, true) => {
+            return Err(Error::InvalidInput(
+                "both model and models are set; use exactly one".into(),
+            ));
+        }
+        (false, false) => {
+            return Err(Error::InvalidInput(
+                "either model or models is required".into(),
+            ));
+        }
+        (true, false) => vec![request.model.clone()],
+        (false, true) => resolve_models(models.unwrap())?,
+    };
+
+    let mut deduped: Vec<String> = Vec::with_capacity(list.len());
+    for model in list {
+        if !deduped.contains(&model) {
+            deduped.push(model);
+        }
+    }
+    if deduped.len() > MAX_FAILOVER_CANDIDATES {
+        return Err(Error::InvalidInput(format!(
+            "models must not exceed {MAX_FAILOVER_CANDIDATES} candidates"
+        )));
+    }
+    Ok(Candidates {
+        list: deduped,
+        requested_models: has_models,
+    })
+}
+
+/// Maximum number of raw `models` entries a weighted/tiered request may
+/// name, checked BEFORE grouping into tiers.
+///
+/// [`MAX_FAILOVER_CANDIDATES`] bounds the RESOLVED chain — one candidate per
+/// tier — which does nothing to stop a single tier from naming thousands of
+/// weighted members: that resolves to one chain entry no matter how many
+/// entries fed it, so the existing post-resolution cap would never see them.
+/// Checked on the plain (bare-string-only) list instead happens AFTER
+/// dedup, by design — see [`build_candidates`] — so this is a second,
+/// earlier gate specific to the weighted path, not a tightening of the
+/// first.
+const MAX_WEIGHTED_MODEL_ENTRIES: usize = MAX_FAILOVER_CANDIDATES * 4;
+
+/// Resolves a `models` list to the ordered candidate-string chain
+/// [`Failover`] consumes — the one thing [`build_candidates`] needs from
+/// either shape a caller wrote.
+///
+/// Two independent modes, picked by what the caller actually wrote rather
+/// than a flag:
+///
+/// * Every entry a bare string: today's plain failover list, UNCHANGED —
+///   each string in the order given, no weighting, no tiers.
+/// * At least one entry an object: entries group by `failover` (default
+///   tier `0` when omitted, so an all-omitted list of objects is one tier);
+///   tiers are visited in ascending order, and within a tier
+///   [`balancer::pick_weighted`] makes ONE random weighted pick (default
+///   weight `1`) — for THIS request. A bare string mixed into an otherwise
+///   tiered list gets the same defaults an all-omitted object would:
+///   weight `1`, tier `0`.
+///
+/// Either way the result is one string per surviving position, in the order
+/// [`Failover`] should try them — tiered mode just resolves each tier down
+/// to its single pick before handing the list on, so nothing downstream of
+/// this function ever has to know weights or tiers exist.
+fn resolve_models(entries: &[ModelCandidate]) -> Result<Vec<String>> {
+    if entries.iter().all(|e| matches!(e, ModelCandidate::Bare(_))) {
+        return Ok(entries
+            .iter()
+            .map(|e| match e {
+                ModelCandidate::Bare(model) => model.clone(),
+                ModelCandidate::Weighted { .. } => unreachable!("just matched Bare above"),
+            })
+            .collect());
+    }
+
+    if entries.len() > MAX_WEIGHTED_MODEL_ENTRIES {
+        return Err(Error::InvalidInput(format!(
+            "models must not exceed {MAX_WEIGHTED_MODEL_ENTRIES} entries"
+        )));
+    }
+
+    // BTreeMap so tiers come back in ascending numeric order regardless of
+    // the order their members appeared in the caller's list; each tier's own
+    // Vec keeps arrival order, though pick_weighted doesn't care about it.
+    let mut tiers: std::collections::BTreeMap<u32, Vec<balancer::Candidate>> =
+        std::collections::BTreeMap::new();
+    for entry in entries {
+        let (model, weight, failover) = match entry {
+            ModelCandidate::Bare(model) => (model.clone(), None, None),
+            ModelCandidate::Weighted {
+                model,
+                weight,
+                failover,
+            } => (model.clone(), *weight, *failover),
+        };
+        tiers
+            .entry(failover.unwrap_or(0))
+            .or_default()
+            .push(balancer::Candidate {
+                model_str: model,
+                weight: weight.unwrap_or(1),
+            });
+    }
+
+    tiers
+        .into_values()
+        .map(|tier| balancer::pick_weighted(&tier))
+        .collect()
+}
+
+/// Manages the candidate list, failover loop, deadline enforcement, and
+/// error collection for a per-request failover chain.
+///
+/// Shared between [`Client::chat_completions`] and
+/// [`Client::chat_completions_stream`].
+struct Failover {
+    candidates: Vec<String>,
+    deadline: Instant,
+    idx: usize,
+    tried: Vec<(String, Box<Error>)>,
+    /// Whether the caller explicitly passed `models`. When false, the
+    /// request used the single `model` field and we preserve backward-
+    /// compatible error semantics: a retryable failure returns the inner
+    /// error directly instead of wrapping it in `CandidatesExhausted`.
+    requested_models: bool,
+}
+
+impl Failover {
+    fn new(candidates: Vec<String>, timeout_secs: Option<u64>, requested_models: bool) -> Self {
+        Self {
+            deadline: Instant::now()
+                + Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)),
+            candidates,
+            idx: 0,
+            tried: Vec::new(),
+            requested_models,
+        }
+    }
+
+    /// The next candidate's index into the validated list and its string,
+    /// or `None` when the list is exhausted.
+    ///
+    /// Returns the INDEX rather than making the caller search the validated
+    /// list for a name match: `self.candidates` is built from that list in
+    /// the same order (see [`Client::chat_completions`]), so the index this
+    /// cursor already tracks is the answer, and a linear re-lookup by name
+    /// would just rediscover it.
+    ///
+    /// ADVANCES the cursor, so the loop terminates by construction: getting
+    /// `Some` on one iteration can never yield the same candidate on the
+    /// next, no matter whether the iteration records a failure or not.
+    fn next(&mut self) -> Option<(usize, &str)> {
+        let idx = self.idx;
+        let candidate = self.candidates.get(idx)?;
+        self.idx += 1;
+        Some((idx, candidate.as_str()))
+    }
+
+    /// Time remaining until the overall deadline, or `Duration::ZERO` if
+    /// the deadline has already passed.
+    fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
+    /// Record a failed attempt. Advancing happens in [`Self::next`].
+    fn record_failure(&mut self, candidate: String, error: Error) {
+        self.tried.push((candidate, Box::new(error)));
+    }
+
+    /// Convert accumulated state into [`Error::CandidatesExhausted`].
+    ///
+    /// When the request used the single `model` field (not `models`), a
+    /// single failure returns the inner error directly for backward
+    /// compatibility — callers were never expected to match
+    /// `CandidatesExhausted` on a single-model request.
+    fn exhausted(&mut self) -> Error {
+        if !self.requested_models && self.tried.len() == 1 {
+            return *self.tried.drain(..).next().unwrap().1;
+        }
+        Error::CandidatesExhausted {
+            models: std::mem::take(&mut self.candidates),
+            tried: std::mem::take(&mut self.tried),
+        }
+    }
+
+    /// Convert accumulated state into [`Error::DeadlineExceeded`] when the
+    /// chain's deadline elapsed before any candidate finished.
+    fn deadline(&mut self) -> Error {
+        Error::DeadlineExceeded {
+            tried: std::mem::take(&mut self.tried),
+        }
+    }
+}
+
 /// The chunks of one streamed reply, in the shape the caller asked in.
 ///
 /// Returned by [`Client::chat_completions_stream`]. Iterate it to exhaustion:
@@ -638,6 +1125,13 @@ pub struct ChatCompletionStream {
     /// of the upstream's own — the streaming counterpart of the one
     /// [`Client::chat_completions`] performs on a whole reply.
     model: String,
+    /// The first item, read at commit time by the failover chain and buffered
+    /// here so the caller still receives it. `None` means "nothing prefetched"
+    /// (a stream committed and handed over without prefetch); `Some(None)` is
+    /// a committed but empty stream; `Some(Some(item))` is the buffered first
+    /// chunk or the terminal first error. Everything after unreels from
+    /// `chunks`, which was already advanced past this item.
+    first: Option<Option<Result<CreateChatCompletionStreamResponse>>>,
     /// A stream's tool-call numbering, which only a scope that outlives a chunk
     /// can hold. See
     /// [`ToolCallOrdinals`](openai_compat::api::chat_completions::ToolCallOrdinals)
@@ -675,6 +1169,9 @@ impl ChatCompletionStream {
     /// An error item is terminal: whatever produced it also ended the stream,
     /// so the next call returns `None`.
     pub async fn next(&mut self) -> Option<Result<CreateChatCompletionStreamResponse>> {
+        if let Some(first) = self.first.take() {
+            return first;
+        }
         // Gateway chunks in, whichever protocol produced them; ONE renderer
         // out, because the caller asked in chat completions and gets chat
         // completions back.
@@ -1275,6 +1772,951 @@ mod tests {
         assert_eq!(
             client.base_url(pair_for("openai/gpt-5.6").0),
             "http://localhost:9999"
+        );
+    }
+
+    // ------------------------------------------------------- failover
+
+    /// A request that names its chain through the `models` extension, as
+    /// bare strings — today's plain ordered failover, no weighting.
+    fn models_request(models: &[&str]) -> CreateChatCompletionRequest {
+        CreateChatCompletionRequest {
+            models: Some(models.iter().map(|&m| m.into()).collect()),
+            messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
+            ..Default::default()
+        }
+    }
+
+    /// The chain is decided from exactly one field: the single `model` string
+    /// routes a one-candidate chain, and the `models` list a multi-candidate
+    /// one. The flag is what downstream keyed off it, so it must be derived
+    /// here, beside the list it describes.
+    #[test]
+    fn build_candidates_derives_the_chain_from_model_or_models() {
+        let single = build_candidates(&CreateChatCompletionRequest {
+            model: "openai/gpt-5.6".into(),
+            messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(single.list, ["openai/gpt-5.6"]);
+        assert!(
+            !single.requested_models,
+            "a single model is not a models list"
+        );
+
+        let multi = build_candidates(&models_request(&[
+            "openai/gpt-5.6",
+            "deepseek/deepseek-v4-flash",
+        ]))
+        .unwrap();
+        assert_eq!(multi.list, ["openai/gpt-5.6", "deepseek/deepseek-v4-flash"]);
+        assert!(multi.requested_models);
+    }
+
+    /// Both spellings at once is ambiguity worth refusing: which is the
+    /// intended chain, and which the accident? Neither is ambiguous; a request
+    /// with neither has nothing to route. `models: []` is a third spelling of
+    /// "neither" that must not silently mean absent, because absent is a
+    /// one-candidate backward-compatible chain and empty is nothing at all.
+    #[test]
+    fn build_candidates_refuses_ambiguity_and_emptiness() {
+        let ambiguous = CreateChatCompletionRequest {
+            model: "openai/gpt-5.6".into(),
+            messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
+            ..models_request(&["deepseek/deepseek-v4-flash"]).clone()
+        };
+        assert!(matches!(
+            build_candidates(&ambiguous),
+            Err(Error::InvalidInput(_))
+        ));
+
+        let neither = CreateChatCompletionRequest {
+            messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
+            ..Default::default()
+        };
+        assert!(matches!(
+            build_candidates(&neither),
+            Err(Error::InvalidInput(_))
+        ));
+
+        let empty = models_request(&[]);
+        let message = build_candidates(&empty).unwrap_err().to_string();
+        assert!(message.contains("models must not be empty"), "{message}");
+    }
+
+    /// A repeated candidate is one endpoint tried twice and reported as a
+    /// two-chain — no redundancy gained, half the chain's headroom spent. It
+    /// is kept ONCE, in the position it first appeared, so the surviving list
+    /// still reads as the caller wrote it.
+    #[test]
+    fn build_candidates_deduplicates_and_keeps_call_order() {
+        let deduped = build_candidates(&models_request(&[
+            "deepseek/deepseek-v4-flash",
+            "openai/gpt-5.6",
+            "deepseek/deepseek-v4-flash",
+            "openai/gpt-5.6",
+        ]))
+        .unwrap();
+        assert_eq!(
+            deduped.list,
+            ["deepseek/deepseek-v4-flash", "openai/gpt-5.6"]
+        );
+    }
+
+    /// One request must not be able to drive unbounded sequential attempts,
+    /// so the chain is capped at admission and told apart from a happy chain
+    /// by the same error.
+    #[test]
+    fn build_candidates_caps_the_chain() {
+        let big: Vec<ModelCandidate> = (0..MAX_FAILOVER_CANDIDATES + 3)
+            .map(|i| format!("openai/gpt-5.6-{i}").into())
+            .collect();
+        let message = build_candidates(&CreateChatCompletionRequest {
+            models: Some(big),
+            messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
+            ..Default::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains(&format!(
+                "must not exceed {MAX_FAILOVER_CANDIDATES} candidates"
+            )),
+            "{message}"
+        );
+    }
+
+    // ------------------------------------------- weighted, tiered `models`
+
+    /// A request naming its chain through weighted `models` objects.
+    fn weighted_models_request(entries: Vec<ModelCandidate>) -> CreateChatCompletionRequest {
+        CreateChatCompletionRequest {
+            models: Some(entries),
+            messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
+            ..Default::default()
+        }
+    }
+
+    fn weighted(model: &str, weight: u32, failover: u32) -> ModelCandidate {
+        ModelCandidate::Weighted {
+            model: model.into(),
+            weight: Some(weight),
+            failover: Some(failover),
+        }
+    }
+
+    /// Every entry omitting both fields is one tier, so the chain resolves
+    /// to exactly ONE candidate — the same shape a single bare `model`
+    /// string would produce, just chosen by weight instead of being the
+    /// only option. This is what tells a plain balancing request (no
+    /// failover intended) apart from a failover one at the type level:
+    /// `requested_models` is still true, since the caller DID use `models`.
+    #[test]
+    fn an_untiered_weighted_list_resolves_to_one_candidate() {
+        let request = weighted_models_request(vec![
+            ModelCandidate::Weighted {
+                model: "openai/gpt-5.6".into(),
+                weight: Some(1),
+                failover: None,
+            },
+            ModelCandidate::Weighted {
+                model: "deepseek/deepseek-v4-flash".into(),
+                weight: Some(1),
+                failover: None,
+            },
+        ]);
+        let candidates = build_candidates(&request).unwrap();
+        assert_eq!(candidates.list.len(), 1, "{:?}", candidates.list);
+        assert!(
+            ["openai/gpt-5.6", "deepseek/deepseek-v4-flash"].contains(&candidates.list[0].as_str()),
+            "{:?}",
+            candidates.list
+        );
+        assert!(candidates.requested_models);
+    }
+
+    /// Tiers resolve to ONE candidate each, in ascending tier order — the
+    /// exact shape the reviewer's own scenario on PR warpllm/warpllm#79
+    /// describes: a weighted primary tier, then successively narrower
+    /// fallback tiers, each contributing exactly one slot to the chain.
+    #[test]
+    fn tiers_resolve_to_one_candidate_each_in_ascending_order() {
+        let request = weighted_models_request(vec![
+            weighted("openai/gpt-5.6", 1, 0),
+            weighted("anthropic/claude-opus-5", 2, 0),
+            weighted("kimi/k3", 1, 1),
+            weighted("deepseek/deepseek-v4-flash", 1, 2),
+            weighted("deepseek/deepseek-v4-pro", 1, 2),
+        ]);
+        let candidates = build_candidates(&request).unwrap();
+        assert_eq!(candidates.list.len(), 3, "{:?}", candidates.list);
+        assert!(
+            ["openai/gpt-5.6", "anthropic/claude-opus-5"].contains(&candidates.list[0].as_str()),
+            "tier 0: {:?}",
+            candidates.list
+        );
+        assert_eq!(candidates.list[1], "kimi/k3", "tier 1, the only member");
+        assert!(
+            ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"]
+                .contains(&candidates.list[2].as_str()),
+            "tier 2: {:?}",
+            candidates.list
+        );
+    }
+
+    /// The statistical property the design promises: within one tier, a
+    /// weight-2 candidate is picked roughly twice as often as a weight-1
+    /// one, across many independent resolutions — not a round-robin
+    /// guarantee over a fixed cycle, since each `build_candidates` call
+    /// starts fresh with no state to carry a cycle across requests.
+    #[test]
+    fn weighted_selection_within_a_tier_follows_the_ratio() {
+        let mut counts = std::collections::HashMap::new();
+        for _ in 0..3000 {
+            let request = weighted_models_request(vec![
+                weighted("openai/gpt-5.6", 1, 0),
+                weighted("anthropic/claude-opus-5", 2, 0),
+            ]);
+            let candidates = build_candidates(&request).unwrap();
+            *counts.entry(candidates.list[0].clone()).or_insert(0u32) += 1;
+        }
+        let opus_share = f64::from(counts["anthropic/claude-opus-5"]) / 3000.0;
+        assert!(
+            (0.58..0.75).contains(&opus_share),
+            "expected roughly two-thirds for the weight-2 candidate, got {opus_share} ({counts:?})"
+        );
+    }
+
+    /// A bare string mixed into an otherwise-tiered list gets the same
+    /// defaults an all-omitted object would: weight 1, tier 0 — so it joins
+    /// the primary tier's weighted pool rather than becoming its own
+    /// singleton tier the way it would in a pure bare-string list.
+    #[test]
+    fn a_bare_string_mixed_with_tiers_joins_the_primary_tier() {
+        let request = weighted_models_request(vec![
+            ModelCandidate::Bare("openai/gpt-5.6".into()),
+            weighted("kimi/k3", 1, 1),
+        ]);
+        let candidates = build_candidates(&request).unwrap();
+        assert_eq!(
+            candidates.list,
+            ["openai/gpt-5.6", "kimi/k3"],
+            "the bare entry is tier 0's only member, so it always wins tier 0"
+        );
+    }
+
+    /// Weight validation is not re-implemented for the tiered path — it
+    /// shares `balancer::pick_weighted`, so the identical errors
+    /// `BalancedClient` and `JsonBalancedClient` give surface here too.
+    #[test]
+    fn a_tiers_weights_are_validated_like_a_balancers() {
+        let all_zero = weighted_models_request(vec![weighted("openai/gpt-5.6", 0, 0)]);
+        let err = build_candidates(&all_zero).unwrap_err().to_string();
+        assert!(err.contains("weight 0"), "{err}");
+
+        let too_big = weighted_models_request(vec![ModelCandidate::Weighted {
+            model: "openai/gpt-5.6".into(),
+            weight: Some(u32::MAX),
+            failover: Some(0),
+        }]);
+        let err = build_candidates(&too_big).unwrap_err().to_string();
+        assert!(err.contains("exceeds the maximum"), "{err}");
+    }
+
+    /// A tier's member count is bounded independently of the resolved
+    /// chain length, which the ordinary `MAX_FAILOVER_CANDIDATES` cap
+    /// cannot see: a thousand weighted entries in ONE tier still resolve
+    /// to a one-candidate chain, so only a check on the raw entry count
+    /// catches it.
+    #[test]
+    fn a_single_tiers_entry_count_is_capped_independently() {
+        let big: Vec<ModelCandidate> = (0..MAX_WEIGHTED_MODEL_ENTRIES + 1)
+            .map(|i| weighted(&format!("openai/gpt-5.6-{i}"), 1, 0))
+            .collect();
+        let err = build_candidates(&weighted_models_request(big))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!(
+                "must not exceed {MAX_WEIGHTED_MODEL_ENTRIES} entries"
+            )),
+            "{err}"
+        );
+    }
+
+    /// The cursor is what makes the loop terminate: each `next` ADVANCES even
+    /// when the iteration that read it records no failure, so no accounting
+    /// error downstream can revisit a candidate.
+    #[test]
+    fn failover_next_advances_and_never_repeats() {
+        let mut failover = Failover::new(
+            vec!["openai/gpt-5.6".into(), "deepseek/deepseek-v4-flash".into()],
+            Some(60),
+            true,
+        );
+        assert_eq!(failover.next(), Some((0, "openai/gpt-5.6")));
+        // A failure is recorded AFTER `next` advanced — this is the exact
+        // sequence the loop uses — yet the next call still moves on.
+        failover.record_failure(
+            "openai/gpt-5.6".into(),
+            Error::RateLimited(Box::new(provider_error())),
+        );
+        assert_eq!(failover.next(), Some((1, "deepseek/deepseek-v4-flash")));
+        assert_eq!(failover.next(), None, "the chain is exhausted");
+        assert_eq!(failover.next(), None, "exhaustion is stable");
+    }
+
+    /// A single-model request keeps its pre-failover error shape: when the
+    /// one candidate fails, the inner error stands on its own. Nobody was
+    /// ever told to look for `CandidatesExhausted` on a single-model call,
+    /// and retrofitting one on would break matching done against the old
+    /// contract.
+    #[test]
+    fn failover_exhaustion_preserves_single_model_errors() {
+        let mut failover = Failover::new(vec!["openai/gpt-5.6".into()], Some(60), false);
+        let inner = Error::RateLimited(Box::new(provider_error()));
+        failover.next();
+        failover.record_failure("openai/gpt-5.6".into(), inner);
+        let err = failover.exhausted();
+        assert!(
+            matches!(err, Error::RateLimited(_)),
+            "a single-model failure surfaces as itself, not wrapped: {err:?}"
+        );
+    }
+
+    /// The `models` chain, by contrast, is exactly the feature that new is a
+    /// wrap for: every attempt in order, and the chain it belonged to, so a
+    /// caller told "all candidates exhausted" can see which candidates were
+    /// tried and what each said.
+    #[test]
+    fn failover_exhaustion_reports_every_attempt_and_the_chain() {
+        let mut failover = Failover::new(
+            vec!["openai/gpt-5.6".into(), "deepseek/deepseek-v4-flash".into()],
+            Some(60),
+            true,
+        );
+        failover.next();
+        failover.record_failure(
+            "openai/gpt-5.6".into(),
+            Error::RateLimited(Box::new(provider_error())),
+        );
+        failover.next();
+        failover.record_failure(
+            "deepseek/deepseek-v4-flash".into(),
+            Error::ServerError(Box::new(provider_error())),
+        );
+        let err = failover.exhausted();
+        // The aggregate is warpllm's verdict, not any provider's: there is no
+        // single upstream whose status or retry-after belongs in the envelope.
+        assert_eq!(err.origin(), crate::error::Origin::Gateway);
+        assert!(err.provider_error().is_none());
+        match err {
+            Error::CandidatesExhausted { models, tried } => {
+                assert_eq!(models, ["openai/gpt-5.6", "deepseek/deepseek-v4-flash"]);
+                assert_eq!(tried.len(), 2);
+                assert!(matches!(tried[0].0.as_str(), "openai/gpt-5.6"));
+                assert!(matches!(tried[1].0.as_str(), "deepseek/deepseek-v4-flash"));
+            }
+            other => panic!("expected CandidatesExhausted, got {other:?}"),
+        }
+    }
+
+    /// A chain that runs out of TIME reports exactly what it did get: which
+    /// candidates were attempted and how each failed, so nobody mistakes a
+    /// deadline for a provider's own timeout.
+    #[test]
+    fn failover_deadline_reports_every_attempt() {
+        let mut failover = Failover::new(vec!["openai/gpt-5.6".into()], Some(60), true);
+        failover.next();
+        failover.record_failure(
+            "openai/gpt-5.6".into(),
+            Error::Overloaded(Box::new(provider_error())),
+        );
+        let deadline = failover.deadline();
+        assert_eq!(deadline.code(), "deadline_exceeded");
+        match deadline {
+            Error::DeadlineExceeded { tried } => {
+                assert_eq!(tried.len(), 1);
+                assert_eq!(tried[0].0, "openai/gpt-5.6");
+            }
+            other => panic!("expected DeadlineExceeded, got {other:?}"),
+        }
+    }
+
+    fn provider_error() -> crate::gateway::types::ProviderError {
+        crate::gateway::types::ProviderError {
+            provider: "demo",
+            status: 500,
+            message: "m".into(),
+            error_type: None,
+            provider_code: None,
+            retry_after: None,
+            request_id: None,
+            raw_body: String::new(),
+        }
+    }
+
+    /// The classification table, as the reviewers were right to ask for it
+    /// explicitly. The axis is REQUEST-scoped vs PROVIDER-scoped, not
+    /// "retryable vs fatal": the request-scoped half reproduces identically
+    /// on every candidate, so a chain over it would be theater.
+    #[tokio::test]
+    async fn provider_scoped_errors_fail_over_and_request_scoped_errors_stop_the_chain() {
+        let p = provider_error;
+        let retryable = [
+            Error::Network {
+                provider: "demo",
+                source: refused().await,
+            },
+            Error::RateLimited(Box::new(p())),
+            Error::Overloaded(Box::new(p())),
+            Error::ServerError(Box::new(p())),
+            Error::ModelNotFound(Box::new(p())),
+            Error::Authentication(Box::new(p())),
+            Error::PermissionDenied(Box::new(p())),
+            Error::QuotaExceeded(Box::new(p())),
+        ];
+        for error in &retryable {
+            assert!(is_retriable(error), "should fail over: {error:?}");
+            assert!(
+                fails_over_before_first_chunk(error),
+                "the prefetch grants the exchange-level table: {error:?}"
+            );
+        }
+
+        let fatal = [
+            Error::InvalidRequest(Box::new(p())),
+            Error::ContextLengthExceeded(Box::new(p())),
+            Error::ContentFilter(Box::new(p())),
+            Error::Decode {
+                provider: "demo",
+                message: "bad json".into(),
+            },
+            Error::Unknown(Box::new(p())),
+            Error::Internal("setup".into()),
+            Error::InvalidInput("payload".into()),
+        ];
+        for error in &fatal {
+            assert!(!is_retriable(error), "must stop the chain: {error:?}");
+        }
+    }
+
+    /// A stream that has already delivered chunks can still end truncated or
+    /// stalled — those failures belong to a committed candidate, not the
+    /// chain, so the prefetch's opts-in-to-failover test must not leak them.
+    #[tokio::test]
+    async fn a_delivered_streams_failures_do_not_fail_over_the_chain() {
+        assert!(fails_over_before_first_chunk(&Error::StreamTruncated {
+            provider: "demo"
+        }));
+        assert!(fails_over_before_first_chunk(&Error::StreamStalled {
+            provider: "demo",
+            timeout: Duration::from_secs(60),
+        }));
+        assert!(fails_over_before_first_chunk(&Error::Network {
+            provider: "demo",
+            source: refused().await,
+        }));
+        assert!(
+            !fails_over_before_first_chunk(&Error::Decode {
+                provider: "demo",
+                message: "bad json".into(),
+            }),
+            "a billed 200 must never be re-attempted"
+        );
+    }
+
+    /// A real `reqwest::Error` for the `Network` rows; the only hard-to-build
+    /// variant, taken from a connection that is refused by construction.
+    async fn refused() -> reqwest::Error {
+        reqwest::Client::new()
+            .get("http://127.0.0.1:1/never-routes")
+            .send()
+            .await
+            .unwrap_err()
+    }
+
+    /// The whole point of the feature, end to end: a provider-scoped failure
+    /// on candidate 1 advances the chain, and candidate 2's reply is the
+    /// answer — echoing the string the CALLER routed with, not the upstream's
+    /// own model name.
+    #[tokio::test]
+    async fn a_retryable_failure_advances_to_the_next_candidate() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let chain = [
+            ("gpt-5.6", 429, "rate limit"),
+            ("deepseek-v4-flash", 200, "served by deepseek"),
+        ];
+        for (model, status, message) in chain {
+            let body = if status == 200 {
+                serde_json::json!({
+                    "id": "chatcmpl-2",
+                    "object": "chat.completion",
+                    "created": 1_700_000_000,
+                    "model": "gpt-5.6",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": message},
+                        "finish_reason": "stop"
+                    }]
+                })
+            } else {
+                serde_json::json!({
+                    "error": {"message": message, "type": "rate_limit_error", "code": "rate_limit_exceeded"}
+                })
+            };
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(serde_json::json!({"model": model})))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+        }
+
+        let client = with_env(
+            &[
+                ("OPENAI_API_KEY", Some("sk-openai")),
+                ("DEEPSEEK_API_KEY", Some("sk-deepseek")),
+            ],
+            || {
+                Client::new(ClientConfig {
+                    base_url: Some(server.uri()),
+                    ..Default::default()
+                })
+                .unwrap()
+            },
+        );
+        let completion = client
+            .chat_completions(models_request(&[
+                "openai/gpt-5.6",
+                "deepseek/deepseek-v4-flash",
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(completion.model, "deepseek/deepseek-v4-flash");
+        assert_eq!(
+            completion.choices[0].message.content,
+            Some("served by deepseek".into())
+        );
+        // Both candidates were tried, in order: the mock fan-out happened.
+        let requests = server.received_requests().await.unwrap();
+        let bodies: Vec<_> = requests
+            .iter()
+            .map(|r| {
+                serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["model"].to_string()
+            })
+            .collect();
+        assert_eq!(bodies, ["\"gpt-5.6\"", "\"deepseek-v4-flash\""]);
+    }
+
+    /// A request-scoped failure is deterministic across candidates — changing
+    /// provider changes nothing about the payload — so the chain stops at
+    /// the candidate that reported it rather than making the caller pay for a
+    /// second doomed attempt.
+    #[tokio::test]
+    async fn a_request_scoped_failure_stops_the_chain() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({"model": "gpt-5.6"})))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": {"message": "no such feature", "type": "invalid_request_error", "code": "bad_request"}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = with_env(
+            &[
+                ("OPENAI_API_KEY", Some("sk-openai")),
+                ("DEEPSEEK_API_KEY", Some("sk-deepseek")),
+            ],
+            || {
+                Client::new(ClientConfig {
+                    base_url: Some(server.uri()),
+                    ..Default::default()
+                })
+                .unwrap()
+            },
+        );
+        let err = client
+            .chat_completions(models_request(&[
+                "openai/gpt-5.6",
+                "deepseek/deepseek-v4-flash",
+            ]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidRequest(_)),
+            "the fatal error must surface, not wrap: {err:?}"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "the chain must not attempt a request that would fail identically"
+        );
+    }
+
+    /// The last mile of `models`: when every candidate fails retryably, the
+    /// exhausted verdict names the whole chain and every attempt — not some
+    /// single provider's status.
+    #[tokio::test]
+    async fn every_candidate_failing_exhausts_with_the_chain_attached() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        for model in ["gpt-5.6", "deepseek-v4-flash"] {
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(body_partial_json(serde_json::json!({"model": model})))
+                .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                    "error": {"message": "load", "type": "server_error", "code": "server_error"}
+                })))
+                .mount(&server)
+                .await;
+        }
+
+        let client = with_env(
+            &[
+                ("OPENAI_API_KEY", Some("sk-openai")),
+                ("DEEPSEEK_API_KEY", Some("sk-deepseek")),
+            ],
+            || {
+                Client::new(ClientConfig {
+                    base_url: Some(server.uri()),
+                    ..Default::default()
+                })
+                .unwrap()
+            },
+        );
+        let err = client
+            .chat_completions(models_request(&[
+                "openai/gpt-5.6",
+                "deepseek/deepseek-v4-flash",
+            ]))
+            .await
+            .unwrap_err();
+        match err {
+            Error::CandidatesExhausted { models, tried } => {
+                assert_eq!(models, ["openai/gpt-5.6", "deepseek/deepseek-v4-flash"]);
+                assert_eq!(tried.len(), 2, "{tried:?}");
+            }
+            other => panic!("expected CandidatesExhausted, got {other:?}"),
+        }
+    }
+
+    /// The reviewer's own scenario end to end, over real HTTP mocks rather
+    /// than `build_candidates` alone: a weighted primary tier fails over to
+    /// a solo fallback tier, which fails over to a second weighted tier
+    /// that finally serves the request — three tiers, two failovers, one
+    /// reply. Every tier here has exactly one live member on the path taken
+    /// (weight only matters for WHICH provider is tried, never whether
+    /// failover happens), so the sequence is deterministic without needing
+    /// a statistical assertion.
+    #[tokio::test]
+    async fn weighted_tiers_fail_over_across_tiers_end_to_end() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Tier 0: gpt-5.6, the only candidate this test lets weighted
+        // selection actually pick among fixed choices — its outcome (429)
+        // is the same whichever tier-0 member selection lands on.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({"model": "gpt-5.6"})))
+            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+                "error": {"message": "slow down", "type": "rate_limit_error", "code": "rate_limit_exceeded"}
+            })))
+            .mount(&server)
+            .await;
+        // Tier 1: the solo fallback, also retryable.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "deepseek-v4-flash"}),
+            ))
+            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                "error": {"message": "load", "type": "server_error", "code": "server_error"}
+            })))
+            .mount(&server)
+            .await;
+        // Tier 2: the only member this test's weights ever resolve to
+        // (weight 1 against weight 0 within the tier), and where the chain
+        // finally succeeds.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "mistral-large-2411"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-3",
+                "object": "chat.completion",
+                "created": 1_700_000_000,
+                "model": "mistral-large-2411",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "served by mistral"},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = with_env(
+            &[
+                ("OPENAI_API_KEY", Some("sk-openai")),
+                ("DEEPSEEK_API_KEY", Some("sk-deepseek")),
+                ("MISTRAL_API_KEY", Some("sk-mistral")),
+            ],
+            || {
+                Client::new(ClientConfig {
+                    base_url: Some(server.uri()),
+                    ..Default::default()
+                })
+                .unwrap()
+            },
+        );
+        let completion = client
+            .chat_completions(weighted_models_request(vec![
+                weighted("openai/gpt-5.6", 1, 0),
+                weighted("deepseek/deepseek-v4-flash", 1, 1),
+                weighted("mistral/mistral-large-2411", 1, 2),
+                // A weight-0 tier-2 member the chain must never reach,
+                // since a tier resolves to exactly one pick before any
+                // request goes out — this proves that pick, not "every
+                // tier-2 member gets tried."
+                weighted("mistral/ministral-8b-2410", 0, 2),
+            ]))
+            .await
+            .expect("tier 2 serves after tiers 0 and 1 both fail retryably");
+        assert_eq!(completion.model, "mistral/mistral-large-2411");
+        assert_eq!(
+            completion.choices[0].message.content,
+            Some("served by mistral".into())
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            3,
+            "all three tiers were tried, in order"
+        );
+    }
+
+    fn sse_chunk() -> String {
+        format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "id": "chatcmpl-1",
+                "object": "chat.completion.chunk",
+                "created": 1_700_000_000,
+                "model": "gpt-5.6",
+                "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": null}]
+            })
+        )
+    }
+
+    /// The streaming commit boundary, pinned at the moment the first chunk
+    /// lands: after that chunk nothing is re-routed. The candidate that
+    /// yielded it is serving — its middle truncation surfaces to the caller
+    /// as itself, and the supposedly backup candidate is never contacted.
+    #[tokio::test]
+    async fn a_stream_locks_in_at_its_first_chunk() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // One chunk and then the socket closes: no sentinel, no blank line —
+        // the exact body a connection dying mid-answer produces.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({"model": "gpt-5.6"})))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse_chunk()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "deepseek-v4-flash"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                "{}{}",
+                sse_chunk(),
+                "data: [DONE]\n\n"
+            )))
+            .mount(&server)
+            .await;
+
+        let client = with_env(
+            &[
+                ("OPENAI_API_KEY", Some("sk-openai")),
+                ("DEEPSEEK_API_KEY", Some("sk-deepseek")),
+            ],
+            || {
+                Client::new(ClientConfig {
+                    base_url: Some(server.uri()),
+                    ..Default::default()
+                })
+                .unwrap()
+            },
+        );
+        let mut stream = client
+            .chat_completions_stream(models_request(&[
+                "openai/gpt-5.6",
+                "deepseek/deepseek-v4-flash",
+            ]))
+            .await
+            .unwrap();
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(
+            first.choices[0]
+                .delta
+                .content
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap(),
+            "hi"
+        );
+        assert!(
+            matches!(
+                stream.next().await,
+                Some(Err(Error::StreamTruncated { provider: "openai" }))
+            ),
+            "a committed stream reports its own truncation"
+        );
+        assert!(stream.next().await.is_none());
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "committed at the first chunk: the backup candidate is never contacted"
+        );
+    }
+
+    /// ...and before that first chunk, the candidate is NOT committed: an
+    /// opened stream that goes silent without a single chunk is a failed
+    /// attempt like any other, and the next candidate serves instead.
+    #[tokio::test]
+    async fn a_stream_that_fails_before_its_first_chunk_fails_over() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // A 200 with nothing in it: the socket closes before any chunk, which
+        // the transport reports as StreamTruncated on the first read.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({"model": "gpt-5.6"})))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+        let done = "data: [DONE]\n\n".to_string();
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "deepseek-v4-flash"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                "{}{}",
+                sse_chunk(),
+                done
+            )))
+            .mount(&server)
+            .await;
+
+        let client = with_env(
+            &[
+                ("OPENAI_API_KEY", Some("sk-openai")),
+                ("DEEPSEEK_API_KEY", Some("sk-deepseek")),
+            ],
+            || {
+                Client::new(ClientConfig {
+                    base_url: Some(server.uri()),
+                    ..Default::default()
+                })
+                .unwrap()
+            },
+        );
+        let mut stream = client
+            .chat_completions_stream(models_request(&[
+                "openai/gpt-5.6",
+                "deepseek/deepseek-v4-flash",
+            ]))
+            .await
+            .unwrap();
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(
+            first.choices[0]
+                .delta
+                .content
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap(),
+            "hi",
+            "the second candidate served"
+        );
+        assert_eq!("deepseek/deepseek-v4-flash", first.model);
+        assert!(stream.next().await.is_none());
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
+            "the truncated candidate was tried and its backup served"
+        );
+    }
+
+    /// A clean-but-empty stream — a candidate that 200s and sends only
+    /// `[DONE]`, no chunks — is a COMPLETE reply, not a failure: the exact
+    /// outcome a single candidate delivers, so the chain hands it over intact.
+    #[tokio::test]
+    async fn a_stream_that_ends_clean_without_chunks_is_a_complete_reply() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({"model": "gpt-5.6"})))
+            .respond_with(ResponseTemplate::new(200).set_body_string("data: [DONE]\n\n"))
+            .mount(&server)
+            .await;
+
+        let client = with_env(
+            &[
+                ("OPENAI_API_KEY", Some("sk-openai")),
+                ("DEEPSEEK_API_KEY", Some("sk-deepseek")),
+            ],
+            || {
+                Client::new(ClientConfig {
+                    base_url: Some(server.uri()),
+                    ..Default::default()
+                })
+                .unwrap()
+            },
+        );
+        let mut stream = client
+            .chat_completions_stream(models_request(&[
+                "openai/gpt-5.6",
+                "deepseek/deepseek-v4-flash",
+            ]))
+            .await
+            .unwrap();
+        assert!(
+            stream.next().await.is_none(),
+            "a clean empty stream ends as an empty stream"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "an empty-but-complete reply commits, never fails over"
         );
     }
 }

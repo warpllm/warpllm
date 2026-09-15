@@ -28,6 +28,11 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # `include_str!` and parsed once on first lookup. The upstream `serde_yaml` was
 # archived in 2024; this is The YAML Organization's maintained continuation.
 yaml_serde = "0.10.4"
+# One-shot weighted random selection for a per-request failover tier — see
+# `balancer::pick_weighted`. Already in the tree transitively (reqwest and
+# friends pull it in); depending on it directly costs no new supply-chain
+# surface.
+rand = "0.9"
 # Binding metadata is optional on the published core. The non-published
 # `warpllm-codegen` workspace tool is the only consumer.
 #

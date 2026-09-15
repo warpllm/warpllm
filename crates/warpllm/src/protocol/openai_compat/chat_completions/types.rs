@@ -629,7 +629,47 @@ pub struct ToolCallChunkFunction {
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
 pub struct CreateChatCompletionRequest {
     /// Model string in `provider/model` form, e.g. `"openai/gpt-5.6"`.
+    /// `#[serde(default)]` so a body sending only `models` (no `model`)
+    /// deserializes; the field stays `String` and the generated
+    /// TypeScript/Python types widen from required to optional. (ts-rs
+    /// cannot mark a non-`Option` field optional, so warpllm-codegen patches
+    /// the TypeScript declaration after generation.)
+    ///
+    /// Mutually exclusive with `models`: a request sets exactly one of the
+    /// two, never both and never neither.
+    #[serde(default)]
     pub model: String,
+    /// warpllm extension: candidate models for per-request failover, and
+    /// optionally weighted balancing within a failover tier. Consumed at
+    /// ingest time; not forwarded upstream.
+    ///
+    /// Mutually exclusive with `model`: set this instead of `model`, never
+    /// alongside it, and never as an empty list.
+    ///
+    /// Two ways to write an entry, and they may be mixed:
+    ///
+    /// - A bare string is a plain failover candidate: tried once, in the
+    ///   order given, no weighting — every candidate is its own tier.
+    /// - `{model, weight?, failover?}` groups candidates into TIERS.
+    ///   `failover` names the tier (default `0`, the primary one) and tiers
+    ///   are tried in ascending order on retryable failure. Within a tier,
+    ///   ONE candidate is chosen per request by weighted random sampling
+    ///   (`weight` defaults to `1`) — so `[{model: a, weight: 1}, {model: b,
+    ///   weight: 2}]` sends roughly a third of requests to `a` and two
+    ///   thirds to `b`, and only moves to the next tier if the one picked
+    ///   fails. A bare string mixed into a tiered list gets the same
+    ///   defaults an entry with both fields omitted would: `weight: 1`,
+    ///   tier `0`.
+    ///
+    /// The commit point differs by surface. Non-streaming: a whole reply,
+    /// so any candidate that completes is the winner. Streaming: only
+    /// connection setup up to the FIRST chunk — once a candidate yields its
+    /// first chunk the stream is locked in, because chunks already emitted
+    /// cannot be unsent (a mid-stream failure surfaces to the caller with
+    /// no failover, and cannot be retried without duplicating output).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "codegen", ts(optional = nullable))]
+    pub models: Option<Vec<ModelCandidate>>,
     pub messages: Vec<ChatCompletionRequestMessage>,
     #[serde(
         default,
@@ -1057,6 +1097,49 @@ pub struct JsonSchemaDefinition {
     #[serde(flatten)]
     #[cfg_attr(feature = "codegen", ts(skip))]
     pub unknown_fields: UnknownFields,
+}
+
+/// One entry in `models` — see its doc comment for how the two forms
+/// combine into failover tiers and weighted selection within one.
+// Both forms are held rather than normalized to the object shape, for the
+// same reason `ChatCompletionStop` keeps its two forms apart: a bare
+// string is the common case (plain ordered failover, no weights) and a
+// normalizing deserializer would throw away the distinction between "no
+// weight was written" and "weight: 1 was written", which the doc comment
+// above promises are the same default but are not the same INPUT.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum ModelCandidate {
+    Bare(String),
+    Weighted {
+        model: String,
+        /// Relative share of this tier's traffic. Defaults to `1` when
+        /// omitted, same as a bare-string entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        weight: Option<u32>,
+        /// Which failover tier this candidate belongs to, ascending order.
+        /// Defaults to `0`, the primary tier, when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        failover: Option<u32>,
+    },
+}
+
+impl From<String> for ModelCandidate {
+    /// A plain candidate string, unweighted, in its own tier — the
+    /// conversion a Rust caller wants for `models: vec!["a".into(), ...]`,
+    /// matching the wire's own bare-string shorthand.
+    fn from(model: String) -> Self {
+        Self::Bare(model)
+    }
+}
+
+impl From<&str> for ModelCandidate {
+    fn from(model: &str) -> Self {
+        Self::Bare(model.to_string())
+    }
 }
 
 /// Where generation stops: one sequence, or several.

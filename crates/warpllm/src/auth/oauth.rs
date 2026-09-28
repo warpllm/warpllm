@@ -55,33 +55,32 @@ use crate::error::{Error, Result};
 /// moment it was accepted. See the module docs for why.
 struct CachedToken {
     value: String,
-    refresh_at: Instant,
-    expires_at: Instant,
+    /// `None` iff the [`Token`] it was built from had no expiry -- see
+    /// that type's field docs. Never compared against `Instant::now()` as
+    /// "due"; only `Some` deadlines can be.
+    refresh_at: Option<Instant>,
+    expires_at: Option<Instant>,
 }
 
 impl CachedToken {
     /// Converts a wire [`Token`]'s wall-clock deadlines into monotonic ones
     /// anchored to the instant it is accepted. Returns `None` if the token
-    /// violates its own contract (`refresh_at` after `expires_at`) rather
-    /// than accepting it and letting the violation surface later as a
-    /// token sent past its expiry.
+    /// violates its own contract (`refresh_at` after `expires_at`, when
+    /// both are present) rather than accepting it and letting the
+    /// violation surface later as a token sent past its expiry.
     fn accept(token: Token, wall_now: SystemTime) -> Option<Self> {
-        if token.refresh_at > token.expires_at {
-            return None;
+        if let (Some(refresh_at), Some(expires_at)) = (token.refresh_at, token.expires_at) {
+            if refresh_at > expires_at {
+                return None;
+            }
         }
         let anchor = Instant::now();
-        let until_refresh = token
-            .refresh_at
-            .duration_since(wall_now)
-            .unwrap_or_default();
-        let until_expiry = token
-            .expires_at
-            .duration_since(wall_now)
-            .unwrap_or_default();
+        let to_instant =
+            |deadline: SystemTime| anchor + deadline.duration_since(wall_now).unwrap_or_default();
         Some(Self {
             value: token.value,
-            refresh_at: anchor + until_refresh,
-            expires_at: anchor + until_expiry,
+            refresh_at: token.refresh_at.map(to_instant),
+            expires_at: token.expires_at.map(to_instant),
         })
     }
 }
@@ -103,7 +102,6 @@ pub(crate) struct OAuth {
 }
 
 impl OAuth {
-    #[allow(dead_code)]
     pub(crate) fn new(provider: Arc<dyn TokenProvider>) -> Self {
         Self {
             provider,
@@ -127,7 +125,7 @@ impl OAuth {
                     .into(),
             )
         })?;
-        if Instant::now() >= accepted.expires_at {
+        if matches!(accepted.expires_at, Some(deadline) if Instant::now() >= deadline) {
             return Err(Error::Internal(
                 "the token provider returned a token that was already expired".into(),
             ));
@@ -148,7 +146,10 @@ impl OAuth {
         let mut cached = self.cached.lock().await;
 
         let needs_refresh = match &*cached {
-            Some(token) => Instant::now() >= token.refresh_at || Instant::now() >= token.expires_at,
+            Some(token) => {
+                matches!(token.refresh_at, Some(deadline) if Instant::now() >= deadline)
+                    || matches!(token.expires_at, Some(deadline) if Instant::now() >= deadline)
+            }
             None => true,
         };
 
@@ -166,7 +167,7 @@ impl OAuth {
                 Err(mint_error) => {
                     let still_usable = matches!(
                         &*cached,
-                        Some(token) if Instant::now() < token.expires_at
+                        Some(token) if token.expires_at.is_none_or(|deadline| Instant::now() < deadline)
                     );
                     if !still_usable {
                         return Err(mint_error);
@@ -275,8 +276,43 @@ mod tests {
             tokio::task::yield_now().await;
             Ok(Token {
                 value: "ya29.demo-token".into(),
-                expires_at: self.expires_at,
-                refresh_at: self.refresh_at,
+                expires_at: Some(self.expires_at),
+                refresh_at: Some(self.refresh_at),
+            })
+        }
+    }
+
+    /// A [`TokenProvider`] that reports no expiry at all -- the shape
+    /// [`super::super::gcp::GcpTokenProvider`] would produce from a source
+    /// gcp_auth cannot report an expiry for. Counts calls the same way
+    /// [`CountingProvider`] does, so a test can assert a second `apply`
+    /// never re-mints: [`OAuth`] must never treat a `None` deadline as
+    /// due, on either `refresh_at` or `expires_at`.
+    struct NoExpiryProvider {
+        calls: AtomicUsize,
+    }
+
+    impl NoExpiryProvider {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TokenProvider for NoExpiryProvider {
+        async fn token(&self) -> Result<Token> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Ok(Token {
+                value: "ya29.demo-token".into(),
+                expires_at: None,
+                refresh_at: None,
             })
         }
     }
@@ -312,8 +348,8 @@ mod tests {
             }
             Ok(Token {
                 value: "ya29.demo-token".into(),
-                expires_at: self.expires_at,
-                refresh_at: self.refresh_at,
+                expires_at: Some(self.expires_at),
+                refresh_at: Some(self.refresh_at),
             })
         }
     }
@@ -334,15 +370,15 @@ mod tests {
             if call == 0 {
                 Ok(Token {
                     value: "ya29.demo-token".into(),
-                    expires_at: future(),
-                    refresh_at: due_refresh(),
+                    expires_at: Some(future()),
+                    refresh_at: Some(due_refresh()),
                 })
             } else {
                 let expired = past();
                 Ok(Token {
                     value: "ya29.stale-token".into(),
-                    expires_at: expired,
-                    refresh_at: expired,
+                    expires_at: Some(expired),
+                    refresh_at: Some(expired),
                 })
             }
         }
@@ -370,14 +406,14 @@ mod tests {
             if call == 0 {
                 Ok(Token {
                     value: "ya29.demo-token".into(),
-                    expires_at: future(),
-                    refresh_at: due_refresh(),
+                    expires_at: Some(future()),
+                    refresh_at: Some(due_refresh()),
                 })
             } else {
                 Ok(Token {
                     value: "ya29.bad\ntoken".into(),
-                    expires_at: future(),
-                    refresh_at: far_refresh(),
+                    expires_at: Some(future()),
+                    refresh_at: Some(far_refresh()),
                 })
             }
         }
@@ -405,6 +441,30 @@ mod tests {
         assert_eq!(provider.calls(), 1, "a live cache hit must not re-mint");
     }
 
+    /// A token whose source reports no expiry at all -- `refresh_at` and
+    /// `expires_at` both `None` -- is never treated as due for refresh and
+    /// never rejected as expired. This is the fail-open guarantee Vertex's
+    /// GcpTokenProvider relies on for a source gcp_auth cannot report an
+    /// expiry for: the gateway must not gate locally on an uncertain
+    /// deadline, and instead lets the provider's own 401 be the signal.
+    #[tokio::test]
+    async fn a_token_with_no_expiry_is_never_refreshed_or_treated_as_expired() {
+        let provider = Arc::new(NoExpiryProvider::new());
+        let auth = OAuth::new(provider.clone());
+
+        let first = auth.apply(request()).await.unwrap();
+        assert_eq!(first.headers()[AUTHORIZATION], "Bearer ya29.demo-token");
+
+        let second = auth.apply(request()).await.unwrap();
+        assert_eq!(second.headers()[AUTHORIZATION], "Bearer ya29.demo-token");
+
+        assert_eq!(
+            provider.calls(),
+            1,
+            "a token with no expiry must never be treated as due for refresh"
+        );
+    }
+
     /// A token past its own `refresh_at` is re-minted before it is
     /// applied — proactive, not reactive to actual expiry.
     #[tokio::test]
@@ -427,10 +487,10 @@ mod tests {
     fn token_new_scales_the_margin_to_a_short_lifetime() {
         let token = Token::new(
             "ya29.demo-token".into(),
-            SystemTime::now() + Duration::from_secs(60),
+            Some(SystemTime::now() + Duration::from_secs(60)),
         );
         assert!(
-            token.refresh_at > SystemTime::now(),
+            token.refresh_at.expect("a 60s token computes a refresh_at") > SystemTime::now(),
             "a 60s token must not already be due for refresh"
         );
     }
@@ -441,7 +501,7 @@ mod tests {
     #[test]
     fn token_new_on_an_already_past_expiry_never_sets_refresh_at_past_expiry() {
         let past = SystemTime::now() - Duration::from_secs(5);
-        let token = Token::new("ya29.demo-token".into(), past);
+        let token = Token::new("ya29.demo-token".into(), Some(past));
         assert!(token.refresh_at <= token.expires_at);
     }
 

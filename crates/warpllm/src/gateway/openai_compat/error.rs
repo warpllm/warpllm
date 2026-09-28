@@ -212,6 +212,15 @@ fn opinion(error: &Error) -> Opinion {
             Some("invalid_request_error"),
             Some("invalid_api_key"),
         ),
+        // Same status as MissingApiKey — no usable credential, before any
+        // request goes out — but its own wire code: OpenAI's `invalid_api_key`
+        // would misdescribe a failure that has no key to have gotten wrong,
+        // only a token mint that never happened.
+        Error::CredentialResolutionFailed { .. } => (
+            Is(401),
+            Some("invalid_request_error"),
+            Some("credential_resolution_failed"),
+        ),
         Error::Network { .. } => (
             NoResponse,
             Some("api_connection_error"),

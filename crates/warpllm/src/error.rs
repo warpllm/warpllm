@@ -41,6 +41,19 @@ pub enum Error {
         /// bindings receive has no field to put a variable name in.
         env_var: Option<&'static str>,
     },
+    /// A [`TokenProvider`](crate::auth::TokenProvider) — `gcp_auth` today —
+    /// failed to produce a token at all: no ADC, a bad service account
+    /// file, the metadata server unreachable. The request never reaches the
+    /// provider it was aimed at, so this is local, like
+    /// [`MissingApiKey`](Self::MissingApiKey) — but there is no environment
+    /// variable to name, since the credential comes from Application
+    /// Default Credentials rather than a secret sitting in the environment.
+    /// `message` carries whatever the `TokenProvider` reported, verbatim.
+    #[error("could not resolve credentials for {provider}: {message}")]
+    CredentialResolutionFailed {
+        provider: &'static str,
+        message: String,
+    },
     /// The routed provider is not one this client declared, so nothing routes
     /// to it here — whatever the roster says about it.
     ///
@@ -283,6 +296,7 @@ impl Error {
             Error::InvalidInput(_)
             | Error::InvalidModel { .. }
             | Error::MissingApiKey { .. }
+            | Error::CredentialResolutionFailed { .. }
             | Error::ProviderNotDeclared { .. }
             // Network and Decode name a provider but are NOT its failures:
             // one never reached it, the other means it answered with a
@@ -350,6 +364,7 @@ impl Error {
         match self {
             Error::InvalidInput(_) | Error::InvalidModel { .. } => "invalid_request",
             Error::MissingApiKey { .. } => "missing_api_key",
+            Error::CredentialResolutionFailed { .. } => "credential_resolution_failed",
             Error::ProviderNotDeclared { .. } => "provider_not_declared",
             Error::Network { .. } => "connection_error",
             Error::Decode { .. } => "decode_error",
@@ -548,6 +563,14 @@ mod tests {
                 "invalid_request_error",
             ),
             (
+                Error::CredentialResolutionFailed {
+                    provider: "vertex",
+                    message: "no ADC found".into(),
+                },
+                401,
+                "invalid_request_error",
+            ),
+            (
                 Error::ProviderNotDeclared {
                     provider: "deepseek",
                     requested: "deepseek/deepseek-v4-flash".into(),
@@ -605,6 +628,34 @@ mod tests {
     /// catch-all arm, so a variant left out of it does not fail to compile —
     /// it renders with a null status and nobody hears about it until a caller
     /// does.
+    /// A minted-token failure and a missing static key are both 401s, but
+    /// they are not the same failure: one has no `Authorization` header to
+    /// even attempt building, the other never had a token to have failed
+    /// minting. Distinct codes keep a caller from being told to set a
+    /// variable that Vertex (#25) never asked for.
+    #[test]
+    fn a_failed_token_mint_is_not_a_missing_key_on_the_wire() {
+        let unminted = wire(&Error::CredentialResolutionFailed {
+            provider: "vertex",
+            message: "no ADC found".into(),
+        });
+        let unauthenticated = wire(&Error::MissingApiKey {
+            provider: "openai",
+            env_var: Some("OPENAI_API_KEY"),
+        });
+
+        assert_eq!(unminted["status"], 401);
+        assert_eq!(unauthenticated["status"], 401);
+        assert_ne!(unminted["error"]["code"], unauthenticated["error"]["code"]);
+        // The TokenProvider's own report survives to the caller verbatim.
+        assert!(
+            unminted["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no ADC found")
+        );
+    }
+
     #[test]
     fn an_undeclared_provider_is_not_a_missing_key_on_the_wire() {
         let undeclared = wire(&Error::ProviderNotDeclared {

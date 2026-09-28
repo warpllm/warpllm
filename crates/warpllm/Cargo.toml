@@ -21,6 +21,7 @@ yaml_serde.workspace = true
 ts-rs = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 async-trait.workspace = true
+gcp_auth = "0.12"
 
 [features]
 # Adds schema/type metadata for the non-published workspace generator. It has

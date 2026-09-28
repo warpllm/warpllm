@@ -53,8 +53,16 @@ const MIN_REFRESH_MARGIN: Duration = Duration::from_secs(5);
 /// this crate, not just through [`Token::new`].
 pub(crate) struct Token {
     pub(crate) value: String,
-    pub(crate) expires_at: SystemTime,
-    pub(crate) refresh_at: SystemTime,
+    /// `None` means the source reports no expiry at all -- not "unknown",
+    /// a genuine claim that this token does not expire. [`super::OAuth`]
+    /// never gates locally on a `None` deadline; only the provider's own
+    /// 401 can retire a token minted this way. A source that is merely
+    /// unsure of its own expiry should not construct `None` -- it should
+    /// pick a conservative `Some`.
+    pub(crate) expires_at: Option<SystemTime>,
+    /// `None` exactly when `expires_at` is `None`: there is no lifetime to
+    /// scale a refresh margin against, and nothing else it could mean.
+    pub(crate) refresh_at: Option<SystemTime>,
 }
 
 impl Token {
@@ -67,11 +75,20 @@ impl Token {
     /// otherwise force; a provider whose token lives 2 seconds is, and
     /// this constructor does not pretend it can be safely cached instead.
     ///
+    /// `expires_at: None` skips the margin computation entirely and
+    /// returns a `Token` that is never locally gated -- see the field docs.
+    ///
     /// A provider that already knows its own refresh semantics (a metadata
     /// server's cache lifetime, a JWT's issued-at) should build [`Token`]
     /// directly with an explicit `refresh_at` instead.
-    #[allow(dead_code)]
-    pub(crate) fn new(value: String, expires_at: SystemTime) -> Self {
+    pub(crate) fn new(value: String, expires_at: Option<SystemTime>) -> Self {
+        let Some(expires_at) = expires_at else {
+            return Self {
+                value,
+                expires_at: None,
+                refresh_at: None,
+            };
+        };
         let now = SystemTime::now();
         let lifetime = expires_at.duration_since(now).unwrap_or(Duration::ZERO);
         let margin = DEFAULT_REFRESH_MARGIN
@@ -81,8 +98,8 @@ impl Token {
         let refresh_at = expires_at.checked_sub(margin).unwrap_or(now);
         Self {
             value,
-            expires_at,
-            refresh_at,
+            expires_at: Some(expires_at),
+            refresh_at: Some(refresh_at),
         }
     }
 }

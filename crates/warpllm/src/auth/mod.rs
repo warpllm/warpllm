@@ -36,6 +36,7 @@
 //! The header value is additionally marked sensitive, so the secret does not
 //! survive into [`reqwest::Request`]'s own `Debug` either.
 
+mod gcp;
 mod header;
 mod oauth;
 mod token_provider;
@@ -45,6 +46,7 @@ pub(crate) mod testing;
 
 use crate::error::Result;
 
+pub(crate) use gcp::GcpTokenProvider;
 pub(crate) use header::Header;
 pub(crate) use oauth::OAuth;
 
@@ -73,11 +75,11 @@ pub(crate) enum Authenticator {
     /// prefix, so they are one variant rather than two.
     Header(Header),
     // SigV4 { .. }        <- #24, in `sigv4.rs`
-    /// Reads as dead outside tests until token minting from ADC exists —
-    /// tracked as a follow-up to #25. The variant and its `apply` path are
-    /// real and tested; only the constructor that would reach them from a
-    /// live request is missing.
-    #[allow(dead_code)]
+    /// Constructed by [`crate::credentials::Credentials::resolve`] for a
+    /// provider whose roster entry declares `auth: oauth` -- Vertex (#25)
+    /// is the first. Wraps a [`super::gcp::GcpTokenProvider`] today; any
+    /// future ADC-shaped source shares this same variant rather than
+    /// growing its own.
     OAuth(OAuth),
 }
 

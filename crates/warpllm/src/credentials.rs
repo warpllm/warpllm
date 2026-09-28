@@ -27,8 +27,9 @@
 //! not picked up, and a rotated key needs a new client.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
-use crate::auth::Authenticator;
+use crate::auth::{Authenticator, GcpTokenProvider, OAuth};
 use crate::config::ProviderConfig;
 use crate::registry::{self, ProviderSpec};
 
@@ -79,10 +80,7 @@ impl Credentials {
         let keys = match declared {
             None => registry::providers(registry)
                 .filter_map(|provider| {
-                    Some((
-                        provider.name(),
-                        Self::scheme(provider, Self::key_for(provider, None)?),
-                    ))
+                    Some((provider.name(), Self::authenticator(provider, None)?))
                 })
                 .collect(),
             Some(declared) => declared
@@ -90,10 +88,7 @@ impl Credentials {
                 .filter_map(|(name, entry)| {
                     let provider = registry::provider(registry, name)
                         .expect("Client::new refuses a declaration the roster does not hold");
-                    Some((
-                        provider.name(),
-                        Self::scheme(provider, Self::key_for(provider, Some(entry))?),
-                    ))
+                    Some((provider.name(), Self::authenticator(provider, Some(entry))?))
                 })
                 .collect(),
         };
@@ -109,6 +104,35 @@ impl Credentials {
             tracing::info!(providers = ?credentials.names(), "providers available");
         }
         credentials
+    }
+
+    /// This provider's [`Authenticator`], or `None` when no source can
+    /// produce one.
+    ///
+    /// Branches on [`ProviderSpec::oauth`] before anything else: a provider
+    /// declaring `auth: oauth` is never resolved through [`Self::key_for`]
+    /// at all, since there is no environment variable or inline key to read
+    /// -- the credential comes from Application Default Credentials, minted
+    /// on first use. Unlike [`Self::key_for`], this branch cannot return
+    /// `None`: an `auth: oauth` provider is always CONSTRUCTIBLE here, even
+    /// on a machine with no usable ADC chain, because the failure belongs to
+    /// the request that first calls [`OAuth::apply`], not to building the
+    /// client. That failure surfaces then as
+    /// [`crate::error::Error::CredentialResolutionFailed`], which names the
+    /// provider and carries whatever the token provider reported.
+    ///
+    /// Every other provider falls through to the existing key-and-scheme
+    /// path unchanged.
+    fn authenticator(
+        provider: &ProviderSpec,
+        declared: Option<&ProviderConfig>,
+    ) -> Option<Authenticator> {
+        if provider.oauth() {
+            return Some(Authenticator::OAuth(OAuth::new(Arc::new(
+                GcpTokenProvider::new(),
+            ))));
+        }
+        Some(Self::scheme(provider, Self::key_for(provider, declared)?))
     }
 
     /// How this provider's secret goes on the wire.

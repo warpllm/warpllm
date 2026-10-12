@@ -2221,7 +2221,7 @@ dependencies = [
 
 [[package]]
 name = "warpllm"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "gcp_auth",
@@ -2243,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "warpllm-codegen"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "schemars",
  "serde_json",
@@ -2253,7 +2253,7 @@ dependencies = [
 
 [[package]]
 name = "warpllm-node"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "napi",
  "napi-build",
@@ -2264,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "warpllm-python"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
@@ -2274,7 +2274,7 @@ dependencies = [
 
 [[package]]
 name = "warpllm-server"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "axum",
  "clap",

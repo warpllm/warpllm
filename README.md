@@ -4,6 +4,7 @@
 
 A warp-speed, robust AI gateway written for rust, node, and python applications - built for planet scale by the community.
 
+[![Docs](https://img.shields.io/badge/Docs-warpllm.mintlify.site-0D9373?style=for-the-badge&logo=readthedocs&logoColor=white)](https://warpllm.mintlify.site)
 [![Discord](https://img.shields.io/badge/Discord-warpllm-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/payU7Vzuq5)
 [![Reddit](https://img.shields.io/badge/Reddit-r%2Fwarpllm-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/r/warpllm/)
 
@@ -214,7 +215,7 @@ This project is to lay out the most resilient open source productionization laye
 ## Status
 
 > [!IMPORTANT]
-> The published packages are **0.6.0**, which reaches Claude over Anthropic's
+> The published packages are **0.6.1**, which reaches Claude over Anthropic's
 > own protocol and lets one request name several models to fail over across.
 > It is **breaking in all three languages**: the client-wide `base_url` option
 > moved under each provider — `providers={"openai": {"base_url": ...}}` — and
@@ -224,7 +225,7 @@ This project is to lay out the most resilient open source productionization laye
 > The OpenAI-compatible HTTP gateway has landed on `main` but is **not
 > released yet**.
 
-| | Released (0.6.0) | On `main` |
+| | Released (0.6.1) | On `main` |
 | --- | --- | --- |
 | OpenAI chat completions, non-streaming | Yes | Yes |
 | `provider/model` routing strings | Provider registry | Provider registry |

@@ -8,6 +8,18 @@ Versions follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a breaking change bumps the MINOR number: `0.1.x` and `0.2.x` are
 incompatible, and `^0.1` will not upgrade you into one.
 
+## [0.6.1] - 2026-10-13
+
+Nothing in any of the three packages changed. The README now links the hosted
+documentation at [warpllm.mintlify.site](https://warpllm.mintlify.site), and
+this release carries that README to the crates.io, PyPI, and npm pages, which
+only refresh on publish. Read the 0.6.0 notes below for what actually landed;
+upgrading from `0.5.x` is the breaking step those notes describe.
+
+### Changed
+
+- The README links the documentation site.
+
 ## [0.6.0] - 2026-10-12
 
 Claude, reached over its own protocol, and a request that can name more than one
@@ -718,6 +730,7 @@ environment is not supported. The OpenAI-compatible HTTP gateway
 Early SDK releases serving OpenAI chat completions only, before the provider
 registry existed. See the [release tags](https://github.com/warpllm/warpllm/tags).
 
+[0.6.1]: https://github.com/warpllm/warpllm/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/warpllm/warpllm/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/warpllm/warpllm/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/warpllm/warpllm/compare/v0.3.1...v0.4.0

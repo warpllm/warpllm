@@ -8,6 +8,97 @@ Versions follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a breaking change bumps the MINOR number: `0.1.x` and `0.2.x` are
 incompatible, and `^0.1` will not upgrade you into one.
 
+## [0.6.0] - 2026-10-12
+
+Claude, reached over its own protocol, and a request that can name more than one
+model. Both are additive. What makes this a MINOR release is the client's
+`base_url` option, which moved under each provider — see "Changed — breaking".
+
+**Claude on `api.anthropic.com`.** `anthropic/claude-*` models route to
+Anthropic's own `/messages`, the first provider on the roster that does not
+speak chat completions. You still write an OpenAI-shaped request and read an
+OpenAI-shaped reply; warpllm translates both ways, streaming included, and
+sends the key as `x-api-key` from `ANTHROPIC_API_KEY`. A field Anthropic cannot
+express — `n: 2`, a `seed` — is refused with `InvalidInput` naming it, rather
+than dropped, because on a translated route the provider never sees it and so
+cannot reject it. Claude's thinking comes back in `reasoning_content`; its
+signature does not, so a tool loop with thinking on stops at the tool-result
+turn, and warpllm refuses that turn itself. Both limits are written up in
+[Model routing](https://github.com/warpllm/warpllm/blob/main/docs/concepts/model-routing.mdx).
+
+**Per-request failover.** A request may carry `models: [...]` instead of
+`model`: up to 8 candidates, tried in order, under one deadline — the client's
+`timeout_secs` — for the whole chain. A failure scoped to one provider (network,
+rate limit, overload, a 5xx, model not found, and a rejected or exhausted key)
+moves on to the next candidate; one about the request itself stops there. A
+stream fails over until its first chunk arrives, and is committed after that.
+A request with a single `model` behaves exactly as before, errors included.
+
+### Added
+
+- The `anthropic` provider and its roster: Claude Fable 5 and 5.1, Opus 4.5
+  through 5.5, Sonnet 4.5 through 5.5, Haiku 4.5 and 5.5, on both
+  `anthropic_messages` and `anthropic_messages_stream`.
+- `models` on a chat-completions request, mutually exclusive with `model`.
+  Duplicates are dropped; an empty list is an error rather than "no failover".
+  `BalancedClient` rejects a request carrying one rather than ignoring it.
+- `Error::CandidatesExhausted` (`candidates_exhausted`, a fixed 503) carries
+  every attempt and the error each produced. `Error::DeadlineExceeded`
+  (`deadline_exceeded`, 504) is the chain running out of time. In Python and
+  Node both arrive as the generic error with that code.
+- `ProviderConfig::base_url` — `providers={"openai": {"base_url": ...}}` in
+  Python, `{ providers: { openai: { baseUrl } } }` in Node — overriding one
+  provider's address. It replaces the client-wide option below.
+- `auth: oauth` on a roster entry, with `Error::CredentialResolutionFailed`
+  (`credential_resolution_failed`). The credential is a Google Cloud token from
+  Application Default Credentials, minted on first use. This is groundwork for
+  Vertex (#25): no shipped provider uses it yet, and it is undocumented until
+  one does.
+- Roster: `openai/gpt-6-astra`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6.1-sol`;
+  `deepseek/deepseek-flash`; Mistral's current dated models
+  (`codestral-2508`, `ministral-3b/8b/14b-2512`, `mistral-large-2512`,
+  `mistral-small-2603`); thirteen OpenCode Zen models; and OpenRouter's
+  `anthropic/claude-opus-5.5`, `anthropic/claude-sonnet-5.5`,
+  `openai/gpt-6.1-sol` and `google/gemini-3.1-pro-preview`.
+- `deprecation_date` on the three registered models with a retirement
+  announced: `anthropic/claude-sonnet-4-5` (2026-11-30), `openai/gpt-5.1` and
+  `openai/gpt-5.4-nano` (both 2027-04-01). They keep routing until then.
+
+### Fixed
+
+- **A `developer` message was sent as a user turn** to any protocol that
+  renders it fresh. It is a system instruction, and now arrives as one.
+- **`max_completion_tokens` was ignored off OpenAI.** It is the spelling
+  OpenAI's newer models require, so a caller carrying it to another protocol
+  asked for 16 tokens and got the roster's ceiling. It now caps the reply, and
+  wins over `max_tokens` when both are set, as OpenAI's own order has it.
+- **`top_k` and `parallel_tool_calls` were silently lost** on a translated
+  route. A caller who forbade parallel tool calls got them anyway.
+
+### Changed — breaking
+
+- **The client-wide `base_url` is gone**, in all three languages: Rust's
+  `ClientConfig::base_url`, Python's `WarpLLM(base_url=...)`, and Node's
+  `baseUrl`. One address for every provider was only ever right for a client
+  with one provider. Move it under the provider it was meant for:
+
+  ```python
+  # 0.5.x
+  WarpLLM(base_url="http://localhost:8080/v1")
+  # 0.6.0
+  WarpLLM(providers={"openai": {"base_url": "http://localhost:8080/v1"}})
+  ```
+
+  Declaring `providers` also narrows the client to the providers it names, as
+  it did in 0.4.0. Name every provider the client should still reach.
+- **Eight roster names were removed**, each one already failing every request
+  upstream: Mistral's original four (`codestral-2501`, `ministral-8b-2410`,
+  `mistral-large-2411`, `pixtral-large-2411`, all retired by Mistral), OpenCode
+  Zen's `deepseek-v4-flash-free`, `hy3-free` and `laguna-s-2.1-free` (withdrawn
+  from Zen), and OpenRouter's cloaked `stealth/ox-alpha` (no endpoints left).
+  Naming one is now an unregistered-model error before any request, rather than
+  an upstream failure after one. Replacements are in the list above.
+
 ## [0.5.0] - 2026-09-02
 
 Point warpllm at your own roster. Self-hosted OpenAI-compatible servers — vLLM,
@@ -627,6 +718,7 @@ environment is not supported. The OpenAI-compatible HTTP gateway
 Early SDK releases serving OpenAI chat completions only, before the provider
 registry existed. See the [release tags](https://github.com/warpllm/warpllm/tags).
 
+[0.6.0]: https://github.com/warpllm/warpllm/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/warpllm/warpllm/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/warpllm/warpllm/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/warpllm/warpllm/compare/v0.3.0...v0.3.1

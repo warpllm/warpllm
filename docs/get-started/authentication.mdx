@@ -130,7 +130,7 @@ use warpllm::{Client, ClientConfig, ProviderConfig};
 let client = Client::new(ClientConfig {
     providers: Some(BTreeMap::from([
         ("openai".into(), ProviderConfig::default()),
-        ("deepseek".into(), ProviderConfig { api_key: Some(secret) }),
+        ("deepseek".into(), ProviderConfig { api_key: Some(secret), ..Default::default() }),
     ])),
     ..Default::default()
 })?;
@@ -163,9 +163,11 @@ bindings' boundary, where `os.environ.get("OPENAI_API_KEY", "")` would
 otherwise disable a provider whose key is sitting right there.
 
 A declaration **selects** from the roster; it does not extend it. There is no
-`base_url` or `models` to write here — adding a provider warpllm does not ship
-is a registry change, not a configuration one, and a name the roster does not
-hold fails when the client is built.
+`models` to write here — adding a provider warpllm does not ship is a registry
+change, not a configuration one, and a name the roster does not hold fails when
+the client is built. An entry can also carry a `base_url` (`baseUrl` in
+TypeScript) that points that provider at a proxy or test double; see the
+[SDK reference](/sdk/reference#declaring-providers).
 
 <Note>
   Inline keys never reach a log. `ProviderConfig`'s `Debug` prints

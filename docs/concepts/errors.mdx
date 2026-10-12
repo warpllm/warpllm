@@ -166,6 +166,8 @@ envelope](#the-gateway-envelope) and nowhere else.
 | `StreamStalled` | `stream_stalled` | 504 | `stream_stalled` | The stream went silent past the read timeout |
 | `NotImplemented` | `not_implemented` | 501 | `not_implemented` | A surface warpllm does not serve yet |
 | `Internal` | `internal_error` | 500 | `internal_error` | warpllm could not set itself up |
+| `CandidatesExhausted` | `candidates_exhausted` | 503 | `candidates_exhausted` | Every model in a `models` list failed; each attempt rides in the body |
+| `DeadlineExceeded` | `deadline_exceeded` | 504 | `deadline_exceeded` | A `models` list ran out of time before a candidate answered |
 
 ### The provider's failures, normalized (`origin: provider`)
 
@@ -208,11 +210,11 @@ The taxonomy exists to make that possible: every failure below says whether
 waiting can fix it.
 
 <Note>
-  A retry loop and a fallback chain are planned, not ruled out — an untested
-  retry policy shipped as a public contract is worse than none, so they land
-  once they are worked out rather than early. Failover is tracked in
-  [issue #27](https://github.com/warpllm/warpllm/issues/27). Weighted load balancing has already landed on
-  `main`; see
+  A retry loop is planned, not ruled out — an untested retry policy shipped as
+  a public contract is worse than none, so it lands once it is worked out
+  rather than early. Failing over to a DIFFERENT model has shipped: name them
+  in `models`, and warpllm moves past the failures this table marks as
+  provider-scoped. See
   [Model routing](/concepts/model-routing#spreading-load-retrying-and-failing-over).
 </Note>
 

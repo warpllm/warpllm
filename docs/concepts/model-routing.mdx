@@ -230,12 +230,38 @@ the wire format a model speaks.
 
 ## Spreading load, retrying, and failing over
 
-A plain `Client` routes a request to exactly one model, and a failure comes
-back to you to decide about. There is no retry loop and no fallback chain yet,
-so the error taxonomy is what lets you write your own policy in the meantime —
-see [Errors](/concepts/errors).
+A request naming one `model` goes to exactly that model, and a failure comes
+back to you to decide about. There is no retry loop yet, so the error taxonomy
+is what lets you write your own policy — see [Errors](/concepts/errors).
 
-**Load balancing has landed on `main`** and is unreleased. `BalancedClient`
+**Failover** is the other shape: name an ordered list in `models` instead of
+`model`, and warpllm tries each in turn until one answers.
+
+```python
+client.chat_completions({
+    "models": ["anthropic/claude-sonnet-5-5", "openai/gpt-6-sol"],
+    "messages": [{"role": "user", "content": "Hello"}],
+})
+```
+
+- Up to 8 candidates, each one validated before anything is sent. Duplicates
+  are dropped, and an empty list is an error. `model` and `models` are
+  mutually exclusive.
+- A failure scoped to one provider moves on: network, rate limit, overload, a
+  5xx, model not found, and a rejected or exhausted key — a dead key on one
+  provider should not block a healthy one on another. A failure about the
+  request itself, such as `InvalidInput`, stops the chain. So does `Decode`:
+  the provider already answered 200 and billed, and retrying would buy a second
+  completion.
+- The whole chain shares one deadline, the client's timeout. Running out is
+  `DeadlineExceeded` (504); every candidate failing is `CandidatesExhausted`
+  (503), whose body lists each attempt and its error.
+- A stream fails over until its first chunk arrives. After that it is
+  committed, and a failure is the stream's to report.
+- `BalancedClient` refuses a request carrying `models`, rather than balancing
+  over one list and ignoring the other.
+
+**Load balancing** shipped in 0.5.0. `BalancedClient`
 spreads requests across a weighted set of `provider/model` pairs using smooth
 weighted round-robin, rewriting the request's `model` to the candidate it
 picked — so the name you pass acts as a group, and each candidate is a concrete
@@ -255,7 +281,7 @@ The candidate set is fixed at construction, and each selected candidate still
 goes through the same admission checks a direct call does. It is Rust-only for
 now — neither binding exposes it, and the gateway has no flag for it.
 
-Failover is tracked in [issue #27](https://github.com/warpllm/warpllm/issues/27), load balancing in
+Load balancing is tracked in
 [issue #28](https://github.com/warpllm/warpllm/issues/28).
 
 ## Next

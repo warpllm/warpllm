@@ -54,7 +54,6 @@ not reimplementations — so behaviour cannot drift between them.
     from warpllm import WarpLLM
 
     client = WarpLLM(
-        base_url=None,             # override every provider's base URL
         timeout=None,              # seconds; total deadline. Default 600
         stream_read_timeout=None,  # seconds; longest silence on a stream
         providers=None,            # narrow this client to named providers
@@ -63,8 +62,8 @@ not reimplementations — so behaviour cannot drift between them.
     )
     ```
 
-    All five parameters are keyword-only and optional. `AsyncWarpLLM` takes the
-    same five.
+    All four parameters are keyword-only and optional. `AsyncWarpLLM` takes the
+    same four.
   </Tab>
 
   <Tab title="TypeScript">
@@ -72,7 +71,6 @@ not reimplementations — so behaviour cannot drift between them.
     import { WarpLLM } from '@warpllm/warpllm'
 
     const client = new WarpLLM({
-      baseUrl: undefined,           // override every provider's base URL
       timeout: undefined,           // SECONDS; total deadline. Default 600
       streamReadTimeout: undefined, // SECONDS; longest silence on a stream
       providers: undefined,         // narrow this client to named providers
@@ -97,7 +95,6 @@ not reimplementations — so behaviour cannot drift between them.
 
     ```rust
     pub struct ClientConfig {
-        pub base_url: Option<String>,
         pub specs_path: Option<PathBuf>,
         pub timeout_secs: Option<u64>,
         pub stream_read_timeout_secs: Option<u64>,
@@ -106,10 +103,11 @@ not reimplementations — so behaviour cannot drift between them.
     ```
 
     <Note>
-      `ClientConfig` is `Default`, and it has gained a field in each of the
-      last two releases — `providers` in 0.4.0, `specs_path` in 0.5.0 — so an
-      exhaustive struct literal from either no longer compiles. Add the missing
-      field as `None`, or use `..Default::default()` and stop having to.
+      `ClientConfig` is `Default`, and its fields have changed in each of the
+      last three releases — `providers` added in 0.4.0, `specs_path` in 0.5.0,
+      `base_url` moved into `ProviderConfig` in 0.6.0 — so an exhaustive struct
+      literal from any of them no longer compiles. Use `..Default::default()`
+      and stop having to fix it.
     </Note>
   </Tab>
 </Tabs>
@@ -128,7 +126,6 @@ exist is valid, and each request then says which variable it wanted.
 
 | Setting | Python | TypeScript | Rust | Default |
 | --- | --- | --- | --- | --- |
-| Base URL override | `base_url` | `baseUrl` | `base_url` | Each provider's own |
 | Total request deadline | `timeout` | `timeout` | `timeout_secs` | 600 seconds |
 | Longest silence on a stream | `stream_read_timeout` | `streamReadTimeout` | `stream_read_timeout_secs` | Unbounded |
 | Providers this client serves | `providers` | `providers` | `providers` | The whole roster |
@@ -136,9 +133,10 @@ exist is valid, and each request then says which variable it wanted.
 All timeouts are seconds, in every language. See [Timeouts](/concepts/timeouts).
 
 <Note>
-  `base_url` overrides the routed provider's base URL — a corporate proxy, or a
-  test double. It applies to **every** provider, so a client that sets it
-  should route to one.
+  There is no client-wide base URL. To point a provider somewhere else — a
+  corporate proxy, or a test double — set `base_url` on that provider's entry
+  under [Declaring providers](#declaring-providers). It affects that provider
+  alone.
 </Note>
 
 ### Declaring providers
@@ -157,7 +155,14 @@ environment variable. Declaring narrows both at once.
     })
     ```
 
-    `ProviderOptions` is a `TypedDict` with one optional `api_key` field.
+    `ProviderOptions` is a `TypedDict` with two optional fields, `api_key` and
+    `base_url`. To point a provider elsewhere:
+
+    ```python
+    client = WarpLLM(providers={
+        "openai": {"base_url": "http://localhost:9000/v1"},
+    })
+    ```
   </Tab>
 
   <Tab title="TypeScript">
@@ -172,7 +177,14 @@ environment variable. Declaring narrows both at once.
     })
     ```
 
-    `ProviderOptions` is exported as a type, with one optional `apiKey` field.
+    `ProviderOptions` is exported as a type, with two optional fields, `apiKey`
+    and `baseUrl`. To point a provider elsewhere:
+
+    ```ts
+    const client = new WarpLLM({
+      providers: { openai: { baseUrl: 'http://localhost:9000/v1' } },
+    })
+    ```
   </Tab>
 
   <Tab title="Rust">
@@ -184,7 +196,7 @@ environment variable. Declaring narrows both at once.
     let client = Client::new(ClientConfig {
         providers: Some(BTreeMap::from([
             ("openai".into(), ProviderConfig::default()),
-            ("deepseek".into(), ProviderConfig { api_key: Some(key) }),
+            ("deepseek".into(), ProviderConfig { api_key: Some(key), ..Default::default() }),
         ])),
         ..Default::default()
     })?;
@@ -192,8 +204,18 @@ environment variable. Declaring narrows both at once.
 
     `ProviderConfig`'s `Debug` prints `<redacted>` rather than an inline key, so
     a `tracing::debug!(?config)` in caller code cannot leak one.
+
+    To point a provider elsewhere, set its `base_url`:
+
+    ```rust
+    ProviderConfig { base_url: Some("http://localhost:9000/v1".into()), ..Default::default() }
+    ```
   </Tab>
 </Tabs>
+
+An entry's `base_url` overrides that provider's address — a proxy, or a test
+double — and wins over the roster's own. It is per-provider: it never touches
+any other.
 
 It narrows two things:
 
@@ -713,7 +735,7 @@ provider omitted from one it sent as `null`.
     ```python
     import warpllm
 
-    warpllm.__version__   # "0.5.0"
+    warpllm.__version__   # "0.6.0"
     warpllm.version()     # the same string, from the native binary
     ```
   </Tab>
@@ -722,13 +744,13 @@ provider omitted from one it sent as `null`.
     ```ts
     import { version } from '@warpllm/warpllm'
 
-    console.log(version()) // "0.5.0"
+    console.log(version()) // "0.6.0"
     ```
   </Tab>
 
   <Tab title="Rust">
     ```rust
-    println!("{}", warpllm::version()); // "0.5.0"
+    println!("{}", warpllm::version()); // "0.6.0"
     ```
 
     warpllm emits through [`tracing`](https://docs.rs/tracing) and installs no

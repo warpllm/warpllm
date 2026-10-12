@@ -46,7 +46,7 @@ of it.
 
 ## What ships today
 
-The published packages are **0.5.0**. warpllm is early, and this table is the
+The published packages are **0.6.0**. warpllm is early, and this table is the
 honest version of what you can build on.
 
 | Capability | Status |
@@ -60,8 +60,9 @@ honest version of what you can build on.
 | Bringing your own roster file | Released |
 | Weighted load balancing (Rust only) | Released |
 | OpenAI-compatible HTTP gateway | On `main`, unreleased |
-| Claude direct on `api.anthropic.com` | On `main`, unreleased |
-| Failover, retries, caching, metrics | Planned |
+| Claude direct on `api.anthropic.com` | Released |
+| Per-request failover across models | Released |
+| Retries, caching, metrics | Planned |
 
 <Note>
   Claude is the first model warpllm reaches over a protocol that is **not**
@@ -73,12 +74,12 @@ honest version of what you can build on.
 </Note>
 
 <Info>
-  0.5.0 is **source-breaking for Rust only**: `ClientConfig` gained a
-  `specs_path` field, so an exhaustive struct literal no longer compiles — add
-  `specs_path: None`, or switch to `..Default::default()`. Python and
-  TypeScript are purely additive. Read the
+  0.6.0 is **breaking in all three languages**: the client-wide `base_url`
+  option moved under each provider — see
+  [Declaring providers](/sdk/reference#declaring-providers) — and eight retired model names left
+  the roster. Read the
   [changelog](https://github.com/warpllm/warpllm/blob/main/CHANGELOG.md) before
-  upgrading from `0.4.x`.
+  upgrading from `0.5.x`.
 </Info>
 
 ## Design decisions worth knowing up front

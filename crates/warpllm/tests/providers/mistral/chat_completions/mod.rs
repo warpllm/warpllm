@@ -21,15 +21,15 @@ fn mistral_happy_path() {
             .await;
 
         let completion = client_for(&server)
-            .chat_completions(request("mistral/mistral-large-2411"))
+            .chat_completions(request("mistral/mistral-large-2512"))
             .await
             .unwrap();
 
-        assert_eq!(completion.model, "mistral/mistral-large-2411");
+        assert_eq!(completion.model, "mistral/mistral-large-2512");
 
         let sent: serde_json::Value =
             serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
-        assert_eq!(sent["model"], "mistral-large-2411");
+        assert_eq!(sent["model"], "mistral-large-2512");
     });
 }
 
@@ -46,7 +46,7 @@ fn mistral_forwards_params_for_the_provider_to_judge() {
             .mount(&server)
             .await;
 
-        let mut req = request("mistral/mistral-large-2411");
+        let mut req = request("mistral/mistral-large-2512");
         req.temperature = Some(Some(0.5));
         req.unknown_fields.insert("safe_prompt".into(), json!(true));
         client_for(&server).chat_completions(req).await.unwrap();

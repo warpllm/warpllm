@@ -148,6 +148,23 @@ fn the_roster_supplies_the_max_tokens_anthropic_requires() {
     });
 }
 
+/// The newest Opus routes like the rest of the roster: dateless, so the key's
+/// last segment goes on the wire, and its 128k ceiling is what fills the
+/// `max_tokens` Anthropic requires.
+#[test]
+fn claude_opus_5_5_routes_with_its_roster_ceiling() {
+    with_anthropic_key(async {
+        let (sent, got) = exchange(
+            request("anthropic/claude-opus-5-5"),
+            anthropic_message_body(),
+        )
+        .await;
+        assert_eq!(sent["model"], "claude-opus-5-5");
+        assert_eq!(sent["max_tokens"], 128_000);
+        assert_eq!(got["model"], "anthropic/claude-opus-5-5");
+    });
+}
+
 /// A `developer` message is a SYSTEM instruction, and Anthropic's system
 /// instruction is a top-level field rather than a turn.
 ///

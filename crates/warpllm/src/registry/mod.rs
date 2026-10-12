@@ -364,25 +364,32 @@ mod tests {
             keys(&registry),
             vec![
                 "anthropic/claude-fable-5",
+                "anthropic/claude-fable-5-1",
                 "anthropic/claude-haiku-4-5",
+                "anthropic/claude-haiku-5-5",
                 "anthropic/claude-opus-4-5",
                 "anthropic/claude-opus-4-6",
                 "anthropic/claude-opus-4-7",
                 "anthropic/claude-opus-4-8",
                 "anthropic/claude-opus-5",
+                "anthropic/claude-opus-5-5",
                 "anthropic/claude-sonnet-4-5",
                 "anthropic/claude-sonnet-4-6",
                 "anthropic/claude-sonnet-5",
+                "anthropic/claude-sonnet-5-5",
+                "deepseek/deepseek-flash",
                 "deepseek/deepseek-v4-flash",
                 "deepseek/deepseek-v4-pro",
                 "kimi/kimi-k2.6",
                 "kimi/kimi-k2.7-code",
                 "kimi/kimi-k2.7-code-highspeed",
                 "kimi/kimi-k3",
-                "mistral/codestral-2501",
-                "mistral/ministral-8b-2410",
-                "mistral/mistral-large-2411",
-                "mistral/pixtral-large-2411",
+                "mistral/codestral-2508",
+                "mistral/ministral-14b-2512",
+                "mistral/ministral-3b-2512",
+                "mistral/ministral-8b-2512",
+                "mistral/mistral-large-2512",
+                "mistral/mistral-small-2603",
                 "openai/gpt-4.1",
                 "openai/gpt-4.1-mini",
                 "openai/gpt-4o",
@@ -401,32 +408,48 @@ mod tests {
                 "openai/gpt-5.6-sol",
                 "openai/gpt-5.6-terra",
                 "openai/gpt-6-astra",
+                "openai/gpt-6-luna",
+                "openai/gpt-6-sol",
+                "openai/gpt-6.1-sol",
                 "openai/o3",
                 "opencode/big-pickle",
                 "opencode/deepseek-v4-flash",
-                "opencode/deepseek-v4-flash-free",
+                "opencode/deepseek-v4-flash-vision-exp",
                 "opencode/deepseek-v4-pro",
+                "opencode/deepseek-v4.1-flash",
+                "opencode/exo-free",
                 "opencode/glm-5.1",
                 "opencode/glm-5.2",
-                "opencode/hy3-free",
+                "opencode/glm-5.3",
+                "opencode/glm-5.3-flash",
                 "opencode/kimi-k2.6",
                 "opencode/kimi-k2.7-code",
                 "opencode/kimi-k3",
-                "opencode/laguna-s-2.1-free",
+                "opencode/ling-3.0-flash-fin-free",
+                "opencode/ling-3.1-flash-free",
+                "opencode/longcat-2.5-preview-free",
                 "opencode/mimo-v2.5-free",
+                "opencode/mimo-v2.6-flash-free",
                 "opencode/minimax-m2.7",
                 "opencode/minimax-m3",
+                "opencode/mistral-large-4",
                 "opencode/nemotron-3-ultra-free",
                 "opencode/nemotron-3.5-lightning-free",
+                "opencode/qwen3.8-max",
+                "opencode/space-bunny-free",
+                "opencode/step-5-preview-free",
                 "openrouter/anthropic/claude-opus-4",
+                "openrouter/anthropic/claude-opus-5.5",
                 "openrouter/anthropic/claude-sonnet-4",
+                "openrouter/anthropic/claude-sonnet-5.5",
                 "openrouter/auto",
                 "openrouter/google/gemini-2.5-pro",
+                "openrouter/google/gemini-3.1-pro-preview",
                 "openrouter/moonshotai/kimi-k2.6",
                 "openrouter/moonshotai/kimi-k2.7-code",
                 "openrouter/moonshotai/kimi-k3",
                 "openrouter/openai/gpt-5.6",
-                "openrouter/stealth/ox-alpha",
+                "openrouter/openai/gpt-6.1-sol",
                 "openrouter/~deepseek/deepseek-v4-flash-latest",
             ]
         );
@@ -457,6 +480,21 @@ mod tests {
         assert_eq!(provider.env_api_key(), Some("OPENROUTER_API_KEY"));
         assert!(model.supports_api(Api::OpenAiCompatChatCompletions));
         assert_eq!(model.model(), "anthropic/claude-sonnet-4");
+    }
+
+    /// The shipped roster's announced retirements, as each provider's
+    /// deprecations page states them. The entries still resolve: the date is
+    /// recorded, never acted on.
+    #[test]
+    fn shipped_deprecations_carry_their_retirement_dates() {
+        for (key, date) in [
+            ("anthropic/claude-sonnet-4-5", "2026-11-30"),
+            ("openai/gpt-5.1", "2027-04-01"),
+            ("openai/gpt-5.4-nano", "2027-04-01"),
+        ] {
+            let (_, model) = fetch_model(key).unwrap();
+            assert_eq!(model.deprecation_date(), Some(date), "{key}");
+        }
     }
 
     /// Every provider the roster holds is reachable by its bare name, and
@@ -640,10 +678,17 @@ mod tests {
         // `/zen/v1/messages`: Claude and Qwen.
         // `/zen/v1/models/<id>`: Gemini.
         let elsewhere = ["gpt-", "grok-", "muse-", "claude-", "qwen", "gemini-"];
+        // Named one by one, each checked against the endpoint column. Qwen3.8
+        // Max is the one Qwen Zen serves at `/zen/v1/chat/completions`; every
+        // other Qwen there is still on `/messages` (checked 2026-10-12).
+        let exceptions = ["qwen3.8-max"];
         for key in REGISTRY.models.keys() {
             let Some(name) = key.strip_prefix("opencode/") else {
                 continue;
             };
+            if exceptions.contains(&name) {
+                continue;
+            }
             for prefix in elsewhere {
                 assert!(
                     !name.starts_with(prefix),

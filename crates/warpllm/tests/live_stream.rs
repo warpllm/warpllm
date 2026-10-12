@@ -64,7 +64,7 @@ const MODELS: [(&str, Cap); 5] = [
         Cap::Unmodelled("max_completion_tokens"),
     ),
     ("deepseek/deepseek-v4-flash", Cap::Unmodelled("max_tokens")),
-    ("opencode/laguna-s-2.1-free", Cap::Unmodelled("max_tokens")),
+    ("opencode/mimo-v2.5-free", Cap::Unmodelled("max_tokens")),
     (
         "openrouter/~deepseek/deepseek-v4-flash-latest",
         Cap::Unmodelled("max_tokens"),

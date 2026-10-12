@@ -9,15 +9,19 @@ Base URL `https://api.anthropic.com/v1` &middot; API key `ANTHROPIC_API_KEY`
 | Model string | Sent upstream as | Context window | Max output | Streaming |
 | --- | --- | --- | --- | --- |
 | `anthropic/claude-fable-5` | `claude-fable-5` | 1,000,000 | 128,000 | Yes |
+| `anthropic/claude-fable-5-1` | `claude-fable-5-1` | 1,000,000 | 128,000 | Yes |
 | `anthropic/claude-haiku-4-5` | `claude-haiku-4-5-20251001` | 200,000 | 64,000 | Yes |
+| `anthropic/claude-haiku-5-5` | `claude-haiku-5-5` | 1,000,000 | 128,000 | Yes |
 | `anthropic/claude-opus-4-5` | `claude-opus-4-5-20251101` | 200,000 | 64,000 | Yes |
 | `anthropic/claude-opus-4-6` | `claude-opus-4-6` | 1,000,000 | 128,000 | Yes |
 | `anthropic/claude-opus-4-7` | `claude-opus-4-7` | 1,000,000 | 128,000 | Yes |
 | `anthropic/claude-opus-4-8` | `claude-opus-4-8` | 1,000,000 | 128,000 | Yes |
 | `anthropic/claude-opus-5` | `claude-opus-5` | 1,000,000 | 128,000 | Yes |
+| `anthropic/claude-opus-5-5` | `claude-opus-5-5` | 1,000,000 | 128,000 | Yes |
 | `anthropic/claude-sonnet-4-5` | `claude-sonnet-4-5-20250929` | 200,000 | 64,000 | Yes |
 | `anthropic/claude-sonnet-4-6` | `claude-sonnet-4-6` | 1,000,000 | 128,000 | Yes |
 | `anthropic/claude-sonnet-5` | `claude-sonnet-5` | 1,000,000 | 128,000 | Yes |
+| `anthropic/claude-sonnet-5-5` | `claude-sonnet-5-5` | 1,000,000 | 128,000 | Yes |
 
 ### deepseek
 
@@ -25,6 +29,7 @@ Base URL `https://api.deepseek.com` &middot; API key `DEEPSEEK_API_KEY`
 
 | Model string | Sent upstream as | Context window | Max output | Streaming |
 | --- | --- | --- | --- | --- |
+| `deepseek/deepseek-flash` | `deepseek-flash` | 1,000,000 | 384,000 | Yes |
 | `deepseek/deepseek-v4-flash` | `deepseek-v4-flash` | 1,000,000 | 384,000 | Yes |
 | `deepseek/deepseek-v4-pro` | `deepseek-v4-pro` | 1,000,000 | 384,000 | Yes |
 
@@ -45,10 +50,12 @@ Base URL `https://api.mistral.ai/v1` &middot; API key `MISTRAL_API_KEY`
 
 | Model string | Sent upstream as | Context window | Max output | Streaming |
 | --- | --- | --- | --- | --- |
-| `mistral/codestral-2501` | `codestral-2501` | 256,000 | — | Yes |
-| `mistral/ministral-8b-2410` | `ministral-8b-2410` | 128,000 | — | Yes |
-| `mistral/mistral-large-2411` | `mistral-large-2411` | 128,000 | — | Yes |
-| `mistral/pixtral-large-2411` | `pixtral-large-2411` | 128,000 | — | Yes |
+| `mistral/codestral-2508` | `codestral-2508` | 128,000 | — | Yes |
+| `mistral/ministral-14b-2512` | `ministral-14b-2512` | 256,000 | — | Yes |
+| `mistral/ministral-3b-2512` | `ministral-3b-2512` | 256,000 | — | Yes |
+| `mistral/ministral-8b-2512` | `ministral-8b-2512` | 256,000 | — | Yes |
+| `mistral/mistral-large-2512` | `mistral-large-2512` | 256,000 | — | Yes |
+| `mistral/mistral-small-2603` | `mistral-small-2603` | 256,000 | — | Yes |
 
 ### openai
 
@@ -74,6 +81,9 @@ Base URL `https://api.openai.com/v1` &middot; API key `OPENAI_API_KEY`
 | `openai/gpt-5.6-sol` | `gpt-5.6-sol` | 1,050,000 | 128,000 | Yes |
 | `openai/gpt-5.6-terra` | `gpt-5.6-terra` | 1,050,000 | 128,000 | Yes |
 | `openai/gpt-6-astra` | `gpt-6-astra` | 1,050,000 | 128,000 | Yes |
+| `openai/gpt-6-luna` | `gpt-6-luna` | 1,050,000 | 128,000 | Yes |
+| `openai/gpt-6-sol` | `gpt-6-sol` | 1,050,000 | 128,000 | Yes |
+| `openai/gpt-6.1-sol` | `gpt-6.1-sol` | 1,050,000 | 128,000 | Yes |
 | `openai/o3` | `o3` | 200,000 | 100,000 | Yes |
 
 ### opencode
@@ -84,20 +94,30 @@ Base URL `https://opencode.ai/zen/v1` &middot; API key `OPENCODE_API_KEY`
 | --- | --- | --- | --- | --- |
 | `opencode/big-pickle` | `big-pickle` | — | — | Yes |
 | `opencode/deepseek-v4-flash` | `deepseek-v4-flash` | — | — | Yes |
-| `opencode/deepseek-v4-flash-free` | `deepseek-v4-flash-free` | — | — | Yes |
+| `opencode/deepseek-v4-flash-vision-exp` | `deepseek-v4-flash-vision-exp` | — | — | Yes |
 | `opencode/deepseek-v4-pro` | `deepseek-v4-pro` | — | — | Yes |
+| `opencode/deepseek-v4.1-flash` | `deepseek-v4.1-flash` | — | — | Yes |
+| `opencode/exo-free` | `exo-free` | — | — | Yes |
 | `opencode/glm-5.1` | `glm-5.1` | — | — | Yes |
 | `opencode/glm-5.2` | `glm-5.2` | — | — | Yes |
-| `opencode/hy3-free` | `hy3-free` | — | — | Yes |
+| `opencode/glm-5.3` | `glm-5.3` | — | — | Yes |
+| `opencode/glm-5.3-flash` | `glm-5.3-flash` | — | — | Yes |
 | `opencode/kimi-k2.6` | `kimi-k2.6` | — | — | Yes |
 | `opencode/kimi-k2.7-code` | `kimi-k2.7-code` | — | — | Yes |
 | `opencode/kimi-k3` | `kimi-k3` | — | — | Yes |
-| `opencode/laguna-s-2.1-free` | `laguna-s-2.1-free` | — | — | Yes |
+| `opencode/ling-3.0-flash-fin-free` | `ling-3.0-flash-fin-free` | — | — | Yes |
+| `opencode/ling-3.1-flash-free` | `ling-3.1-flash-free` | — | — | Yes |
+| `opencode/longcat-2.5-preview-free` | `longcat-2.5-preview-free` | — | — | Yes |
 | `opencode/mimo-v2.5-free` | `mimo-v2.5-free` | — | — | Yes |
+| `opencode/mimo-v2.6-flash-free` | `mimo-v2.6-flash-free` | — | — | Yes |
 | `opencode/minimax-m2.7` | `minimax-m2.7` | — | — | Yes |
 | `opencode/minimax-m3` | `minimax-m3` | — | — | Yes |
+| `opencode/mistral-large-4` | `mistral-large-4` | — | — | Yes |
 | `opencode/nemotron-3-ultra-free` | `nemotron-3-ultra-free` | — | — | Yes |
 | `opencode/nemotron-3.5-lightning-free` | `nemotron-3.5-lightning-free` | — | — | Yes |
+| `opencode/qwen3.8-max` | `qwen3.8-max` | — | — | Yes |
+| `opencode/space-bunny-free` | `space-bunny-free` | — | — | Yes |
+| `opencode/step-5-preview-free` | `step-5-preview-free` | — | — | Yes |
 
 ### openrouter
 
@@ -106,12 +126,15 @@ Base URL `https://openrouter.ai/api/v1` &middot; API key `OPENROUTER_API_KEY`
 | Model string | Sent upstream as | Context window | Max output | Streaming |
 | --- | --- | --- | --- | --- |
 | `openrouter/anthropic/claude-opus-4` | `anthropic/claude-opus-4` | 200,000 | 32,000 | Yes |
+| `openrouter/anthropic/claude-opus-5.5` | `anthropic/claude-opus-5.5` | 1,000,000 | 128,000 | Yes |
 | `openrouter/anthropic/claude-sonnet-4` | `anthropic/claude-sonnet-4` | 200,000 | 64,000 | Yes |
+| `openrouter/anthropic/claude-sonnet-5.5` | `anthropic/claude-sonnet-5.5` | 1,000,000 | 128,000 | Yes |
 | `openrouter/auto` | `auto` | — | — | Yes |
 | `openrouter/google/gemini-2.5-pro` | `google/gemini-2.5-pro` | 1,048,576 | 65,536 | Yes |
+| `openrouter/google/gemini-3.1-pro-preview` | `google/gemini-3.1-pro-preview` | 1,048,576 | 65,536 | Yes |
 | `openrouter/moonshotai/kimi-k2.6` | `moonshotai/kimi-k2.6` | 256,000 | — | Yes |
 | `openrouter/moonshotai/kimi-k2.7-code` | `moonshotai/kimi-k2.7-code` | 256,000 | — | Yes |
 | `openrouter/moonshotai/kimi-k3` | `moonshotai/kimi-k3` | 974,842 | — | Yes |
 | `openrouter/openai/gpt-5.6` | `openai/gpt-5.6` | 1,050,000 | 128,000 | Yes |
-| `openrouter/stealth/ox-alpha` | `stealth/ox-alpha` | 1,048,576 | 131,072 | Yes |
+| `openrouter/openai/gpt-6.1-sol` | `openai/gpt-6.1-sol` | 1,050,000 | 128,000 | Yes |
 | `openrouter/~deepseek/deepseek-v4-flash-latest` | `~deepseek/deepseek-v4-flash-latest` | 1,048,576 | — | Yes |

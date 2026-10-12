@@ -221,24 +221,31 @@
 providers:
   # <https://platform.claude.com/docs/en/about-claude/models/overview> and
   # <https://platform.claude.com/docs/en/about-claude/model-deprecations>
-  # (both checked 2026-08-24). Every figure below is from the first; every
-  # judgement about a model's lifecycle is from the second.
+  # (both checked 2026-08-24; the Fable 5.1 and 5.5 entries checked
+  # 2026-10-12). Every figure below is from the first; every judgement about a
+  # model's lifecycle is from the second.
   #
   # The first provider here that is NOT an OpenAI-compatible host. It speaks
   # Anthropic's own `/messages`, so a chat-completions request is translated on
   # the way out and its reply on the way back, and its credential goes in
   # `x-api-key` rather than `Authorization` — see `Credentials::scheme`.
   #
-  # `deprecation_date` is absent on EVERY entry, and that is a reading of
-  # Anthropic's table rather than an oversight. What it publishes for an active
+  # `deprecation_date` appears on ONE entry: claude-sonnet-4-5, deprecated
+  # 2026-09-30 and retiring 2026-11-30, with claude-sonnet-5-5 named as its
+  # replacement (checked 2026-10-12). It is kept until then so callers routed
+  # to it now are not broken early.
+  #
+  # Its absence everywhere else is a reading of Anthropic's table rather than
+  # an oversight. What it publishes for an active
   # model is "Tentative retirement date: not sooner than <date>" with
   # "Deprecated: N/A" — a FLOOR on when retirement could be announced, not an
   # announcement. This field records "the day the provider stops serving this
   # model, when one has been announced", so a floor written here would read as
-  # a schedule that does not exist. Every model below is state Active.
+  # a schedule that does not exist. Every other model below is state Active.
   #
   # Windows and output ceilings are the published figures verbatim: 1M and 128k
-  # for the Fable/Opus 5/Sonnet 5 generation and for Opus 4.8/4.7/4.6 and
+  # for the Fable/Opus 5/Sonnet 5 generation, for Fable 5.1 and the whole 5.5
+  # generation (Haiku 5.5 included), and for Opus 4.8/4.7/4.6 and
   # Sonnet 4.6; 200k and 64k for Haiku 4.5, Opus 4.5 and Sonnet 4.5. The
   # `max_output` column is the SYNCHRONOUS Messages API figure, which is the
   # surface registered here — the Batches API reaches 300k behind a beta
@@ -267,6 +274,8 @@ providers:
   # - claude-mythos-5 and claude-mythos-preview: invitation-only under Project
   #   Glasswing with no self-serve sign-up, so a registered name would resolve
   #   and then 403 for almost everyone. The preview is additionally deprecated.
+  #   claude-mythos-5-1, Fable 5.1's sibling, is gated the same way to
+  #   verified organizations (checked 2026-10-12).
   # - Every retired model: the whole claude-3 family, claude-opus-4,
   #   claude-sonnet-4, claude-opus-4-1. Requests to them fail upstream.
   # - The dated ids of the three aliased models, per the roster's rule that
@@ -282,6 +291,13 @@ providers:
         capabilities:
           max_input_tokens: 1000000
           max_output_tokens: 128000
+      anthropic/claude-fable-5-1:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
       anthropic/claude-haiku-4-5:
         supported_apis:
           - {api: anthropic_messages}
@@ -290,6 +306,13 @@ providers:
         capabilities:
           max_input_tokens: 200000
           max_output_tokens: 64000
+      anthropic/claude-haiku-5-5:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
       anthropic/claude-opus-4-5:
         supported_apis:
           - {api: anthropic_messages}
@@ -326,11 +349,19 @@ providers:
         capabilities:
           max_input_tokens: 1000000
           max_output_tokens: 128000
+      anthropic/claude-opus-5-5:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
       anthropic/claude-sonnet-4-5:
         supported_apis:
           - {api: anthropic_messages}
           - {api: anthropic_messages_stream}
         model: claude-sonnet-4-5-20250929
+        deprecation_date: "2026-11-30"
         capabilities:
           max_input_tokens: 200000
           max_output_tokens: 64000
@@ -342,6 +373,13 @@ providers:
           max_input_tokens: 1000000
           max_output_tokens: 128000
       anthropic/claude-sonnet-5:
+        supported_apis:
+          - {api: anthropic_messages}
+          - {api: anthropic_messages_stream}
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
+      anthropic/claude-sonnet-5-5:
         supported_apis:
           - {api: anthropic_messages}
           - {api: anthropic_messages_stream}
@@ -364,6 +402,18 @@ providers:
     base_url: "https://api.deepseek.com"
     env_api_key: DEEPSEEK_API_KEY
     models:
+      # Checked 2026-10-12: DeepSeek-V4.1-Flash, released 2026-09-10, under a
+      # versionless name. `deepseek-v4-flash` below is now a legacy name that
+      # routes here and bills at the same price. The same ceilings as the rest
+      # of the family; the rate-limit page gives it 2,500.
+      deepseek/deepseek-flash:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 384000
+          max_concurrent_requests: 2500
       deepseek/deepseek-v4-flash:
         supported_apis:
           - {api: openai_compat_chat_completions}
@@ -462,42 +512,68 @@ providers:
   #   going stale when underlying snapshots shift.
   # - Embeddings, Moderation, and FIM endpoints: surfaces not yet supported by
   #   warpllm.
+  # - Mistral Large 4 (v26.10) and Mistral Medium 3.5 (v26.04), checked
+  #   2026-10-12: their model pages publish no dated API id, only alias badges
+  #   (`mistral-large-4+1`, `mistral-medium-3-5+2`), and a guessed id would
+  #   404.
+  # - Every retired model, per the deprecation table on the models page
+  #   (checked 2026-10-12). That includes the four this provider was first
+  #   registered with: codestral-2501 (retired 2025-11-30, succeeded by
+  #   codestral-2508), ministral-8b-2410 (2025-12-31, by ministral-8b-2512),
+  #   and mistral-large-2411 and pixtral-large-2411 (both 2026-05-31, by
+  #   Medium 3.5). The Devstral and Magistral lines have no live model left.
   mistral:
     base_url: "https://api.mistral.ai/v1"
     env_api_key: MISTRAL_API_KEY
     models:
-      # <https://docs.mistral.ai/models/#codestral-2501> (checked 2026-08-13).
-      # Code generation model. 256,000 context window.
-      mistral/codestral-2501:
+      # <https://docs.mistral.ai/models/codestral-25-08> (checked 2026-10-12).
+      # Code generation model, v25.08. 128k context window.
+      mistral/codestral-2508:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        capabilities:
+          max_input_tokens: 128000
+      # <https://docs.mistral.ai/models/ministral-3-14b-25-12> (checked 2026-10-12).
+      # Ministral 3 14B, edge-optimized. 256k context window.
+      mistral/ministral-14b-2512:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
         capabilities:
           max_input_tokens: 256000
-      # <https://docs.mistral.ai/models/#ministral-8b-2410> (checked 2026-08-13).
-      # Edge-optimized 8B model. 128,000 context window.
-      mistral/ministral-8b-2410:
+      # <https://docs.mistral.ai/models/ministral-3-3b-25-12> (checked 2026-10-12).
+      # Ministral 3 3B, edge-optimized. 256k context window.
+      mistral/ministral-3b-2512:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
         capabilities:
-          max_input_tokens: 128000
-      # <https://docs.mistral.ai/models/#mistral-large-2411> (checked 2026-08-13).
-      # Flagship reasoning model. 128,000 context window.
-      mistral/mistral-large-2411:
+          max_input_tokens: 256000
+      # <https://docs.mistral.ai/models/ministral-3-8b-25-12> (checked 2026-10-12).
+      # Ministral 3 8B, edge-optimized. 256k context window.
+      mistral/ministral-8b-2512:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
         capabilities:
-          max_input_tokens: 128000
-      # <https://docs.mistral.ai/models/#pixtral-large-2411> (checked 2026-08-13).
-      # Multimodal/vision model. 128,000 context window.
-      mistral/pixtral-large-2411:
+          max_input_tokens: 256000
+      # <https://docs.mistral.ai/models/mistral-large-3-25-12> (checked 2026-10-12).
+      # Mistral Large 3, v25.12. 256k context window.
+      mistral/mistral-large-2512:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
         capabilities:
-          max_input_tokens: 128000
+          max_input_tokens: 256000
+      # <https://docs.mistral.ai/models/mistral-small-4-0-26-03> (checked 2026-10-12).
+      # Mistral Small 4, v26.03. 256k context window.
+      mistral/mistral-small-2603:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        capabilities:
+          max_input_tokens: 256000
   # <https://developers.openai.com/api/docs/models/all> (checked 2026-08-11).
   # Every model below was confirmed on its own model page to mark
   # `v1/chat/completions` supported; each entry carries that page's link.
@@ -532,6 +608,12 @@ providers:
   #   own page mentions it — the deprecations page is the only place it
   #   appears.
   #   <https://developers.openai.com/api/docs/deprecations>
+  #
+  #   gpt-5.1 and gpt-5.4-nano are the opposite case and stay: both were
+  #   registered before OpenAI announced their shutdown on 2026-10-01 for
+  #   2027-04-01, two quarters out, so they carry a `deprecation_date` instead
+  #   of breaking callers today. The named replacements are gpt-6-sol and
+  #   gpt-6-luna, both below.
   # - chat-latest. It serves chat completions, but OpenAI moves the snapshot
   #   underneath it and points production traffic at GPT-5.6 instead, so the
   #   limits recorded here would go stale without the file changing.
@@ -606,6 +688,7 @@ providers:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
+        deprecation_date: "2027-04-01"
         capabilities:
           max_input_tokens: 400000
           max_output_tokens: 128000
@@ -639,6 +722,7 @@ providers:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
+        deprecation_date: "2027-04-01"
         capabilities:
           max_input_tokens: 400000
           max_output_tokens: 128000
@@ -699,6 +783,37 @@ providers:
         capabilities:
           max_input_tokens: 1050000
           max_output_tokens: 128000
+      # The GPT-6 Luna/Sol pair and GPT-6.1 Sol, checked 2026-10-12. Each page
+      # marks `v1/chat/completions` supported, and the deprecations page names
+      # none of them. All three carry the same 1,050,000 window and 128,000
+      # max output as gpt-6-astra; the 922,000 "maximum input tokens" on each
+      # page is that window minus the ceiling. gpt-6.1-sol's page adds that
+      # chat completions are served WITHOUT tool calling there: a request
+      # carrying `tools` is the provider's to refuse.
+      # <https://developers.openai.com/api/docs/models/gpt-6-luna>
+      openai/gpt-6-luna:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        capabilities:
+          max_input_tokens: 1050000
+          max_output_tokens: 128000
+      # <https://developers.openai.com/api/docs/models/gpt-6-sol>
+      openai/gpt-6-sol:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        capabilities:
+          max_input_tokens: 1050000
+          max_output_tokens: 128000
+      # <https://developers.openai.com/api/docs/models/gpt-6.1-sol>
+      openai/gpt-6.1-sol:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        capabilities:
+          max_input_tokens: 1050000
+          max_output_tokens: 128000
       # The last o-series model here: o4-mini shuts down, and every `-pro`
       # sibling serves the Responses API instead.
       # <https://developers.openai.com/api/docs/models/o3>
@@ -710,8 +825,11 @@ providers:
           max_input_tokens: 200000
           max_output_tokens: 100000
 
-  # <https://opencode.ai/docs/zen/> (checked 2026-08-16). An aggregator, and
-  # the only one on this roster that does not serve its whole catalog over one
+  # <https://opencode.ai/docs/zen/> (checked 2026-08-16; re-checked 2026-10-12,
+  # adding the thirteen chat-completions models that appeared between the two
+  # sweeps, none of them in the page's DEPRECATED MODELS section). An
+  # aggregator, and the only one on this roster that does not serve its whole
+  # catalog over one
   # protocol: Zen publishes an endpoint PER MODEL, and the four it uses are
   # `/chat/completions`, `/responses`, `/messages`, and Google's
   # `/models/<id>`. Only the first is a surface warpllm implements, so this
@@ -758,7 +876,9 @@ providers:
   #   request routed to it. Same reason `openai/gpt-5-pro` is missing above.
   # - The Claude and Qwen models, at `/zen/v1/messages`, and the Gemini
   #   models, at `/zen/v1/models/<id>`. Neither protocol has an `api:` on this
-  #   roster at all.
+  #   roster at all. The one exception is `qwen3.8-max`, which Zen serves at
+  #   `/zen/v1/chat/completions` and so is registered below (checked
+  #   2026-10-12).
   # - OpenCode Go, the cheaper plan reached at `/zen/go/v1/…` with a catalog
   #   of its own. A second base URL is a second provider entry, not a variant
   #   of this one. <https://opencode.ai/docs/go/>
@@ -769,6 +889,10 @@ providers:
   #   further down that same page is the only place the dates appear, and all
   #   three had already passed when this provider was added. Their live
   #   successors — `glm-5.2`, `kimi-k3`, `minimax-m3` — are registered above.
+  # - `deepseek-v4-flash-free`, `hy3-free` and `laguna-s-2.1-free`, which were
+  #   registered here and by 2026-10-12 had left the model table WITHOUT an
+  #   entry in the deprecated section — the free-window withdrawal the note
+  #   above warns of.
   opencode:
     base_url: "https://opencode.ai/zen/v1"
     env_api_key: OPENCODE_API_KEY
@@ -782,11 +906,19 @@ providers:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
-      opencode/deepseek-v4-flash-free:
+      opencode/deepseek-v4-flash-vision-exp:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
       opencode/deepseek-v4-pro:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/deepseek-v4.1-flash:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/exo-free:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
@@ -798,7 +930,11 @@ providers:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
-      opencode/hy3-free:
+      opencode/glm-5.3:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/glm-5.3-flash:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
@@ -814,11 +950,23 @@ providers:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
-      opencode/laguna-s-2.1-free:
+      opencode/ling-3.0-flash-fin-free:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/ling-3.1-flash-free:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/longcat-2.5-preview-free:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
       opencode/mimo-v2.5-free:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/mimo-v2.6-flash-free:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
@@ -830,11 +978,27 @@ providers:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
+      opencode/mistral-large-4:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
       opencode/nemotron-3-ultra-free:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
       opencode/nemotron-3.5-lightning-free:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/qwen3.8-max:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/space-bunny-free:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+      opencode/step-5-preview-free:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
@@ -871,6 +1035,17 @@ providers:
         capabilities:
           max_input_tokens: 200000
           max_output_tokens: 32000
+      # Checked 2026-10-12, 11 endpoints, all agreeing: 1M context, 128K max
+      # output.
+      # <https://openrouter.ai/api/v1/models/anthropic/claude-opus-5.5/endpoints>
+      openrouter/anthropic/claude-opus-5.5:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        model: anthropic/claude-opus-5.5
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
       # Checked 2026-08-11, 5 endpoints, and they are two platforms counted
       # per region: Vertex serves a 1,000,000 window, Bedrock 200,000. An
       # unpinned request may get either, so 200,000 is what is recorded. All
@@ -884,6 +1059,17 @@ providers:
         capabilities:
           max_input_tokens: 200000
           max_output_tokens: 64000
+      # Checked 2026-10-12, 8 endpoints, all agreeing: 1M context, 128K max
+      # output.
+      # <https://openrouter.ai/api/v1/models/anthropic/claude-sonnet-5.5/endpoints>
+      openrouter/anthropic/claude-sonnet-5.5:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        model: anthropic/claude-sonnet-5.5
+        capabilities:
+          max_input_tokens: 1000000
+          max_output_tokens: 128000
       # OpenRouter's alias for letting IT pick the model per request: the wire
       # name is the key's last segment, and the limits are whichever backend
       # it chooses.
@@ -898,6 +1084,19 @@ providers:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
         model: google/gemini-2.5-pro
+        capabilities:
+          max_input_tokens: 1048576
+          max_output_tokens: 65536
+      # Checked 2026-10-12, 6 endpoints, all agreeing: 1,048,576 context, 65,536
+      # max output.
+      # The newest Gemini Pro; every later `google/gemini-3.x` slug is Flash,
+      # Flash Lite or an image model.
+      # <https://openrouter.ai/api/v1/models/google/gemini-3.1-pro-preview/endpoints>
+      openrouter/google/gemini-3.1-pro-preview:
+        supported_apis:
+          - {api: openai_compat_chat_completions}
+          - {api: openai_compat_chat_completions_stream}
+        model: google/gemini-3.1-pro-preview
         capabilities:
           max_input_tokens: 1048576
           max_output_tokens: 65536
@@ -952,28 +1151,19 @@ providers:
         capabilities:
           max_input_tokens: 1050000
           max_output_tokens: 128000
-      # Checked 2026-08-24: a CLOAKED model — OpenRouter serves it under the
-      # `stealth/` vendor and names no lab behind it, so there is no upstream
-      # model page to check this entry against and the usual second source
-      # does not exist. One endpoint, whose own name is "Stealth": 1,048,576
-      # context and 131,072 max output, and being alone it is trivially the
-      # narrowest. Free while it is cloaked, which is what a cloak is for.
-      #
-      # Expect this one to be REMOVED rather than deprecated. A cloak ends
-      # when the lab announces the weights, and the slug is withdrawn on the
-      # day rather than carrying a date anyone can read ahead of time —
-      # OpenRouter's `expiration_date` for it is the year 2098, a placeholder,
-      # so `deprecation_date` is deliberately absent here. Nothing to do until
-      # it 404s, at which point the remedy is deleting these lines.
-      # <https://openrouter.ai/stealth/ox-alpha>
-      openrouter/stealth/ox-alpha:
+      # Checked 2026-10-12, 8 endpoints, all agreeing: 1,050,000 context, 128K
+      # max output.
+      # OpenRouter's newest OpenAI slug; its `-pro` sibling is left off, as
+      # `openai/gpt-5-pro` is above.
+      # <https://openrouter.ai/api/v1/models/openai/gpt-6.1-sol/endpoints>
+      openrouter/openai/gpt-6.1-sol:
         supported_apis:
           - {api: openai_compat_chat_completions}
           - {api: openai_compat_chat_completions_stream}
-        model: stealth/ox-alpha
+        model: openai/gpt-6.1-sol
         capabilities:
-          max_input_tokens: 1048576
-          max_output_tokens: 131072
+          max_input_tokens: 1050000
+          max_output_tokens: 128000
       # Checked 2026-08-09: the `~deepseek/…-latest` alias, always the newest
       # DeepSeek V4 Flash revision — 1,048,576 context, which every member of
       # the family shares, so the alias cannot resolve to something narrower.

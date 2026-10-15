@@ -22,3 +22,6 @@ node_modules/
 # Tempest
 .tempest
 .tempest-pid
+
+# cargo-mutants output
+mutants.out*/

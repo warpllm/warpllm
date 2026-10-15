@@ -36,10 +36,12 @@ jobs:
           persist-credentials: false
 
       # Prebuilt binaries via taiki-e, not cargo install from source.
-      # Cuts install time from minutes to seconds.
+      # Cuts install time from minutes to seconds. cargo-nextest is the test
+      # tool .cargo/mutants.toml selects, so a mutant that hangs a test is
+      # killed and caught instead of timing out.
       - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants,cargo-nextest
 
       # --in-place: mutates the working tree directly (ephemeral CI
       #   container, no copy needed).

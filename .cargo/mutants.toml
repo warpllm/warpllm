@@ -1,0 +1,13 @@
+# nextest rather than `cargo test`, so the `mutants` profile in
+# .config/nextest.toml can kill a test that a mutant sent into an infinite loop.
+test_tool = "nextest"
+additional_cargo_test_args = ["--profile", "mutants"]
+
+exclude_re = [
+    # `candidates.len() > 1` decides whether a chain deadline wraps the attempt.
+    # With `>=` a lone candidate gets one too, but it is as long as reqwest's
+    # own per-request timeout and starts microseconds earlier: both fire on the
+    # same timer tick, and the inner future is polled first, so the caller
+    # still sees `Network`. No test can tell the two apart.
+    'replace > with >= in Client::chat_completions(_stream)?$',
+]

@@ -1,0 +1,10 @@
+# Profile for `cargo mutants` (selected in .cargo/mutants.toml).
+#
+# The whole suite runs in about a second, so a test still going after 10s is
+# a mutant that turned a loop infinite. Killing it turns that hang into a
+# failure — a caught mutant — instead of a timeout cargo-mutants can only
+# report. `cargo test` cannot do this: one hung test holds its whole binary.
+[profile.mutants]
+slow-timeout = { period = "10s", terminate-after = 1 }
+# The first failure already decides the mutant is caught.
+fail-fast = { max-fail = 1, terminate = "immediate" }

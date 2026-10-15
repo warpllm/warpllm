@@ -1784,6 +1784,201 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // The gateway view of controls the caller wrote in THIS protocol's spelling.
+    // -----------------------------------------------------------------------
+
+    /// The gateway form of a minimal Anthropic request with `extra` merged in.
+    fn ingested_with(extra: Value) -> types::ChatRequest {
+        let mut body = json!({
+            "model": "claude-opus-5",
+            "max_tokens": 512,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let object = body.as_object_mut().unwrap();
+        for (key, value) in extra.as_object().unwrap() {
+            object.insert(key.clone(), value.clone());
+        }
+        ingest_request(wire(body), "claude-opus-5")
+    }
+
+    /// This protocol disables, the gateway permits: the flag arrives inverted,
+    /// from whichever choice carried it, and stays absent when nobody set it.
+    #[test]
+    fn disabling_parallel_tool_use_is_ingested_as_the_inverse() {
+        for (choice, expected) in [
+            (
+                json!({"type": "auto", "disable_parallel_tool_use": true}),
+                Some(false),
+            ),
+            (
+                json!({"type": "any", "disable_parallel_tool_use": false}),
+                Some(true),
+            ),
+            (
+                json!({"type": "none", "disable_parallel_tool_use": true}),
+                Some(false),
+            ),
+            (
+                json!({"type": "tool", "name": "w", "disable_parallel_tool_use": true}),
+                Some(false),
+            ),
+            (
+                json!({"type": "tool", "name": "w", "disable_parallel_tool_use": false}),
+                Some(true),
+            ),
+            (json!({"type": "auto"}), None),
+            (json!({"type": "tool", "name": "w"}), None),
+            (
+                json!({"type": "from_the_future", "disable_parallel_tool_use": true}),
+                None,
+            ),
+        ] {
+            let request = ingested_with(json!({"tool_choice": choice}));
+            assert_eq!(request.parallel_tool_calls, expected, "{choice}");
+        }
+        assert_eq!(ingested_with(json!({})).parallel_tool_calls, None);
+    }
+
+    /// `display` says what the caller SEES: `omitted` is the gateway's
+    /// "reason but don't return it", `summarized` its opposite, and anything
+    /// else is no statement at all.
+    #[test]
+    fn thinking_display_is_ingested_as_exclusion() {
+        for (display, expected) in [
+            (Some("omitted"), Some(true)),
+            (Some("summarized"), Some(false)),
+            (Some("full"), None),
+            (None, None),
+        ] {
+            let mut thinking = json!({"type": "enabled", "budget_tokens": 2048});
+            if let Some(display) = display {
+                thinking["display"] = json!(display);
+            }
+            let request = ingested_with(json!({"thinking": thinking}));
+            let reasoning = request.reasoning.as_ref().unwrap();
+            assert_eq!(reasoning.exclude, expected, "{display:?}");
+            assert_eq!(reasoning.budget_tokens, Some(2048));
+        }
+    }
+
+    /// Either half of the one reasoning concept alone is enough to carry it.
+    #[test]
+    fn effort_alone_or_thinking_alone_is_a_reasoning_config() {
+        let effort = ingested_with(json!({"output_config": {"effort": "high"}}));
+        let reasoning = effort.reasoning.as_ref().unwrap();
+        assert_eq!(reasoning.effort.as_deref(), Some("high"));
+        assert_eq!(reasoning.enabled, None);
+
+        let thinking = ingested_with(json!({"thinking": {"type": "disabled"}}));
+        let reasoning = thinking.reasoning.as_ref().unwrap();
+        assert_eq!(reasoning.enabled, Some(false));
+        assert_eq!(reasoning.effort, None);
+
+        assert!(ingested_with(json!({})).reasoning.is_none());
+    }
+
+    /// A role this protocol does not define still goes back as the caller wrote
+    /// it, rather than being flattened to the `user` it is read as.
+    #[test]
+    fn an_unrecognized_role_round_trips_as_written() {
+        let body = json!({
+            "model": "claude-opus-5",
+            "max_tokens": 512,
+            "messages": [{"role": "narrator", "content": "hi"}]
+        });
+        let normalized = ingest_request(wire(body.clone()), "claude-opus-5");
+        assert_eq!(rendered(&normalized), body);
+    }
+
+    /// A caller who arrived on this protocol holds the signed blocks in its
+    /// residue, so a thinking request restating a `tool_use` turn is theirs to
+    /// send even when that turn carries no thinking block of its own.
+    #[test]
+    fn a_native_thinking_request_restating_an_unsigned_tool_turn_still_renders() {
+        let native = ingested_with(json!({
+            "thinking": {"type": "enabled", "budget_tokens": 2048},
+            "messages": [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_01", "name": "counter", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_01", "content": "3"}
+                ]}
+            ]
+        }));
+        assert!(
+            thinks(&native) && holds_an_unsigned_tool_turn(&native),
+            "the fixture"
+        );
+        assert!(render_request(&native, "anthropic", None).is_ok());
+    }
+
+    /// The refusal needs a `tool_use` turn to be missing its thinking block. An
+    /// assistant turn of plain text has none, so thinking does not turn it away.
+    #[test]
+    fn thinking_over_a_plain_assistant_turn_still_renders() {
+        let mut request = bare_request();
+        request.messages.push(types::Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "hello".into(),
+                cache: None,
+            }],
+            ext: types::ProviderExt::new(),
+        });
+        request.reasoning = Some(types::ReasoningConfig {
+            budget_tokens: Some(2048),
+            ..Default::default()
+        });
+        assert!(render_request(&request, "anthropic", Some(8192)).is_ok());
+    }
+
+    /// A tool result ends where the results do: the user turn after it is its
+    /// own turn, not more of the merged one.
+    #[test]
+    fn a_user_turn_after_foreign_tool_results_stays_its_own_turn() {
+        let mut request = bare_request();
+        request.params.max_tokens = Some(64);
+        let result = types::Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                call_id: "a".into(),
+                content: vec![ContentBlock::Text {
+                    text: "ok".into(),
+                    cache: None,
+                }],
+                is_error: false,
+            }],
+            ext: types::ProviderExt::new(),
+        };
+        let follow_up = request.messages[0].clone();
+        request.messages = vec![result, follow_up];
+
+        let body = rendered(&request);
+        let turns = body["messages"].as_array().unwrap();
+        assert_eq!(turns.len(), 2, "{turns:?}");
+        assert_eq!(turns[1]["content"], json!("hi"));
+    }
+
+    /// A lone text block is the bare string form only when it carries nothing
+    /// else; a cache breakpoint has to ride a block.
+    #[test]
+    fn a_lone_cached_text_block_renders_as_a_block() {
+        let mut request = bare_request();
+        request.params.max_tokens = Some(64);
+        request.messages[0].content = vec![ContentBlock::Text {
+            text: "hi".into(),
+            cache: Some(types::CacheHint { ttl: None }),
+        }];
+        let body = rendered(&request);
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}])
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // max_tokens: required upstream, optional in the gateway form.
     // -----------------------------------------------------------------------
 
@@ -1912,7 +2107,10 @@ mod tests {
             )];
         });
         assert!(matches!(error, Error::InvalidInput(_)), "{error}");
-        assert!(error.to_string().contains("refusal"), "{error}");
+        assert!(
+            error.to_string().contains("a 'refusal' content block"),
+            "{error}"
+        );
     }
 
     /// A block with no string `type` is exactly as unrenderable, and the

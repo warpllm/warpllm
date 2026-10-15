@@ -171,6 +171,18 @@ mod tests {
         assert!(err.to_string().contains("at least one candidate"));
     }
 
+    /// Debug is what a panic or a `tracing` field prints; it names the type
+    /// and its candidates, and leaves the borrowed client out.
+    #[test]
+    fn debug_names_the_balancer_without_the_client() {
+        let client = Client::new(ClientConfig::default()).unwrap();
+        let balanced = BalancedClient::new(&client, &[("openai/gpt-5.6", 3)]).unwrap();
+        let rendered = format!("{balanced:?}");
+        assert!(rendered.starts_with("BalancedClient"), "{rendered}");
+        assert!(rendered.contains("openai/gpt-5.6"), "{rendered}");
+        assert!(!rendered.contains("client"), "{rendered}");
+    }
+
     #[test]
     fn unknown_model_rejected() {
         let client = Client::new(ClientConfig::default()).unwrap();

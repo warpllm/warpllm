@@ -193,4 +193,55 @@ mod tests {
             "{error:?}"
         );
     }
+
+    /// The streaming entrypoint's whole job: each chunk arrives as the JSON of
+    /// the chunk a Rust caller would have got, in order, and then the stream
+    /// ends with `None`.
+    #[tokio::test]
+    async fn a_stream_yields_each_chunk_as_json_then_ends() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let chunk = |text: &str| {
+            format!(
+                "data: {}\n\n",
+                serde_json::json!({
+                    "id": "chatcmpl-1",
+                    "object": "chat.completion.chunk",
+                    "created": 1_700_000_000,
+                    "model": "gpt-5.6",
+                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": null}]
+                })
+            )
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                "{}{}data: [DONE]\n\n",
+                chunk("Hel"),
+                chunk("lo")
+            )))
+            .mount(&server)
+            .await;
+
+        let client = json_client(&format!(
+            r#"{{"providers":{{"openai":{{"api_key":"sk-x","base_url":"{}"}}}}}}"#,
+            server.uri()
+        ))
+        .unwrap();
+        let mut stream = client
+            .chat_completions_stream(r#"{"model":"openai/gpt-5.6","messages":[]}"#)
+            .await
+            .unwrap();
+
+        for expected in ["Hel", "lo"] {
+            let json = stream.next().await.expect("a chunk").expect("not an error");
+            let chunk: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(chunk["choices"][0]["delta"]["content"], expected, "{json}");
+            // Echoes the string the caller routed with.
+            assert_eq!(chunk["model"], "openai/gpt-5.6", "{json}");
+        }
+        assert!(stream.next().await.is_none());
+    }
 }

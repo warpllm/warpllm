@@ -1859,6 +1859,19 @@ mod tests {
             )),
             "{message}"
         );
+
+        // The cap is a ceiling, not a threshold: a chain of exactly that many
+        // is the longest one admitted.
+        let full: Vec<String> = (0..MAX_FAILOVER_CANDIDATES)
+            .map(|i| format!("openai/gpt-5.6-{i}"))
+            .collect();
+        let admitted = build_candidates(&CreateChatCompletionRequest {
+            models: Some(full),
+            messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(admitted.list.len(), MAX_FAILOVER_CANDIDATES);
     }
 
     /// The cursor is what makes the loop terminate: each `next` ADVANCES even
@@ -2210,6 +2223,179 @@ mod tests {
         }
     }
 
+    /// `models` is the feature that wraps, even for a chain of one: the
+    /// single-error shortcut belongs to the `model` field alone. A caller who
+    /// wrote a list is matching on `CandidatesExhausted`, and one candidate
+    /// failing is no reason to hand them a different shape.
+    #[tokio::test]
+    async fn a_models_chain_of_one_still_reports_exhaustion() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                "error": {"message": "load", "type": "server_error", "code": "server_error"}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = with_env(&[("OPENAI_API_KEY", Some("sk-openai"))], || {
+            Client::new(config_pointing_at(&server.uri(), &["openai"])).unwrap()
+        });
+        let err = client
+            .chat_completions(models_request(&["openai/gpt-5.6"]))
+            .await
+            .unwrap_err();
+        match err {
+            Error::CandidatesExhausted { models, tried } => {
+                assert_eq!(models, ["openai/gpt-5.6"]);
+                assert_eq!(tried.len(), 1, "{tried:?}");
+            }
+            other => panic!("expected CandidatesExhausted, got {other:?}"),
+        }
+
+        // The `model` field, same failure, keeps the pre-failover shape.
+        let err = client
+            .chat_completions(CreateChatCompletionRequest {
+                model: "openai/gpt-5.6".into(),
+                messages: vec![ChatCompletionRequestMessage::new("user", "hi")],
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Overloaded(_)), "{err:?}");
+    }
+
+    /// A client whose chain budget is two seconds, routing `openai` and
+    /// `deepseek` to `uri`. Each attempt in the deadline tests below takes
+    /// just over half that: well inside the budget alone, past it together,
+    /// so only the CHAIN can run out of time.
+    fn two_second_client(uri: &str) -> Client {
+        with_env(
+            &[
+                ("OPENAI_API_KEY", Some("sk-openai")),
+                ("DEEPSEEK_API_KEY", Some("sk-deepseek")),
+            ],
+            || {
+                Client::new(ClientConfig {
+                    timeout_secs: Some(2),
+                    ..config_pointing_at(uri, &["openai", "deepseek"])
+                })
+                .unwrap()
+            },
+        )
+    }
+
+    /// A chain is bounded in TOTAL, not per attempt: two candidates that each
+    /// answer inside the budget but not together run out of time, and the
+    /// caller is told what was tried rather than getting a late answer.
+    #[tokio::test]
+    async fn a_chain_that_outlasts_its_budget_reports_the_deadline() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let slow = Duration::from_millis(1100);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({"model": "gpt-5.6"})))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .set_delay(slow)
+                    .set_body_json(serde_json::json!({
+                        "error": {"message": "slow down", "type": "rate_limit_error", "code": "rate_limit_exceeded"}
+                    })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "deepseek-v4-flash"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_delay(slow).set_body_json(
+                serde_json::json!({
+                    "id": "chatcmpl-2",
+                    "object": "chat.completion",
+                    "created": 1_700_000_000,
+                    "model": "deepseek-v4-flash",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "too late"},
+                        "finish_reason": "stop"
+                    }]
+                }),
+            ))
+            .mount(&server)
+            .await;
+
+        let err = two_second_client(&server.uri())
+            .chat_completions(models_request(&[
+                "openai/gpt-5.6",
+                "deepseek/deepseek-v4-flash",
+            ]))
+            .await
+            .unwrap_err();
+        match err {
+            Error::DeadlineExceeded { tried } => {
+                assert_eq!(tried.len(), 1, "{tried:?}");
+                assert_eq!(tried[0].0, "openai/gpt-5.6");
+            }
+            other => panic!("expected DeadlineExceeded, got {other:?}"),
+        }
+    }
+
+    /// The streaming twin of the budget above: the first candidate opens and
+    /// goes quiet, the second takes as long again to open, and the stream
+    /// never starts.
+    #[tokio::test]
+    async fn a_stream_chain_that_outlasts_its_budget_reports_the_deadline() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let slow = Duration::from_millis(1100);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({"model": "gpt-5.6"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(slow)
+                    .set_body_string(""),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "deepseek-v4-flash"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(slow)
+                    .set_body_string(format!("{}data: [DONE]\n\n", sse_chunk())),
+            )
+            .mount(&server)
+            .await;
+
+        let err = two_second_client(&server.uri())
+            .chat_completions_stream(models_request(&[
+                "openai/gpt-5.6",
+                "deepseek/deepseek-v4-flash",
+            ]))
+            .await
+            .unwrap_err();
+        match err {
+            Error::DeadlineExceeded { tried } => {
+                assert_eq!(tried.len(), 1, "{tried:?}");
+                assert_eq!(tried[0].0, "openai/gpt-5.6");
+            }
+            other => panic!("expected DeadlineExceeded, got {other:?}"),
+        }
+    }
+
     fn sse_chunk() -> String {
         format!(
             "data: {}\n\n",
@@ -2359,6 +2545,67 @@ mod tests {
             server.received_requests().await.unwrap().len(),
             2,
             "the truncated candidate was tried and its backup served"
+        );
+    }
+
+    /// A first event that will not decode is a billed 200: the candidate
+    /// answered, so the chain commits to it and the caller gets the decode
+    /// error as the stream's first item. Moving on would pay a second provider
+    /// for a reply the first one already charged for.
+    #[tokio::test]
+    async fn a_stream_whose_first_event_will_not_decode_does_not_fail_over() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(serde_json::json!({"model": "gpt-5.6"})))
+            .respond_with(ResponseTemplate::new(200).set_body_string("data: not json\n\n"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "deepseek-v4-flash"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(format!("{}data: [DONE]\n\n", sse_chunk())),
+            )
+            .mount(&server)
+            .await;
+
+        let client = with_env(
+            &[
+                ("OPENAI_API_KEY", Some("sk-openai")),
+                ("DEEPSEEK_API_KEY", Some("sk-deepseek")),
+            ],
+            || Client::new(config_pointing_at(&server.uri(), &["openai", "deepseek"])).unwrap(),
+        );
+        let mut stream = client
+            .chat_completions_stream(models_request(&[
+                "openai/gpt-5.6",
+                "deepseek/deepseek-v4-flash",
+            ]))
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                stream.next().await,
+                Some(Err(Error::Decode {
+                    provider: "openai",
+                    ..
+                }))
+            ),
+            "the committed candidate's decode error is the stream's first item"
+        );
+        assert!(stream.next().await.is_none());
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "a billed reply is never re-attempted on the backup"
         );
     }
 

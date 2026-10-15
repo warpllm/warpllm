@@ -776,6 +776,14 @@ mod tests {
         }
     }
 
+    /// The wire spelling is a contract other surfaces repeat, so each origin
+    /// has exactly one, and it is not the other's.
+    #[test]
+    fn an_origin_spells_itself_for_the_wire() {
+        assert_eq!(Origin::Gateway.as_str(), "gateway");
+        assert_eq!(Origin::Provider.as_str(), "provider");
+    }
+
     fn provider_error() -> ProviderError {
         ProviderError {
             provider: "demo",

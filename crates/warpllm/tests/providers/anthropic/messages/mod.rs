@@ -359,6 +359,7 @@ fn the_default_value_of_an_untranslatable_control_still_passes() {
                 "frequency_penalty": 0,
                 "presence_penalty": 0.0,
                 "logprobs": false,
+                "top_logprobs": 0,
                 "logit_bias": {}
             })),
             anthropic_message_body(),
@@ -366,7 +367,13 @@ fn the_default_value_of_an_untranslatable_control_still_passes() {
         .await;
 
         // And none of them rode along into a body with no field to hold them.
-        for field in ["n", "frequency_penalty", "logprobs", "logit_bias"] {
+        for field in [
+            "n",
+            "frequency_penalty",
+            "logprobs",
+            "top_logprobs",
+            "logit_bias",
+        ] {
             assert!(sent.get(field).is_none(), "{field} reached Claude: {sent}");
         }
     });

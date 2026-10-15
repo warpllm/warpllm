@@ -1063,4 +1063,98 @@ mod tests {
         ));
         assert_eq!(round_trip(body.clone()), body);
     }
+
+    /// The string-valued residue fields are not the null/absent ones the other
+    /// tests pick: a spelling the fallback would not produce must come back
+    /// as it arrived.
+    #[test]
+    fn string_valued_residue_fields_survive_the_round_trip() {
+        let body = json!({
+            "id": "msg_1", "type": "message_v2", "role": "reviewer", "model": "claude-opus-5",
+            "content": [], "stop_reason": "stop_sequence", "stop_sequence": "END",
+            "usage": {"input_tokens": 1, "output_tokens": 2}
+        });
+        assert_eq!(round_trip(body.clone()), body);
+        // Checked on the typed message too: the serialized form would still
+        // show the right value if a field were left in the flattened residue.
+        let message = render_response(&ingest_response(parse(body)), "anthropic");
+        assert_eq!(message.r#type, "message_v2");
+        assert_eq!(message.stop_sequence.as_deref(), Some("END"));
+    }
+
+    /// An explicit `null` breakdown is not an absent one, and with no count to
+    /// put in a rebuilt breakdown the fallback would drop it.
+    #[test]
+    fn an_explicit_null_breakdown_survives_the_round_trip() {
+        let body = json!({
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5",
+            "content": [], "stop_reason": "end_turn", "stop_sequence": null,
+            "usage": {"input_tokens": 1, "output_tokens": 2, "output_tokens_details": null}
+        });
+        assert_eq!(round_trip(body.clone()), body);
+    }
+
+    /// A `cache_control` on a wire block is a breakpoint the gateway's block
+    /// carries too, not only residue in the retained content.
+    #[test]
+    fn a_cache_breakpoint_reaches_the_gateway_block() {
+        let response = ingest_response(parse(json!({
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5",
+            "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}],
+            "stop_reason": "end_turn", "stop_sequence": null,
+            "usage": {"input_tokens": 1, "output_tokens": 2}
+        })));
+        assert!(matches!(
+            &response.completions[0].message.content[0],
+            ContentBlock::Text { cache: Some(_), .. }
+        ));
+    }
+
+    /// A gateway breakpoint renders as a present `cache_control`, from the
+    /// gateway form alone.
+    #[test]
+    fn a_gateway_cache_breakpoint_renders_as_cache_control() {
+        let block = ContentBlock::Text {
+            text: "hi".into(),
+            cache: Some(types::CacheHint { ttl: None }),
+        };
+        assert_eq!(
+            plain(&render_block(&block).unwrap()),
+            json!({"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}})
+        );
+    }
+
+    /// A lone uncached text block is the bare string form; a cached one needs
+    /// the block form to carry its breakpoint.
+    #[test]
+    fn a_lone_uncached_text_result_renders_as_a_bare_string() {
+        let text = |cache| ContentBlock::Text {
+            text: "ok".into(),
+            cache,
+        };
+        assert_eq!(plain(&render_result_content(&[text(None)])), json!("ok"));
+        assert_eq!(
+            plain(&render_result_content(&[text(Some(types::CacheHint {
+                ttl: None
+            }))])),
+            json!([{"type": "text", "text": "ok", "cache_control": {"type": "ephemeral"}}])
+        );
+    }
+
+    /// The wire count is retained only when cached tokens made the gateway's
+    /// input differ from it; with nothing cached there is nothing to restore.
+    #[test]
+    fn the_wire_input_count_is_retained_only_when_something_was_cached() {
+        let ingest = |cache_read: u32| {
+            ingest_usage(
+                serde_json::from_value(json!({
+                    "input_tokens": 10, "output_tokens": 2,
+                    "cache_read_input_tokens": cache_read
+                }))
+                .unwrap(),
+            )
+        };
+        assert_eq!(ingest(0).ext.get("anthropic"), None, "no residue at all");
+        assert_eq!(ingest(5).ext["anthropic"]["input_tokens"], json!(10));
+    }
 }

@@ -1335,4 +1335,49 @@ mod tests {
                    "delta": {"type": "text_delta", "text": "hello"}})
         );
     }
+
+    /// A foreign tool call fragment lands on the block its own index names, not
+    /// on block zero.
+    #[test]
+    fn a_foreign_tool_call_fragment_keeps_its_block_index() {
+        let rendered = plain(
+            &render_event(
+                &foreign(
+                    vec![ContentDelta::ToolCall {
+                        index: 2,
+                        id: None,
+                        kind: None,
+                        name: None,
+                        arguments: Some("{}".into()),
+                    }],
+                    None,
+                ),
+                "openai",
+            )
+            .unwrap(),
+        );
+        assert_eq!(rendered["index"], json!(2));
+    }
+
+    /// The stop sequence reaches the typed field, not only the serialized form,
+    /// where a copy left in the flattened residue would look the same.
+    #[test]
+    fn a_message_delta_stop_sequence_is_a_typed_field() {
+        let mut state = StreamState::default();
+        let chunk = ingest(
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "stop_sequence", "stop_sequence": "STOP"},
+                "usage": {"output_tokens": 3}
+            }),
+            &mut state,
+        )
+        .expect("carries content");
+        let Some(MessageStreamEvent::MessageDelta(delta)) = render_event(&chunk, "anthropic")
+        else {
+            panic!("expected a message delta");
+        };
+        assert_eq!(delta.delta.stop_sequence, Some(Some("STOP".to_string())));
+        assert!(delta.delta.unknown_fields.is_empty());
+    }
 }

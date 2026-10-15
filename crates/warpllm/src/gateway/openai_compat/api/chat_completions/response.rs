@@ -937,4 +937,21 @@ mod tests {
             json!("step by step")
         );
     }
+
+    /// A role this crate has no word for lands on the closest gateway role, and
+    /// the raw spelling must come back out: a reply that said `developer` is
+    /// not one that said `system`.
+    #[test]
+    fn an_unrecognized_role_keeps_its_spelling_through_the_gateway_form() {
+        let mut body = maximal_body();
+        body["choices"][0]["message"]["role"] = json!("developer");
+        let normalized = ingest_response(parse(body.clone()));
+        assert_eq!(
+            normalized.completions[0].message.role,
+            crate::gateway::types::Role::System
+        );
+
+        let rendered = render_response(&normalized, "openai");
+        assert_eq!(serde_json::to_value(&rendered).unwrap(), body);
+    }
 }

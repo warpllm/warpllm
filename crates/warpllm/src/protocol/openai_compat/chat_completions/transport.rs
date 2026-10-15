@@ -746,6 +746,52 @@ mod tests {
         assert!(stream.next().await.is_none(), "the error is terminal");
     }
 
+    /// The sentinel, not the socket, says a stream is over. An upstream that
+    /// sends `[DONE]` and then keeps the response open must not be read again:
+    /// the read would stall to the timeout and report an error on a reply that
+    /// was already whole.
+    #[tokio::test]
+    async fn a_sentinel_ends_the_stream_even_when_the_socket_stays_open() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = [0u8; 2048];
+            assert!(socket.read(&mut head).await.unwrap() > 0, "no request");
+            let event = "data: [DONE]\n\n";
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                         transfer-encoding: chunked\r\n\r\n{:x}\r\n{event}\r\n",
+                        event.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            // ...and then nothing at all, with the socket still open.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let StreamOutcome::Ok(mut stream) = post_stream(
+            &reqwest::Client::new(),
+            "demo",
+            &format!("http://{addr}"),
+            Some(&key()),
+            &streamed(),
+            Some(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap() else {
+            panic!("a 200 did not stream");
+        };
+
+        assert!(stream.next().await.is_none());
+    }
+
     /// A body that disagrees with the function called for it is REFUSED, not
     /// corrected.
     ///

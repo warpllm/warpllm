@@ -1843,4 +1843,137 @@ mod tests {
             );
         }
     }
+
+    /// `text` is a response format with a gateway word of its own, distinct from
+    /// one this gateway has no word for (which is left to the residue).
+    #[test]
+    fn a_text_response_format_is_read_as_text() {
+        let normalized = ingest_request(
+            wire(json!({
+                "model": "openai/gpt-5.6",
+                "messages": [],
+                "response_format": {"type": "text"}
+            })),
+            "gpt-5.6",
+        );
+        assert!(
+            matches!(
+                normalized.response_format,
+                Some(types::ResponseFormat::Text)
+            ),
+            "{:?}",
+            normalized.response_format
+        );
+    }
+
+    /// A hosted tool has no schema to promote, so the whole wire object is what
+    /// the gateway form carries — that is what lets another protocol refuse it
+    /// by name.
+    #[test]
+    fn a_hosted_tool_carries_its_wire_object_in_ext() {
+        let normalized = ingest_request(
+            wire(json!({
+                "model": "openai/gpt-5.6",
+                "messages": [],
+                "tools": [{"type": "web_search", "vendor_option": 1}]
+            })),
+            "gpt-5.6",
+        );
+        assert_eq!(normalized.tools[0].name, "web_search");
+        assert_eq!(
+            normalized.tools[0].ext["openai_compat"],
+            json!({"type": "web_search", "vendor_option": 1})
+        );
+    }
+
+    /// Inline audio renders as `input_audio`, with its format read off the
+    /// media type's subtype when the block names none, and the block's own
+    /// format winning when it does. A URL cannot become inline bytes.
+    #[test]
+    fn inline_audio_renders_with_its_format_and_a_url_is_passed_through_as_unknown() {
+        let audio = |source, format: Option<&str>| ContentBlock::Audio {
+            source,
+            format: format.map(Into::into),
+        };
+        let inline = || MediaSource::Base64 {
+            media_type: "audio/wav".into(),
+            data: "aGk=".into(),
+        };
+        let request = types::ChatRequest {
+            model: "gpt-5.6".into(),
+            messages: vec![types::Message {
+                role: Role::User,
+                content: vec![
+                    audio(inline(), None),
+                    audio(inline(), Some("mp3")),
+                    audio(
+                        MediaSource::Url {
+                            url: "https://example.com/a.wav".into(),
+                        },
+                        None,
+                    ),
+                ],
+                ext: ProviderExt::new(),
+            }],
+            ..Default::default()
+        };
+        let rendered = plain(&render_request(&request, "openai").unwrap().messages);
+        assert_eq!(
+            rendered[0]["content"][0],
+            json!({"type": "input_audio", "input_audio": {"data": "aGk=", "format": "wav"}})
+        );
+        assert_eq!(
+            rendered[0]["content"][1],
+            json!({"type": "input_audio", "input_audio": {"data": "aGk=", "format": "mp3"}})
+        );
+        assert_eq!(rendered[0]["content"][2]["type"], json!("audio"));
+    }
+
+    /// A tool message whose content arrived as a one-part list must go back out
+    /// as that list, not collapse to the bare string a cross-protocol message
+    /// would render as.
+    #[test]
+    fn a_single_result_keeps_its_retained_content_shape() {
+        let body = json!({
+            "model": "gpt-5.6",
+            "messages": [
+                {"role": "tool", "tool_call_id": "call_1",
+                 "content": [{"type": "text", "text": "18C"}]}
+            ]
+        });
+        let normalized = ingest_request(wire(body.clone()), "gpt-5.6");
+        assert_eq!(plain(&render_request(&normalized, "openai").unwrap()), body);
+    }
+
+    /// Residue on a grouped turn rides the first message only; copying it onto
+    /// each split message would duplicate any vendor field it carried.
+    #[test]
+    fn a_grouped_turns_residue_rides_only_its_first_message() {
+        let result = |call_id: &str| ContentBlock::ToolResult {
+            call_id: call_id.into(),
+            content: vec![ContentBlock::Text {
+                text: "ok".into(),
+                cache: None,
+            }],
+            is_error: false,
+        };
+        let mut fields = UnknownFields::new();
+        fields.insert("vendor_tag".into(), json!("vt"));
+        let request = types::ChatRequest {
+            model: "gpt-5.6".into(),
+            messages: vec![types::Message {
+                role: Role::Tool,
+                content: vec![result("toolu_01"), result("toolu_02")],
+                ext: crate::gateway::openai_compat::namespaced(fields),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            plain(&render_request(&request, "openai").unwrap().messages),
+            json!([
+                {"role": "tool", "content": "ok", "tool_call_id": "toolu_01", "vendor_tag": "vt"},
+                {"role": "tool", "content": "ok", "tool_call_id": "toolu_02"}
+            ])
+        );
+    }
 }

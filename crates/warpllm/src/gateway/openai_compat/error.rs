@@ -666,4 +666,99 @@ mod tests {
         assert_eq!(rendered.error.code.as_deref(), Some("deadline_exceeded"));
         assert!(rendered.headers.is_empty(), "{:?}", rendered.headers);
     }
+
+    /// Every classified failure speaks OpenAI's vocabulary, whatever the
+    /// upstream called it. The upstream here answers 418 with a family and
+    /// code of its own, so a variant warpllm has no opinion on would come out
+    /// as exactly that — which is what makes a missing opinion visible.
+    #[test]
+    fn a_classified_failure_is_rendered_in_openais_vocabulary() {
+        let upstream = || {
+            Box::new(ProviderError {
+                provider: "demo",
+                status: 418,
+                message: "m".into(),
+                error_type: Some("vendor_family".into()),
+                provider_code: Some("vendor_code".into()),
+                retry_after: None,
+                request_id: None,
+                raw_body: String::new(),
+            })
+        };
+        for (error, status, error_type, code) in [
+            (
+                Error::RateLimited(upstream()),
+                429,
+                "rate_limit_error",
+                Some("rate_limit_exceeded"),
+            ),
+            (
+                Error::ContextLengthExceeded(upstream()),
+                400,
+                "invalid_request_error",
+                Some("context_length_exceeded"),
+            ),
+            (
+                Error::ContentFilter(upstream()),
+                400,
+                "invalid_request_error",
+                Some("content_filter"),
+            ),
+            (
+                Error::Authentication(upstream()),
+                401,
+                "invalid_request_error",
+                Some("invalid_api_key"),
+            ),
+            (
+                Error::ModelNotFound(upstream()),
+                404,
+                "invalid_request_error",
+                Some("model_not_found"),
+            ),
+            // OpenAI has no slug for these two, so the provider's own stands.
+            (
+                Error::PermissionDenied(upstream()),
+                403,
+                "invalid_request_error",
+                Some("vendor_code"),
+            ),
+            (
+                Error::InvalidRequest(upstream()),
+                400,
+                "invalid_request_error",
+                Some("vendor_code"),
+            ),
+            // An unattributed 5xx keeps the upstream's own status.
+            (
+                Error::ServerError(upstream()),
+                418,
+                "server_error",
+                Some("vendor_code"),
+            ),
+        ] {
+            let name = error.code();
+            let rendered = to_openai(&error);
+            assert_eq!(rendered.status, Some(status), "{name}");
+            assert_eq!(rendered.error.error_type, error_type, "{name}");
+            assert_eq!(rendered.error.code.as_deref(), code, "{name}");
+        }
+    }
+
+    /// No HTTP exchange happened, so there is no status to report and the
+    /// family is the one OpenAI's SDKs raise `APIConnectionError` for.
+    #[test]
+    fn a_network_failure_is_a_connection_error_without_a_status() {
+        let source = reqwest::Client::new()
+            .get("not a url")
+            .build()
+            .expect_err("a relative url is not a request");
+        let rendered = to_openai(&Error::Network {
+            provider: "demo",
+            source,
+        });
+        assert_eq!(rendered.status, None);
+        assert_eq!(rendered.error.error_type, "api_connection_error");
+        assert_eq!(rendered.error.code.as_deref(), Some("connection_error"));
+    }
 }

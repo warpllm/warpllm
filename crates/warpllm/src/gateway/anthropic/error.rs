@@ -263,6 +263,54 @@ mod tests {
         }
     }
 
+    /// A status that says something specific outranks whatever family rides
+    /// along with it. The family here is one the status arm would never pick,
+    /// so only the status arm itself can produce the expected reading.
+    #[test]
+    fn a_specific_status_outranks_a_family_that_says_otherwise() {
+        for (status, expected) in [
+            (401, "authentication"),
+            (403, "permission_denied"),
+            (404, "model_not_found"),
+            (413, "context_length_exceeded"),
+            (429, "rate_limited"),
+        ] {
+            assert_eq!(
+                coded(status, &envelope("api_error", "boom")),
+                expected,
+                "{status}"
+            );
+        }
+    }
+
+    /// Every family, with a status that says nothing: a mid-stream failure
+    /// answered 200, and a status outside the table. The 418 would otherwise
+    /// fall to `Unknown`, so only the family arm can produce the reading.
+    #[test]
+    fn every_family_decides_when_the_status_says_nothing() {
+        let cases = [
+            ("invalid_request_error", "provider_invalid_request"),
+            ("authentication_error", "authentication"),
+            ("billing_error", "quota_exceeded"),
+            ("permission_error", "permission_denied"),
+            ("not_found_error", "model_not_found"),
+            ("request_too_large", "context_length_exceeded"),
+            ("rate_limit_error", "rate_limited"),
+            ("api_error", "provider_server_error"),
+            ("timeout_error", "provider_server_error"),
+            ("overloaded_error", "overloaded"),
+        ];
+        for status in [200, 418] {
+            for (error_type, expected) in cases {
+                assert_eq!(
+                    coded(status, &envelope(error_type, "boom")),
+                    expected,
+                    "{status} {error_type}"
+                );
+            }
+        }
+    }
+
     /// 529 is outside `classify`'s 5xx residual, so an unmapped one would
     /// report a retriable overload as an unattributed server fault. Pinned on
     /// its own because it is the single reason `from_status` exists at all.

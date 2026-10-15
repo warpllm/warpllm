@@ -564,7 +564,14 @@ fn render_message_delta(
         // `output_tokens: 0` however many it had actually spent.
         usage: take_typed(&mut chunk_ext, "usage")
             .or_else(|| chunk.usage.as_ref().map(delta_usage_of))
-            .unwrap_or_else(unknown_usage),
+            // The totals for a chunk that stated none. `output_tokens` is
+            // REQUIRED on this event, so something has to go there and zero is
+            // the only inert value. It is a real limitation rather than a good
+            // answer: chat completions puts its totals on a trailing usage-only
+            // chunk that carries no choices, and one chunk cannot become two
+            // events here — see this module's note on what an Anthropic-shaped
+            // ingress owes.
+            .unwrap_or_default(),
         unknown_fields: chunk_ext,
     })
 }
@@ -585,23 +592,6 @@ fn delta_usage_of(usage: &types::Usage) -> MessageDeltaUsage {
             .map(|input| Some(input.saturating_sub(cached) as u32)),
         cache_creation_input_tokens: usage.cache_write_tokens.map(|count| Some(count as u32)),
         cache_read_input_tokens: usage.cache_read_tokens.map(|count| Some(count as u32)),
-        unknown_fields: UnknownFields::new(),
-    }
-}
-
-/// The totals for a chunk that stated none.
-///
-/// `output_tokens` is REQUIRED on this event, so something has to go there and
-/// zero is the only inert value. It is a real limitation rather than a good
-/// answer: chat completions puts its totals on a trailing usage-only chunk that
-/// carries no choices, and one chunk cannot become two events here — see this
-/// module's note on what an Anthropic-shaped ingress owes.
-fn unknown_usage() -> MessageDeltaUsage {
-    MessageDeltaUsage {
-        output_tokens: 0,
-        input_tokens: None,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
         unknown_fields: UnknownFields::new(),
     }
 }

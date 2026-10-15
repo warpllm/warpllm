@@ -697,7 +697,7 @@ fn render_content(blocks: &[ContentBlock]) -> Option<ChatCompletionRequestMessag
     let parts: Vec<_> = blocks.iter().filter_map(render_part).collect();
     match parts.as_slice() {
         [] => None,
-        [ChatCompletionRequestMessageContentPart::Text(part)] if part.unknown_fields.is_empty() => {
+        [ChatCompletionRequestMessageContentPart::Text(part)] => {
             Some(ChatCompletionRequestMessageContent::Text(part.text.clone()))
         }
         _ => Some(ChatCompletionRequestMessageContent::Parts(parts)),

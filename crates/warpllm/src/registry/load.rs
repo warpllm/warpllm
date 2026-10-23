@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use super::intern::intern;
 use super::types::{Capabilities, Credential, ModelSpec, ProviderSpec, Registry, SupportedApi};
-use crate::protocol::anthropic::messages::transport::Route;
+use crate::protocol::anthropic::messages::transport::{VERTEX_CLAUDE_PREFIX, is_vertex_ai};
 
 /// The whole roster: providers, each holding the models routable under it.
 ///
@@ -178,18 +178,27 @@ fn build_provider(registry: &mut Registry, name: &str, entry: ProviderEntry) -> 
     let credential = credential(name, env_api_key, auth)?;
     for (key, model) in models.unwrap_or_default() {
         let spec = build(&key, name, model).map_err(|e| format!("`{key}`: {e}"))?;
-        // Claude on Vertex is reached over the Anthropic protocol only; a
-        // model listing any other surface under it would be admitted to a
-        // request the host cannot serve, and fail as a 404 upstream.
-        if Route::for_provider(name) == Route::Vertex {
+        // Under Vertex, the model's own name says which protocol it speaks:
+        // `claude-*` is Anthropic's Messages in Vertex's envelope, and nothing
+        // else has a surface warpllm can send there yet (Gemini is #35). A model
+        // listing another surface would be admitted to a request the host cannot
+        // serve and fail as a 404 upstream.
+        if is_vertex_ai(name) {
+            if !spec.model().starts_with(VERTEX_CLAUDE_PREFIX) {
+                return Err(format!(
+                    "`{key}`: a `{name}` model must be a `claude-*` model for now, but \
+                     this one is sent upstream as `{}`; Gemini is not supported yet",
+                    spec.model()
+                ));
+            }
             for supported in spec.supported_apis() {
                 if !matches!(
                     supported.api(),
                     crate::Api::AnthropicMessages | crate::Api::AnthropicMessagesStream
                 ) {
                     return Err(format!(
-                        "`{key}`: a `vertex` provider serves Claude over the Anthropic \
-                         protocol only, but this model lists {:?}",
+                        "`{key}`: a `{name}` Claude model speaks the Anthropic protocol \
+                         only, but this one lists {:?}",
                         supported.api()
                     ));
                 }
@@ -379,32 +388,62 @@ mod tests {
         assert_eq!(provider.env_api_key(), None);
     }
 
-    /// Claude on Vertex is reached over the Anthropic protocol only, so a model
-    /// listing another surface under a `vertex` provider is a roster nobody can
-    /// serve.
-    #[test]
-    fn a_vertex_provider_may_not_list_a_non_anthropic_surface() {
-        let err = load(
-            "providers:\n  vertex:\n    base_url: \"https://example.test/v1\"\n    auth: oauth\n    \
-             models:\n      vertex/claude:\n        supported_apis:\n          \
-             - {api: openai_compat_chat_completions}\n",
+    /// A one-model roster under `provider`, for the Vertex naming rules.
+    fn vertex_roster(provider: &str, model: &str, api: &str) -> String {
+        format!(
+            "providers:\n  {provider}:\n    base_url: \"https://example.test/v1\"\n    auth: oauth\n    models:\n      {provider}/{model}:\n        supported_apis:\n          - {{api: {api}}}\n"
         )
+    }
+
+    /// Under `vertex_ai` a Claude model speaks the Anthropic protocol, so a
+    /// chat-completions surface is a roster nobody can serve.
+    #[test]
+    fn a_vertex_ai_claude_model_may_list_only_anthropic_surfaces() {
+        let err = load(&vertex_roster(
+            "vertex_ai",
+            "claude-sonnet-5-5",
+            "openai_compat_chat_completions",
+        ))
         .unwrap_err();
         assert!(err.contains("Anthropic protocol only"), "{err}");
     }
 
-    /// ...and the Anthropic surfaces are what it is for, under `vertex` or any
-    /// `vertex-*` provider.
+    /// ...and the Anthropic surfaces are what it is for, under `vertex_ai` or
+    /// any `vertex_ai-*` provider.
     #[test]
-    fn a_vertex_provider_may_list_the_anthropic_surfaces() {
-        for name in ["vertex", "vertex-eu"] {
-            load(&format!(
-                "providers:\n  {name}:\n    base_url: \"https://example.test/v1\"\n    auth: oauth\n    \
-                 models:\n      {name}/claude:\n        supported_apis:\n          \
-                 - {{api: anthropic_messages}}\n"
+    fn a_vertex_ai_claude_model_may_list_the_anthropic_surfaces() {
+        for provider in ["vertex_ai", "vertex_ai-eu"] {
+            load(&vertex_roster(
+                provider,
+                "claude-sonnet-5-5",
+                "anthropic_messages",
             ))
             .unwrap();
         }
+    }
+
+    /// Gemini has no surface warpllm speaks yet (#35), so a non-Claude model
+    /// under `vertex_ai` is refused rather than sent somewhere it cannot work.
+    #[test]
+    fn a_vertex_ai_model_must_be_a_claude_model_until_gemini_lands() {
+        let err = load(&vertex_roster(
+            "vertex_ai",
+            "gemini-3-pro",
+            "anthropic_messages",
+        ))
+        .unwrap_err();
+        assert!(err.contains("claude-*"), "{err}");
+    }
+
+    /// The name is the whole rule: the old `vertex` is an ordinary provider.
+    #[test]
+    fn the_old_vertex_name_is_an_ordinary_provider() {
+        load(&vertex_roster(
+            "vertex",
+            "gemini-3-pro",
+            "openai_compat_chat_completions",
+        ))
+        .unwrap();
     }
 
     /// A provider that mints its own token: it needs a credential, so it is

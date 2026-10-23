@@ -53,17 +53,30 @@ pub(crate) enum Route {
 }
 
 impl Route {
-    /// The provider's name decides, so nobody passes a route: `vertex` and
-    /// `vertex-*` (one per project or region) are Claude on Google Cloud, and
+    /// Which shape this request takes. Two things decide it and neither is
+    /// passed by anyone: the provider's name says the host is Vertex AI, and
+    /// the model's own name says which protocol it speaks there. A `claude-*`
+    /// model under `vertex_ai` is Anthropic's Messages in Vertex's envelope;
     /// everything else is the plain Anthropic shape.
-    pub(crate) fn for_provider(provider: &str) -> Self {
-        if provider == "vertex" || provider.starts_with("vertex-") {
+    pub(crate) fn for_request(provider: &str, model: &str) -> Self {
+        if is_vertex_ai(provider) && model.starts_with(VERTEX_CLAUDE_PREFIX) {
             Route::Vertex
         } else {
             Route::Anthropic
         }
     }
 }
+
+/// Whether a provider's name marks its host as Vertex AI: `vertex_ai`, or
+/// `vertex_ai-<anything>` for a roster that reaches more than one project or
+/// region, since each needs its own `base_url`.
+pub(crate) fn is_vertex_ai(provider: &str) -> bool {
+    provider == "vertex_ai" || provider.starts_with("vertex_ai-")
+}
+
+/// Claude's models are all named `claude-…` on Vertex, which is how one under
+/// `vertex_ai` is told apart from the other families Vertex serves.
+pub(crate) const VERTEX_CLAUDE_PREFIX: &str = "claude-";
 
 /// What the upstream said. A non-2xx is NOT an [`Err`] here: which [`Error`] a
 /// given status and body becomes is the caller's to decide, and deciding here
@@ -245,7 +258,7 @@ async fn send(
     auth: Option<&Authenticator>,
     body: &CreateMessageRequest,
 ) -> Result<reqwest::Response> {
-    let request = match Route::for_provider(provider) {
+    let request = match Route::for_request(provider, &body.model) {
         Route::Anthropic => http
             .post(format!("{}/messages", base_url.trim_end_matches('/')))
             .header("anthropic-version", API_VERSION)
@@ -1056,7 +1069,7 @@ mod tests {
 
         let outcome = post(
             &reqwest::Client::new(),
-            "vertex",
+            "vertex_ai",
             &server.uri(),
             Some(&Authenticator::bearer("ya29.demo".into())),
             &CreateMessageRequest {
@@ -1090,7 +1103,7 @@ mod tests {
 
         let outcome = post_stream(
             &reqwest::Client::new(),
-            "vertex",
+            "vertex_ai",
             &server.uri(),
             Some(&Authenticator::bearer("ya29.demo".into())),
             &CreateMessageRequest {
@@ -1108,5 +1121,17 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
         assert_eq!(body["stream"], true, "{body}");
         assert!(body.get("model").is_none(), "{body}");
+    }
+
+    /// The provider's name says "this is Vertex", and the model's name says which
+    /// protocol: only a `claude-*` model under `vertex_ai` takes Vertex's shape.
+    #[test]
+    fn only_a_claude_model_under_vertex_ai_takes_the_vertex_route() {
+        let vertex = |p, m| Route::for_request(p, m) == Route::Vertex;
+        assert!(vertex("vertex_ai", "claude-sonnet-5-5"));
+        assert!(vertex("vertex_ai-eu", "claude-opus-5"));
+        assert!(!vertex("vertex_ai", "gemini-3-pro"));
+        assert!(!vertex("anthropic", "claude-opus-5"));
+        assert!(!vertex("vertex", "claude-opus-5"));
     }
 }

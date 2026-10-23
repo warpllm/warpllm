@@ -63,7 +63,7 @@ impl GcpTokenProvider {
                 gcp_auth::provider()
                     .await
                     .map_err(|err| Error::CredentialResolutionFailed {
-                        provider: "vertex",
+                        provider: "vertex_ai",
                         message: err.to_string(),
                     })
             })
@@ -77,7 +77,7 @@ impl TokenProvider for GcpTokenProvider {
         let inner = self.inner().await?;
         let token = inner.token(&[CLOUD_PLATFORM_SCOPE]).await.map_err(|err| {
             Error::CredentialResolutionFailed {
-                provider: "vertex",
+                provider: "vertex_ai",
                 message: err.to_string(),
             }
         })?;
@@ -172,7 +172,7 @@ mod tests {
     }
 
     /// A mint failure from the underlying provider surfaces as
-    /// [`Error::CredentialResolutionFailed`], naming "vertex" -- the same
+    /// [`Error::CredentialResolutionFailed`], naming "vertex_ai" -- the same
     /// failure path a bad service account file or unreachable metadata
     /// server would take in production.
     #[tokio::test]
@@ -185,7 +185,7 @@ mod tests {
         match provider.token().await {
             Ok(_) => panic!("a failing underlying provider must not produce a token"),
             Err(Error::CredentialResolutionFailed { provider, .. }) => {
-                assert_eq!(provider, "vertex");
+                assert_eq!(provider, "vertex_ai");
             }
             Err(other) => panic!("expected CredentialResolutionFailed, got {other}"),
         }

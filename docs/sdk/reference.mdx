@@ -258,31 +258,33 @@ The file is merged over the built-in roster.
 
 ```yaml
 providers:
-  vertex:
+  vertex_ai:
     base_url: "https://aiplatform.us.rep.googleapis.com/v1/projects/my-project/locations/us"
-    envelope: vertex
     auth: oauth
     models:
-      vertex/claude-sonnet-5-5:
+      vertex_ai/claude-sonnet-5-5:
         supported_apis:
           - {api: anthropic_messages}
           - {api: anthropic_messages_stream}
 ```
 
-- **`envelope: vertex`** sends requests in Vertex's shape. The model goes in the
-  URL (`:rawPredict`, or `:streamRawPredict` when streaming), `anthropic_version`
-  goes in the body, and no `anthropic-version` header is sent.
+- **The provider name** `vertex_ai` is what marks the host as Vertex, and a
+  `claude-*` model name says it speaks Anthropic's Messages there. Nothing else
+  is declared. Requests go out in Vertex's shape: the model goes in the URL
+  (`:rawPredict`, or `:streamRawPredict` when streaming), `anthropic_version`
+  goes in the body, and no `anthropic-version` header is sent. Name providers
+  `vertex_ai-<anything>` to reach more than one project or region.
 - **`base_url`** is the whole prefix through the location, because global,
   multi-region and regional hosts differ. Warpllm appends only the publisher,
   model and verb.
 - **`auth: oauth`** means no key in the environment. Warpllm mints a bearer token
   from Application Default Credentials: `gcloud auth application-default login`,
   a service account via `GOOGLE_APPLICATION_CREDENTIALS`, or workload identity.
-- A Vertex provider may list only Anthropic surfaces. Anything else is refused
-  when the roster loads.
+- A `claude-*` model under it may list only Anthropic surfaces, and any other
+  model is refused when the roster loads for now. Gemini is not supported yet.
 
 <Note>
-  If the client also declares `providers`, name `vertex` in it, or its models are
+  If the client also declares `providers`, name `vertex_ai` in it, or its models are
   refused with `provider_not_declared`.
 </Note>
 

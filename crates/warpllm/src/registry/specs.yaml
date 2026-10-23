@@ -55,20 +55,25 @@
 #                 it (neither field). If silence meant the second, a forgotten
 #                 line on a paid provider would quietly become an
 #                 unauthenticated request instead of a loud local error.
-#   envelope      Optional, and its only value is `vertex`. Says this host is
-#                 Claude on Google Cloud: the same Anthropic protocol, but
-#                 the model rides in the URL (`:rawPredict`, or
-#                 `:streamRawPredict` when streaming), `anthropic_version`
-#                 rides in the body, and no `anthropic-version` header is
-#                 sent. `base_url` is then the whole prefix through the
-#                 location, because global, multi-region and regional hosts
-#                 differ. Every model under it may list only Anthropic
-#                 surfaces.
-#
-#                 Vertex has no universal URL, since every caller has their
-#                 own project, so it belongs in a roster of your own and
-#                 never in this file.
 #   models        The models routable under this provider.
+#
+# Claude on Vertex AI
+# -------------------
+# A provider named `vertex_ai` (or `vertex_ai-<anything>`, one per project or
+# region) is Claude on Google Cloud. Nothing is declared for it: the provider's
+# name says the host is Vertex, and each model's own name says which protocol
+# it speaks there.
+#
+# A `claude-*` model is sent Anthropic's Messages in Vertex's envelope: the
+# model rides in the URL (`:rawPredict`, or `:streamRawPredict` when
+# streaming), `anthropic_version` rides in the body, and no `anthropic-version`
+# header is sent. It may list only Anthropic surfaces. `base_url` is the whole
+# prefix through the location, because global, multi-region and regional hosts
+# differ, and `auth: oauth` mints the bearer token. Any other model under it is
+# refused for now; Gemini is #35.
+#
+# Vertex has no universal URL, since every caller has their own project, so it
+# belongs in a roster of your own and never in this file.
 #
 # Model fields
 # ------------

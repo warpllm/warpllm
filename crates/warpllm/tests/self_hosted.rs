@@ -154,14 +154,14 @@ fn a_user_roster_routes_to_a_local_server_with_no_credential() {
     });
 }
 
-/// Claude on Vertex, end to end: a caller's roster declares `envelope: vertex`,
+/// Claude on Vertex, end to end: a caller's roster names a provider `vertex_ai`,
 /// and the request reaches the model-in-the-URL `:rawPredict` path with the
 /// version in the body and neither Anthropic's header nor its `model` field.
 ///
 /// `auth: none` because `auth: oauth` would resolve real Application Default
 /// Credentials; the bearer itself is pinned in the transport's own tests.
 #[test]
-fn a_vertex_envelope_roster_reaches_raw_predict() {
+fn a_vertex_ai_roster_reaches_raw_predict() {
     with_env(&[], async {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -184,11 +184,11 @@ fn a_vertex_envelope_roster_reaches_raw_predict() {
 
         let roster = format!(
             "providers:\n  \
-               vertex-demo:\n    \
+               vertex_ai:\n    \
                  base_url: \"{}/v1/projects/p/locations/global\"\n    \
                  auth: none\n    \
                  models:\n      \
-                   vertex-demo/claude-sonnet-5-5:\n        \
+                   vertex_ai/claude-sonnet-5-5:\n        \
                      supported_apis:\n          \
                        - {{api: anthropic_messages}}\n        \
                      capabilities:\n          \
@@ -198,10 +198,10 @@ fn a_vertex_envelope_roster_reaches_raw_predict() {
         let (_dir, path) = roster_file(&roster);
 
         let completion = client_with(&path)
-            .chat_completions(request("vertex-demo/claude-sonnet-5-5"))
+            .chat_completions(request("vertex_ai/claude-sonnet-5-5"))
             .await
-            .expect("a vertex-envelope roster should complete a request");
-        assert_eq!(completion.model, "vertex-demo/claude-sonnet-5-5");
+            .expect("a vertex_ai roster should complete a request");
+        assert_eq!(completion.model, "vertex_ai/claude-sonnet-5-5");
 
         let sent = &server.received_requests().await.unwrap()[0];
         assert!(sent.headers.get("anthropic-version").is_none());

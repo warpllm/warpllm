@@ -564,7 +564,7 @@ mod tests {
             ),
             (
                 Error::CredentialResolutionFailed {
-                    provider: "vertex",
+                    provider: "vertex_ai",
                     message: "no ADC found".into(),
                 },
                 401,
@@ -636,7 +636,7 @@ mod tests {
     #[test]
     fn a_failed_token_mint_is_not_a_missing_key_on_the_wire() {
         let unminted = wire(&Error::CredentialResolutionFailed {
-            provider: "vertex",
+            provider: "vertex_ai",
             message: "no ADC found".into(),
         });
         let unauthenticated = wire(&Error::MissingApiKey {

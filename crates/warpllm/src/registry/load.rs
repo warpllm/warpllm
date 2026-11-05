@@ -211,13 +211,18 @@ fn build_provider(registry: &mut Registry, name: &str, entry: ProviderEntry) -> 
     validate_provider(name)?;
     let ProviderEntry {
         base_url,
-        vertex,
+        vertex: vertex_extension,
         env_api_key,
         auth,
         models,
     } = entry;
-    let is_vertex = vertex.is_some();
-    let base_url = resolve_base_url(name, base_url, vertex.as_ref())?;
+    if vertex_extension.is_some() && name != "vertex_ai" {
+        return Err(format!(
+            "`{name}`: a `vertex:` block is only valid on the provider named \
+             `vertex_ai`. Rename the provider or delete the block"
+        ));
+    }
+    let base_url = resolve_base_url(name, base_url, vertex_extension.as_ref())?;
     let credential = credential(name, env_api_key, auth)?;
     for (key, model) in models.unwrap_or_default() {
         let spec = build(&key, name, model).map_err(|e| format!("`{key}`: {e}"))?;
@@ -225,7 +230,7 @@ fn build_provider(registry: &mut Registry, name: &str, entry: ProviderEntry) -> 
         // protocol warpllm can send there is Anthropic's Messages. A model listing
         // another surface would be admitted to a request the host cannot serve and
         // fail as a 404 upstream.
-        if is_vertex {
+        if vertex_extension.is_some() {
             for supported in spec.supported_apis() {
                 if !matches!(
                     supported.api(),
@@ -247,7 +252,6 @@ fn build_provider(registry: &mut Registry, name: &str, entry: ProviderEntry) -> 
             name: intern(name),
             base_url,
             credential,
-            vertex: is_vertex,
         },
     );
     Ok(())
@@ -481,10 +485,9 @@ mod tests {
         ] {
             let block =
                 format!("    vertex:\n      project_id: my-project\n      region: {region}\n");
-            let registry = load(&vertex_roster("gcp", &block, "anthropic_messages")).unwrap();
-            let provider = registry.providers.get("gcp").unwrap();
+            let registry = load(&vertex_roster("vertex_ai", &block, "anthropic_messages")).unwrap();
+            let provider = registry.providers.get("vertex_ai").unwrap();
             assert_eq!(provider.base_url(), expected, "{region}");
-            assert!(provider.vertex, "{region}");
         }
     }
 
@@ -493,7 +496,7 @@ mod tests {
     #[test]
     fn base_url_and_a_vertex_block_together_are_refused() {
         let both = format!("    base_url: \"https://example.test/v1\"\n{VERTEX_US}");
-        let err = load(&vertex_roster("gcp", &both, "anthropic_messages")).unwrap_err();
+        let err = load(&vertex_roster("vertex_ai", &both, "anthropic_messages")).unwrap_err();
         assert!(err.contains("one or the other"), "{err}");
     }
 
@@ -508,41 +511,36 @@ mod tests {
     #[test]
     fn a_vertex_provider_may_list_only_anthropic_surfaces_for_now() {
         let err = load(&vertex_roster(
-            "gcp",
+            "vertex_ai",
             VERTEX_US,
             "openai_compat_chat_completions",
         ))
         .unwrap_err();
         assert!(err.contains("Anthropic protocol only"), "{err}");
         for api in ["anthropic_messages", "anthropic_messages_stream"] {
-            load(&vertex_roster("gcp", VERTEX_US, api)).unwrap();
+            load(&vertex_roster("vertex_ai", VERTEX_US, api)).unwrap();
         }
     }
 
     #[test]
     fn a_vertex_block_needs_both_a_project_and_a_region() {
         let block = "    vertex:\n      project_id: my-project\n";
-        let err = load(&vertex_roster("gcp", block, "anthropic_messages")).unwrap_err();
+        let err = load(&vertex_roster("vertex_ai", block, "anthropic_messages")).unwrap_err();
         assert!(err.contains("region"), "{err}");
     }
 
     #[test]
     fn a_region_that_cannot_sit_in_a_url_is_refused() {
         let block = "    vertex:\n      project_id: my-project\n      region: us/east5\n";
-        let err = load(&vertex_roster("gcp", block, "anthropic_messages")).unwrap_err();
+        let err = load(&vertex_roster("vertex_ai", block, "anthropic_messages")).unwrap_err();
         assert!(err.contains("vertex.region"), "{err}");
     }
 
-    /// The name is the caller's: nothing about `vertex_ai` makes a provider Vertex.
+    /// Only `vertex_ai` may carry a `vertex:` block.
     #[test]
-    fn a_provider_named_vertex_ai_is_ordinary_without_a_block() {
-        let roster = vertex_roster(
-            "vertex_ai",
-            "    base_url: \"https://example.test/v1\"\n",
-            "openai_compat_chat_completions",
-        );
-        let registry = load(&roster).unwrap();
-        assert!(!registry.providers.get("vertex_ai").unwrap().vertex);
+    fn a_vertex_block_is_refused_on_any_other_provider() {
+        let err = load(&vertex_roster("gcp", VERTEX_US, "anthropic_messages")).unwrap_err();
+        assert!(err.contains("only valid on"), "{err}");
     }
 
     /// A provider that mints its own token: it needs a credential, so it is

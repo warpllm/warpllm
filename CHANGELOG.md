@@ -12,13 +12,11 @@ incompatible, and `^0.1` will not upgrade you into one.
 
 ### Added
 
-- **Claude on Google Cloud (Vertex AI).** A provider in your own roster with a
-  `vertex:` block is reached the way Vertex expects Claude: the model rides in
+- **Claude on Google Cloud (Vertex AI).** The provider named `vertex_ai` in your own roster is reached the way Vertex expects Claude: the model rides in
   the URL (`:rawPredict`, or `:streamRawPredict` when streaming),
   `anthropic_version` rides in the body, and no `anthropic-version` header is
   sent. The block holds `project_id` and `region`, and warpllm derives the
-  address from them, so a provider takes either a `vertex:` block or a
-  `base_url`, never both. The provider's name is yours to choose. Models list
+  address from them, so `vertex_ai` takes either a `vertex:` block or a `base_url`, never both. A `vertex:` block on any other provider is a load error. Models list
   `anthropic_messages` and `anthropic_messages_stream`, and a chat-completions
   request is translated as it is for any Claude. `auth: oauth` mints the bearer
   token from Application Default Credentials:

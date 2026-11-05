@@ -53,11 +53,10 @@ pub(crate) enum Route {
 }
 
 impl Route {
-    /// Which shape the request takes. The provider's spec decides and no caller
-    /// chooses: a provider with a `vertex:` block is Vertex AI, and the Messages
-    /// requests sent to it take Vertex's shape.
-    pub(crate) fn select(vertex: bool) -> Self {
-        if vertex {
+    /// Which shape the request takes, read from the provider name: exactly
+    /// `vertex_ai` is Vertex AI, every other provider is plain Anthropic.
+    pub(crate) fn for_provider(provider: &str) -> Self {
+        if provider == "vertex_ai" {
             Route::Vertex
         } else {
             Route::Anthropic
@@ -103,7 +102,6 @@ pub(crate) async fn post(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    route: Route,
     auth: Option<&Authenticator>,
     body: &CreateMessageRequest,
 ) -> Result<Outcome> {
@@ -112,7 +110,7 @@ pub(crate) async fn post(
             "stream: true asks for events; a whole reply cannot carry them".into(),
         ));
     }
-    let response = send(http, provider, base_url, route, auth, body).await?;
+    let response = send(http, provider, base_url, auth, body).await?;
 
     let parts = read_response(provider, response).await?;
     if !(200..300).contains(&parts.status) {
@@ -173,7 +171,6 @@ pub(crate) async fn post_stream(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    route: Route,
     auth: Option<&Authenticator>,
     body: &CreateMessageRequest,
     read_timeout: Option<Duration>,
@@ -183,7 +180,7 @@ pub(crate) async fn post_stream(
             "a streamed request must carry stream: true".into(),
         ));
     }
-    let response = send(http, provider, base_url, route, auth, body).await?;
+    let response = send(http, provider, base_url, auth, body).await?;
 
     if !(200..300).contains(&response.status().as_u16()) {
         let parts = read_response(provider, response).await?;
@@ -244,11 +241,10 @@ async fn send(
     http: &reqwest::Client,
     provider: &'static str,
     base_url: &str,
-    route: Route,
     auth: Option<&Authenticator>,
     body: &CreateMessageRequest,
 ) -> Result<reqwest::Response> {
-    let request = match route {
+    let request = match Route::for_provider(provider) {
         Route::Anthropic => http
             .post(format!("{}/messages", base_url.trim_end_matches('/')))
             .header("anthropic-version", API_VERSION)
@@ -489,7 +485,6 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            Route::Anthropic,
             Some(&key()),
             &CreateMessageRequest::default(),
         )
@@ -584,7 +579,6 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &format!("{}/", server.uri()),
-            Route::Anthropic,
             Some(&key()),
             &CreateMessageRequest::default(),
         )
@@ -631,7 +625,6 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            Route::Anthropic,
             Some(&key()),
             &streamed(),
             // Unbounded, which is the default and what every test but the
@@ -917,7 +910,6 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &format!("http://{addr}"),
-            Route::Anthropic,
             Some(&key()),
             &streamed(),
             Some(LIMIT),
@@ -964,7 +956,6 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            Route::Anthropic,
             Some(&key()),
             &CreateMessageRequest {
                 model: "claude-opus-5".to_string(),
@@ -1001,7 +992,6 @@ mod tests {
                 &reqwest::Client::new(),
                 "anthropic",
                 &server.uri(),
-                Route::Anthropic,
                 Some(&key()),
                 &CreateMessageRequest {
                     stream,
@@ -1032,7 +1022,6 @@ mod tests {
             &reqwest::Client::new(),
             "anthropic",
             &server.uri(),
-            Route::Anthropic,
             Some(&key()),
             &CreateMessageRequest {
                 stream: Some(true),
@@ -1068,7 +1057,6 @@ mod tests {
             &reqwest::Client::new(),
             "vertex_ai",
             &server.uri(),
-            Route::Vertex,
             Some(&Authenticator::bearer("ya29.demo".into())),
             &CreateMessageRequest {
                 model: "claude-opus-5".into(),
@@ -1103,7 +1091,6 @@ mod tests {
             &reqwest::Client::new(),
             "vertex_ai",
             &server.uri(),
-            Route::Vertex,
             Some(&Authenticator::bearer("ya29.demo".into())),
             &CreateMessageRequest {
                 model: "claude-opus-5".into(),
@@ -1122,11 +1109,11 @@ mod tests {
         assert!(body.get("model").is_none(), "{body}");
     }
 
-    /// The route is the spec's to choose: a `vertex:` provider is Vertex, and
+    /// The route is read from the provider name: `vertex_ai` is Vertex and
     /// anything else is the plain Anthropic shape.
     #[test]
-    fn the_route_follows_the_provider_spec() {
-        assert_eq!(Route::select(true), Route::Vertex);
-        assert_eq!(Route::select(false), Route::Anthropic);
+    fn the_route_follows_the_provider_name() {
+        assert_eq!(Route::for_provider("vertex_ai"), Route::Vertex);
+        assert_eq!(Route::for_provider("anthropic"), Route::Anthropic);
     }
 }

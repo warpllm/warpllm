@@ -505,7 +505,6 @@ mod tests {
             // landed, which is the case an inline key rescues. A host that
             // wants no credential is a different entry and needs no rescuing.
             credential: crate::registry::Credential::Unavailable,
-            vertex: false,
         };
         with_env(&[], || {
             assert_eq!(

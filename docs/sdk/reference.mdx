@@ -270,15 +270,13 @@ providers:
           - {api: anthropic_messages_stream}
 ```
 
-- **`vertex:`** marks the provider as Vertex AI, and the provider's name is
-  yours to choose. `project_id` and `region` are both required, and warpllm
+- **`vertex:`** goes on the provider named `vertex_ai`, which is the provider whose Messages requests take Vertex's shape. No other provider may carry it. `project_id` and `region` are both required, and warpllm
   derives the address from them: `global`, a multi-region (`us`, `eu`) and a
   regional location (`us-east5`) each get their own host. Messages requests go
   out in Vertex's shape: the model goes in the URL (`:rawPredict`, or
   `:streamRawPredict` when streaming), `anthropic_version` goes in the body, and
   no `anthropic-version` header is sent.
-- **`base_url`** is not written. Set `vertex:` or `base_url`, never both: a
-  roster that sets both is refused when it loads.
+- **`base_url`** is not written here. `vertex_ai` takes either `vertex:` or `base_url`, never both: a roster that sets both is refused when it loads.
 - **`auth: oauth`** means no key in the environment. Warpllm mints a bearer token
   from Application Default Credentials: `gcloud auth application-default login`,
   a service account via `GOOGLE_APPLICATION_CREDENTIALS`, or workload identity.

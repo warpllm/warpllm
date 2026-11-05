@@ -66,10 +66,6 @@ pub struct ProviderSpec {
     pub(crate) name: &'static str,
     pub(crate) base_url: String,
     pub(crate) credential: Credential,
-    /// The roster gave this provider a `vertex:` block, so it is Vertex AI and
-    /// Messages requests to it take Vertex's shape. The block's own fields have
-    /// done their work by now: they were folded into `base_url` at load time.
-    pub(crate) vertex: bool,
 }
 
 /// How a provider authenticates, with all four states named.

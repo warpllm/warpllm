@@ -57,16 +57,17 @@
 #                 line on a paid provider would quietly become an
 #                 unauthenticated request instead of a loud local error.
 #   vertex        Optional. Claude on Google Cloud: a block with `project_id` and
-#                 `region`, both required. It marks the provider as Vertex AI and
-#                 derives the address from them, so it may NOT appear beside
+#                 `region`, both required. Only valid on the provider
+#                 named `vertex_ai`. It derives the address from them, so it may NOT appear beside
 #                 `base_url`: use one or the other. Until Gemini (#35) a provider
 #                 with one may list only Anthropic surfaces.
 #   models        The models routable under this provider.
 #
 # Claude on Vertex AI
 # -------------------
-# A provider with a `vertex:` block is Claude on Google Cloud, under whatever
-# name you give it (one provider per project or region). The block holds
+# The provider named `vertex_ai` is Claude on Google Cloud. It takes either a
+# `vertex:` block or a plain `base_url`, and a `vertex:` block on any other
+# provider is a load error. The block holds
 # `project_id` and `region`, and warpllm derives the address from them:
 # `https://{host}/v1/projects/{project_id}/locations/{region}`. The host is
 # `aiplatform.googleapis.com` for `global`, `aiplatform.us.rep.googleapis.com`

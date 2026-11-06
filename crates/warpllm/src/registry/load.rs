@@ -17,7 +17,6 @@ use serde::Deserialize;
 
 use super::intern::intern;
 use super::types::{Capabilities, Credential, ModelSpec, ProviderSpec, Registry, SupportedApi};
-use crate::protocol::anthropic::messages::transport::Route;
 
 /// The whole roster: providers, each holding the models routable under it.
 ///
@@ -44,7 +43,12 @@ struct RegistryFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProviderEntry {
-    base_url: String,
+    /// Where the provider lives, written out. Optional only because a `vertex:`
+    /// block can stand in for it; one of the two is required, never both.
+    base_url: Option<String>,
+    /// Claude on Google Cloud. Derives the address from its project and region,
+    /// which is why it may not appear beside `base_url`.
+    vertex: Option<VertexExtension>,
     env_api_key: Option<String>,
     /// How this provider authenticates when it does NOT read a variable.
     ///
@@ -61,6 +65,42 @@ struct ProviderEntry {
     /// both leave a perfectly buildable pair of tables.
     #[serde(default)]
     models: Option<HashMap<String, ModelEntry>>,
+}
+
+/// The `vertex:` block: where on Google Cloud the provider's models live.
+///
+/// Both fields are required, so a block with one missing fails with serde's own
+/// line and column rather than deriving half an address.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VertexExtension {
+    project_id: String,
+    region: String,
+}
+
+impl VertexExtension {
+    /// `https://{host}/v1/projects/{project_id}/locations/{region}`. The host is
+    /// bare for `global`, `aiplatform.{us,eu}.rep.googleapis.com` for the two
+    /// multi-regions, and `{region}-aiplatform.googleapis.com` for any other.
+    fn base_url(&self, name: &str) -> Result<String, String> {
+        for (field, value) in [("project_id", &self.project_id), ("region", &self.region)] {
+            if value.is_empty() || value.chars().any(|c| c == '/' || c.is_whitespace()) {
+                return Err(format!(
+                    "`{name}`: `vertex.{field}` is `{value}`, which cannot be part of a \
+                     URL path; write the plain Google Cloud {field}"
+                ));
+            }
+        }
+        let host = match self.region.as_str() {
+            "global" => "aiplatform.googleapis.com".to_string(),
+            "us" | "eu" => format!("aiplatform.{}.rep.googleapis.com", self.region),
+            region => format!("{region}-aiplatform.googleapis.com"),
+        };
+        Ok(format!(
+            "https://{host}/v1/projects/{}/locations/{}",
+            self.project_id, self.region
+        ))
+    }
 }
 
 /// The `auth:` vocabulary.
@@ -171,25 +211,34 @@ fn build_provider(registry: &mut Registry, name: &str, entry: ProviderEntry) -> 
     validate_provider(name)?;
     let ProviderEntry {
         base_url,
+        vertex: vertex_extension,
         env_api_key,
         auth,
         models,
     } = entry;
+    if vertex_extension.is_some() && name != "vertex_ai" {
+        return Err(format!(
+            "`{name}`: a `vertex:` block is only valid on the provider named \
+             `vertex_ai`. Rename the provider or delete the block"
+        ));
+    }
+    let base_url = resolve_base_url(name, base_url, vertex_extension.as_ref())?;
     let credential = credential(name, env_api_key, auth)?;
     for (key, model) in models.unwrap_or_default() {
         let spec = build(&key, name, model).map_err(|e| format!("`{key}`: {e}"))?;
-        // Claude on Vertex is reached over the Anthropic protocol only; a
-        // model listing any other surface under it would be admitted to a
-        // request the host cannot serve, and fail as a 404 upstream.
-        if Route::for_provider(name) == Route::Vertex {
+        // A `vertex:` provider is Vertex AI, and until Gemini lands (#35) the only
+        // protocol warpllm can send there is Anthropic's Messages. A model listing
+        // another surface would be admitted to a request the host cannot serve and
+        // fail as a 404 upstream.
+        if vertex_extension.is_some() {
             for supported in spec.supported_apis() {
                 if !matches!(
                     supported.api(),
                     crate::Api::AnthropicMessages | crate::Api::AnthropicMessagesStream
                 ) {
                     return Err(format!(
-                        "`{key}`: a `vertex` provider serves Claude over the Anthropic \
-                         protocol only, but this model lists {:?}",
+                        "`{key}`: a provider with a `vertex:` block speaks the Anthropic \
+                         protocol only for now (Gemini is #35), but this model lists {:?}",
                         supported.api()
                     ));
                 }
@@ -206,6 +255,29 @@ fn build_provider(registry: &mut Registry, name: &str, entry: ProviderEntry) -> 
         },
     );
     Ok(())
+}
+
+/// The address a provider is reached at: written out, or derived from its
+/// `vertex:` block. Exactly one of the two.
+fn resolve_base_url(
+    name: &str,
+    base_url: Option<String>,
+    vertex: Option<&VertexExtension>,
+) -> Result<String, String> {
+    match (base_url, vertex) {
+        (Some(_), Some(_)) => Err(format!(
+            "`{name}`: `base_url` and a `vertex:` block are both set. Use one or \
+             the other: the block derives the address from its `project_id` and \
+             `region`, so a `base_url` beside it would contradict it. Delete \
+             whichever you did not mean"
+        )),
+        (Some(url), None) => Ok(url),
+        (None, Some(vertex)) => vertex.base_url(name),
+        (None, None) => Err(format!(
+            "`{name}`: no address. Write a `base_url`, or a `vertex:` block with \
+             `project_id` and `region`"
+        )),
+    }
 }
 
 /// The two authentication fields settled into the one thing they describe.
@@ -379,32 +451,96 @@ mod tests {
         assert_eq!(provider.env_api_key(), None);
     }
 
-    /// Claude on Vertex is reached over the Anthropic protocol only, so a model
-    /// listing another surface under a `vertex` provider is a roster nobody can
-    /// serve.
-    #[test]
-    fn a_vertex_provider_may_not_list_a_non_anthropic_surface() {
-        let err = load(
-            "providers:\n  vertex:\n    base_url: \"https://example.test/v1\"\n    auth: oauth\n    \
-             models:\n      vertex/claude:\n        supported_apis:\n          \
-             - {api: openai_compat_chat_completions}\n",
+    /// A one-model roster for the Vertex rules. `address` is whatever the test
+    /// puts under the provider to say where it lives.
+    fn vertex_roster(provider: &str, address: &str, api: &str) -> String {
+        format!(
+            "providers:\n  {provider}:\n{address}    auth: oauth\n    models:\n      {provider}/claude:\n        supported_apis:\n          - {{api: {api}}}\n"
         )
-        .unwrap_err();
-        assert!(err.contains("Anthropic protocol only"), "{err}");
     }
 
-    /// ...and the Anthropic surfaces are what it is for, under `vertex` or any
-    /// `vertex-*` provider.
+    const VERTEX_US: &str = "    vertex:\n      project_id: my-project\n      region: us\n";
+
+    /// The block stands in for `base_url`: the address is derived from it, for
+    /// every kind of region Vertex has.
     #[test]
-    fn a_vertex_provider_may_list_the_anthropic_surfaces() {
-        for name in ["vertex", "vertex-eu"] {
-            load(&format!(
-                "providers:\n  {name}:\n    base_url: \"https://example.test/v1\"\n    auth: oauth\n    \
-                 models:\n      {name}/claude:\n        supported_apis:\n          \
-                 - {{api: anthropic_messages}}\n"
-            ))
-            .unwrap();
+    fn a_vertex_block_derives_the_base_url() {
+        for (region, expected) in [
+            (
+                "global",
+                "https://aiplatform.googleapis.com/v1/projects/my-project/locations/global",
+            ),
+            (
+                "us",
+                "https://aiplatform.us.rep.googleapis.com/v1/projects/my-project/locations/us",
+            ),
+            (
+                "eu",
+                "https://aiplatform.eu.rep.googleapis.com/v1/projects/my-project/locations/eu",
+            ),
+            (
+                "us-east5",
+                "https://us-east5-aiplatform.googleapis.com/v1/projects/my-project/locations/us-east5",
+            ),
+        ] {
+            let block =
+                format!("    vertex:\n      project_id: my-project\n      region: {region}\n");
+            let registry = load(&vertex_roster("vertex_ai", &block, "anthropic_messages")).unwrap();
+            let provider = registry.providers.get("vertex_ai").unwrap();
+            assert_eq!(provider.base_url(), expected, "{region}");
         }
+    }
+
+    /// Both is a mistake whichever way round it was meant, so it is refused
+    /// outright rather than one of the two winning.
+    #[test]
+    fn base_url_and_a_vertex_block_together_are_refused() {
+        let both = format!("    base_url: \"https://example.test/v1\"\n{VERTEX_US}");
+        let err = load(&vertex_roster("vertex_ai", &both, "anthropic_messages")).unwrap_err();
+        assert!(err.contains("one or the other"), "{err}");
+    }
+
+    /// ...and so is neither: the provider has nowhere to be sent.
+    #[test]
+    fn a_provider_with_no_address_is_refused() {
+        let err = load(&vertex_roster("gcp", "", "anthropic_messages")).unwrap_err();
+        assert!(err.contains("no address"), "{err}");
+    }
+
+    /// Until Gemini lands (#35) a Vertex provider speaks the Anthropic protocol only.
+    #[test]
+    fn a_vertex_provider_may_list_only_anthropic_surfaces_for_now() {
+        let err = load(&vertex_roster(
+            "vertex_ai",
+            VERTEX_US,
+            "openai_compat_chat_completions",
+        ))
+        .unwrap_err();
+        assert!(err.contains("Anthropic protocol only"), "{err}");
+        for api in ["anthropic_messages", "anthropic_messages_stream"] {
+            load(&vertex_roster("vertex_ai", VERTEX_US, api)).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_vertex_block_needs_both_a_project_and_a_region() {
+        let block = "    vertex:\n      project_id: my-project\n";
+        let err = load(&vertex_roster("vertex_ai", block, "anthropic_messages")).unwrap_err();
+        assert!(err.contains("region"), "{err}");
+    }
+
+    #[test]
+    fn a_region_that_cannot_sit_in_a_url_is_refused() {
+        let block = "    vertex:\n      project_id: my-project\n      region: us/east5\n";
+        let err = load(&vertex_roster("vertex_ai", block, "anthropic_messages")).unwrap_err();
+        assert!(err.contains("vertex.region"), "{err}");
+    }
+
+    /// Only `vertex_ai` may carry a `vertex:` block.
+    #[test]
+    fn a_vertex_block_is_refused_on_any_other_provider() {
+        let err = load(&vertex_roster("gcp", VERTEX_US, "anthropic_messages")).unwrap_err();
+        assert!(err.contains("only valid on"), "{err}");
     }
 
     /// A provider that mints its own token: it needs a credential, so it is
@@ -842,12 +978,12 @@ mod tests {
 
     /// The accessors read this without a fallback, and with no inheritance
     /// left there is nowhere else it could come from — so a provider missing
-    /// it has no spec to build. `base_url` is the only required provider field
-    /// there is now that a surface names its own protocol.
+    /// it has no spec to build. The address is the one thing a provider must
+    /// give, written as `base_url` or derived from a `vertex:` block.
     #[test]
     fn a_missing_provider_field_is_rejected() {
         let err = load(&format!("{}{}", without("base_url"), model("demo/plain"))).unwrap_err();
-        assert!(err.contains("missing field"), "{err}");
+        assert!(err.contains("no address"), "{err}");
         assert!(err.contains("base_url"), "{err}");
     }
 

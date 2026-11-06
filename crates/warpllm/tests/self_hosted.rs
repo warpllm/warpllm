@@ -154,14 +154,14 @@ fn a_user_roster_routes_to_a_local_server_with_no_credential() {
     });
 }
 
-/// Claude on Vertex, end to end: a caller's roster declares `envelope: vertex`,
+/// Claude on Vertex, end to end: a caller's roster gives a provider a `vertex:` block,
 /// and the request reaches the model-in-the-URL `:rawPredict` path with the
 /// version in the body and neither Anthropic's header nor its `model` field.
 ///
 /// `auth: none` because `auth: oauth` would resolve real Application Default
 /// Credentials; the bearer itself is pinned in the transport's own tests.
 #[test]
-fn a_vertex_envelope_roster_reaches_raw_predict() {
+fn a_vertex_block_roster_reaches_raw_predict() {
     with_env(&[], async {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -182,26 +182,50 @@ fn a_vertex_envelope_roster_reaches_raw_predict() {
             .mount(&server)
             .await;
 
+        let location = "global";
         let roster = format!(
             "providers:\n  \
-               vertex-demo:\n    \
-                 base_url: \"{}/v1/projects/p/locations/global\"\n    \
+               vertex_ai:\n    \
+                 vertex:\n      project_id: p\n      region: {location}\n    \
                  auth: none\n    \
                  models:\n      \
-                   vertex-demo/claude-sonnet-5-5:\n        \
+                   vertex_ai/claude-sonnet-5-5:\n        \
                      supported_apis:\n          \
                        - {{api: anthropic_messages}}\n        \
                      capabilities:\n          \
                        max_output_tokens: 1024\n",
-            server.uri()
         );
         let (_dir, path) = roster_file(&roster);
 
-        let completion = client_with(&path)
-            .chat_completions(request("vertex-demo/claude-sonnet-5-5"))
+        // The block derives a real `aiplatform.googleapis.com` address, which a
+        // test cannot reach, so the client's own per-provider `base_url` points
+        // the provider at the mock instead.
+        let client = Client::new(ClientConfig {
+            specs_path: Some(path),
+            timeout_secs: Some(5),
+            providers: Some(
+                [(
+                    "vertex_ai".to_string(),
+                    warpllm::ProviderConfig {
+                        api_key: None,
+                        base_url: Some(format!(
+                            "{}/v1/projects/p/locations/{location}",
+                            server.uri()
+                        )),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let completion = client
+            .chat_completions(request("vertex_ai/claude-sonnet-5-5"))
             .await
-            .expect("a vertex-envelope roster should complete a request");
-        assert_eq!(completion.model, "vertex-demo/claude-sonnet-5-5");
+            .expect("a vertex-block roster should complete a request");
+        assert_eq!(completion.model, "vertex_ai/claude-sonnet-5-5");
 
         let sent = &server.received_requests().await.unwrap()[0];
         assert!(sent.headers.get("anthropic-version").is_none());

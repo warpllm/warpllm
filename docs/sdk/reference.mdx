@@ -258,32 +258,35 @@ The file is merged over the built-in roster.
 
 ```yaml
 providers:
-  vertex:
-    base_url: "https://aiplatform.us.rep.googleapis.com/v1/projects/my-project/locations/us"
-    envelope: vertex
+  vertex_ai:
+    vertex:
+      project_id: my-project
+      region: us
     auth: oauth
     models:
-      vertex/claude-sonnet-5-5:
+      vertex_ai/claude-sonnet-5-5:
         supported_apis:
           - {api: anthropic_messages}
           - {api: anthropic_messages_stream}
 ```
 
-- **`envelope: vertex`** sends requests in Vertex's shape. The model goes in the
-  URL (`:rawPredict`, or `:streamRawPredict` when streaming), `anthropic_version`
-  goes in the body, and no `anthropic-version` header is sent.
-- **`base_url`** is the whole prefix through the location, because global,
-  multi-region and regional hosts differ. Warpllm appends only the publisher,
-  model and verb.
+- **`vertex:`** goes on the provider named `vertex_ai`, which is the provider whose Messages requests take Vertex's shape. No other provider may carry it. `project_id` and `region` are both required, and warpllm
+  derives the address from them: `global`, a multi-region (`us`, `eu`) and a
+  regional location (`us-east5`) each get their own host. Messages requests go
+  out in Vertex's shape: the model goes in the URL (`:rawPredict`, or
+  `:streamRawPredict` when streaming), `anthropic_version` goes in the body, and
+  no `anthropic-version` header is sent.
+- **`base_url`** is not written here. `vertex_ai` takes either `vertex:` or `base_url`, never both: a roster that sets both is refused when it loads.
 - **`auth: oauth`** means no key in the environment. Warpllm mints a bearer token
   from Application Default Credentials: `gcloud auth application-default login`,
   a service account via `GOOGLE_APPLICATION_CREDENTIALS`, or workload identity.
-- A Vertex provider may list only Anthropic surfaces. Anything else is refused
-  when the roster loads.
+- Until Gemini on Vertex is supported (#35), a provider with a `vertex:` block
+  may list only Anthropic surfaces. Anything else is refused when the roster
+  loads.
 
 <Note>
-  If the client also declares `providers`, name `vertex` in it, or its models are
-  refused with `provider_not_declared`.
+  If the client also declares `providers`, name the Vertex provider in it, or
+  its models are refused with `provider_not_declared`.
 </Note>
 
 ## Chat completions

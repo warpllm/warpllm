@@ -53,11 +53,10 @@ pub(crate) enum Route {
 }
 
 impl Route {
-    /// The provider's name decides, so nobody passes a route: `vertex` and
-    /// `vertex-*` (one per project or region) are Claude on Google Cloud, and
-    /// everything else is the plain Anthropic shape.
+    /// Which shape the request takes, read from the provider name: exactly
+    /// `vertex_ai` is Vertex AI, every other provider is plain Anthropic.
     pub(crate) fn for_provider(provider: &str) -> Self {
-        if provider == "vertex" || provider.starts_with("vertex-") {
+        if provider == "vertex_ai" {
             Route::Vertex
         } else {
             Route::Anthropic
@@ -1056,7 +1055,7 @@ mod tests {
 
         let outcome = post(
             &reqwest::Client::new(),
-            "vertex",
+            "vertex_ai",
             &server.uri(),
             Some(&Authenticator::bearer("ya29.demo".into())),
             &CreateMessageRequest {
@@ -1090,7 +1089,7 @@ mod tests {
 
         let outcome = post_stream(
             &reqwest::Client::new(),
-            "vertex",
+            "vertex_ai",
             &server.uri(),
             Some(&Authenticator::bearer("ya29.demo".into())),
             &CreateMessageRequest {
@@ -1108,5 +1107,13 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
         assert_eq!(body["stream"], true, "{body}");
         assert!(body.get("model").is_none(), "{body}");
+    }
+
+    /// The route is read from the provider name: `vertex_ai` is Vertex and
+    /// anything else is the plain Anthropic shape.
+    #[test]
+    fn the_route_follows_the_provider_name() {
+        assert_eq!(Route::for_provider("vertex_ai"), Route::Vertex);
+        assert_eq!(Route::for_provider("anthropic"), Route::Anthropic);
     }
 }

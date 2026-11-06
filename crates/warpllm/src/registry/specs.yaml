@@ -32,7 +32,8 @@
 #
 # Provider fields
 # ---------------
-#   base_url      Required. Any version prefix included, no trailing slash.
+#   base_url      Required, unless a `vertex:` block stands in for it. Any
+#                 version prefix included, no trailing slash.
 #   env_api_key   Optional. The environment variable holding the API key. Omit
 #                 it if the provider has no key plumbing yet — a request routed
 #                 there then fails saying exactly that.
@@ -55,20 +56,33 @@
 #                 it (neither field). If silence meant the second, a forgotten
 #                 line on a paid provider would quietly become an
 #                 unauthenticated request instead of a loud local error.
-#   envelope      Optional, and its only value is `vertex`. Says this host is
-#                 Claude on Google Cloud: the same Anthropic protocol, but
-#                 the model rides in the URL (`:rawPredict`, or
-#                 `:streamRawPredict` when streaming), `anthropic_version`
-#                 rides in the body, and no `anthropic-version` header is
-#                 sent. `base_url` is then the whole prefix through the
-#                 location, because global, multi-region and regional hosts
-#                 differ. Every model under it may list only Anthropic
-#                 surfaces.
-#
-#                 Vertex has no universal URL, since every caller has their
-#                 own project, so it belongs in a roster of your own and
-#                 never in this file.
+#   vertex        Optional. Claude on Google Cloud: a block with `project_id` and
+#                 `region`, both required. Only valid on the provider
+#                 named `vertex_ai`. It derives the address from them, so it may NOT appear beside
+#                 `base_url`: use one or the other. Until Gemini (#35) a provider
+#                 with one may list only Anthropic surfaces.
 #   models        The models routable under this provider.
+#
+# Claude on Vertex AI
+# -------------------
+# The provider named `vertex_ai` is Claude on Google Cloud. It takes either a
+# `vertex:` block or a plain `base_url`, and a `vertex:` block on any other
+# provider is a load error. The block holds
+# `project_id` and `region`, and warpllm derives the address from them:
+# `https://{host}/v1/projects/{project_id}/locations/{region}`. The host is
+# `aiplatform.googleapis.com` for `global`, `aiplatform.us.rep.googleapis.com`
+# (or `.eu.rep.`) for the `us` and `eu` multi-regions, and
+# `{region}-aiplatform.googleapis.com` for any other. Writing `base_url` as
+# well is a load error.
+#
+# Messages requests to it go out in Vertex's shape: the model rides in the URL
+# (`:rawPredict`, or `:streamRawPredict` when streaming), `anthropic_version`
+# rides in the body, and no `anthropic-version` header is sent. `auth: oauth`
+# mints the bearer token. Until Gemini (#35) its models may list only
+# Anthropic surfaces.
+#
+# Vertex has no universal URL, since every caller has their own project, so it
+# belongs in a roster of your own and never in this file.
 #
 # Model fields
 # ------------

@@ -12,34 +12,31 @@ incompatible, and `^0.1` will not upgrade you into one.
 
 ### Added
 
-- **Claude on Google Cloud (Vertex AI).** A provider in your own roster can
-  declare `envelope: vertex`, and its Claude models are sent the way Vertex
-  expects them: the model rides in the URL (`:rawPredict`, or
-  `:streamRawPredict` when streaming), `anthropic_version` rides in the body,
-  and no `anthropic-version` header is sent. It is still the Anthropic
-  protocol, so models list `anthropic_messages` and `anthropic_messages_stream`
-  and a chat-completions request is translated as it is for any Claude.
-
-  `base_url` is the whole prefix through the location, since global,
-  multi-region and regional hosts differ, and `auth: oauth` mints the bearer
+- **Claude on Google Cloud (Vertex AI).** The provider named `vertex_ai` in your own roster is reached the way Vertex expects Claude: the model rides in
+  the URL (`:rawPredict`, or `:streamRawPredict` when streaming),
+  `anthropic_version` rides in the body, and no `anthropic-version` header is
+  sent. The block holds `project_id` and `region`, and warpllm derives the
+  address from them, so `vertex_ai` takes either a `vertex:` block or a `base_url`, never both. A `vertex:` block on any other provider is a load error. Models list
+  `anthropic_messages` and `anthropic_messages_stream`, and a chat-completions
+  request is translated as it is for any Claude. `auth: oauth` mints the bearer
   token from Application Default Credentials:
 
-```yaml
+  ```yaml
   providers:
-    vertex:
-      base_url: "https://aiplatform.us.rep.googleapis.com/v1/projects/my-project/locations/us"
+    vertex_ai:
+      vertex:
+        project_id: my-project
+        region: us
       auth: oauth
-      envelope: vertex
       models:
-        vertex/claude-sonnet-5-5:
+        vertex_ai/claude-sonnet-5-5:
           supported_apis:
             - {api: anthropic_messages}
             - {api: anthropic_messages_stream}
-```
+  ```
 
-  A provider with `envelope: vertex` may list only Anthropic surfaces; a roster
-  that lists another fails when the client is built. Gemini on Vertex is a
-  different protocol and is not part of this.
+  Until Gemini on Vertex lands (#35), a provider with a `vertex:` block may
+  list only Anthropic surfaces.
 
 ## [0.6.1] - 2026-10-13
 

@@ -35,7 +35,7 @@ incompatible, and `^0.1` will not upgrade you into one.
             - {api: anthropic_messages_stream}
   ```
 
-  Until Gemini on Vertex lands (#35), a provider with a `vertex:` block may
+  Until Gemini on Vertex lands (#35), `vertex_ai`, with a `vertex:` block or a plain `base_url`, may
   list only Anthropic surfaces.
 
 ## [0.6.1] - 2026-10-13

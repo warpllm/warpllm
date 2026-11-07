@@ -280,7 +280,7 @@ providers:
 - **`auth: oauth`** means no key in the environment. Warpllm mints a bearer token
   from Application Default Credentials: `gcloud auth application-default login`,
   a service account via `GOOGLE_APPLICATION_CREDENTIALS`, or workload identity.
-- Until Gemini on Vertex is supported (#35), a provider with a `vertex:` block
+- Until Gemini on Vertex is supported (#35), `vertex_ai` (with a `vertex:` block or a plain `base_url`)
   may list only Anthropic surfaces. Anything else is refused when the roster
   loads.
 

@@ -57,10 +57,11 @@
 #                 line on a paid provider would quietly become an
 #                 unauthenticated request instead of a loud local error.
 #   vertex        Optional. Claude on Google Cloud: a block with `project_id` and
-#                 `region`, both required. Only valid on the provider
-#                 named `vertex_ai`. It derives the address from them, so it may NOT appear beside
-#                 `base_url`: use one or the other. Until Gemini (#35) a provider
-#                 with one may list only Anthropic surfaces.
+#                 `region`, both required. Only valid on the provider named
+#                 `vertex_ai`. It derives the address from them, so it may NOT
+#                 appear beside `base_url`: use one or the other. Until Gemini
+#                 (#35) `vertex_ai` may list only Anthropic surfaces, with a
+#                 `vertex:` block or a plain `base_url`.
 #   models        The models routable under this provider.
 #
 # Claude on Vertex AI

@@ -226,18 +226,19 @@ fn build_provider(registry: &mut Registry, name: &str, entry: ProviderEntry) -> 
     let credential = credential(name, env_api_key, auth)?;
     for (key, model) in models.unwrap_or_default() {
         let spec = build(&key, name, model).map_err(|e| format!("`{key}`: {e}"))?;
-        // A `vertex:` provider is Vertex AI, and until Gemini lands (#35) the only
+        // The provider named `vertex_ai` is Vertex AI, reached through a `vertex:`
+        // block or a plain `base_url`, and until Gemini lands (#35) the only
         // protocol warpllm can send there is Anthropic's Messages. A model listing
         // another surface would be admitted to a request the host cannot serve and
         // fail as a 404 upstream.
-        if vertex_extension.is_some() {
+        if name == "vertex_ai" {
             for supported in spec.supported_apis() {
                 if !matches!(
                     supported.api(),
                     crate::Api::AnthropicMessages | crate::Api::AnthropicMessagesStream
                 ) {
                     return Err(format!(
-                        "`{key}`: a provider with a `vertex:` block speaks the Anthropic \
+                        "`{key}`: the `vertex_ai` provider speaks the Anthropic \
                          protocol only for now (Gemini is #35), but this model lists {:?}",
                         supported.api()
                     ));
@@ -519,6 +520,24 @@ mod tests {
         assert!(err.contains("Anthropic protocol only"), "{err}");
         for api in ["anthropic_messages", "anthropic_messages_stream"] {
             load(&vertex_roster("vertex_ai", VERTEX_US, api)).unwrap();
+        }
+    }
+
+    /// The rule follows the name, not the block: a `vertex_ai` provider reached
+    /// through a plain `base_url` is held to it too, instead of failing as a 404
+    /// upstream.
+    #[test]
+    fn vertex_ai_with_a_plain_base_url_may_list_only_anthropic_surfaces_for_now() {
+        let address = "    base_url: \"https://example.test/v1\"\n";
+        let err = load(&vertex_roster(
+            "vertex_ai",
+            address,
+            "openai_compat_chat_completions",
+        ))
+        .unwrap_err();
+        assert!(err.contains("Anthropic protocol only"), "{err}");
+        for api in ["anthropic_messages", "anthropic_messages_stream"] {
+            load(&vertex_roster("vertex_ai", address, api)).unwrap();
         }
     }
 

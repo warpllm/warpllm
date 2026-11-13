@@ -54,6 +54,9 @@ pub(crate) enum Protocol {
     /// Anthropic's Messages wire format, implemented at
     /// [`crate::protocol::anthropic`].
     Anthropic,
+    /// Google's `generateContent` wire format, to be implemented at
+    /// `crate::protocol::google`.
+    Google,
 }
 
 impl Protocol {
@@ -67,6 +70,7 @@ impl Protocol {
         match self {
             Protocol::OpenAiCompat => "openai_compat",
             Protocol::Anthropic => "anthropic",
+            Protocol::Google => "google",
         }
     }
 
@@ -77,7 +81,11 @@ impl Protocol {
     /// than spelling the names a second time, so the forward and inverse
     /// mappings cannot drift apart; the test below is what forces a new variant
     /// into it.
-    const PROTOCOLS: &'static [Protocol] = &[Protocol::OpenAiCompat, Protocol::Anthropic];
+    const PROTOCOLS: &'static [Protocol] = &[
+        Protocol::OpenAiCompat,
+        Protocol::Anthropic,
+        Protocol::Google,
+    ];
 
     /// The inverse of [`as_str`](Self::as_str): does this string name a
     /// PROTOCOL? Asked of a provider name, which is the only case where the
@@ -166,6 +174,19 @@ pub enum Api {
     /// one.
     #[serde(rename = "anthropic_messages_stream")]
     AnthropicMessagesStream,
+    /// Google's `generateContent`: one request, one whole reply.
+    ///
+    /// A third PROTOCOL, after OpenAI-compatible and Anthropic. Declared by
+    /// Gemini models, on AI Studio and on Vertex alike.
+    #[serde(rename = "google_generate_content")]
+    GoogleGenerateContent,
+    /// The same request asked to stream (`streamGenerateContent`), delivered
+    /// as server-sent events.
+    ///
+    /// Separate for the same reason the other pairs are: a model can serve
+    /// one without the other, so declaring that one never implies this one.
+    #[serde(rename = "google_generate_content_stream")]
+    GoogleGenerateContentStream,
 }
 
 impl Api {
@@ -184,6 +205,8 @@ impl Api {
             Api::OpenAiCompatResponses => "openai_compat_responses",
             Api::AnthropicMessages => "anthropic_messages",
             Api::AnthropicMessagesStream => "anthropic_messages_stream",
+            Api::GoogleGenerateContent => "google_generate_content",
+            Api::GoogleGenerateContentStream => "google_generate_content_stream",
         }
     }
 }
@@ -200,7 +223,7 @@ mod tests {
     fn every_protocol_name_maps_back_to_its_variant() {
         for &protocol in Protocol::PROTOCOLS {
             match protocol {
-                Protocol::OpenAiCompat | Protocol::Anthropic => {}
+                Protocol::OpenAiCompat | Protocol::Anthropic | Protocol::Google => {}
             }
             assert_eq!(Protocol::from_name(protocol.as_str()), Some(protocol));
         }
@@ -263,6 +286,16 @@ mod tests {
             "anthropic_messages_stream",
             Api::AnthropicMessagesStream,
             Protocol::Anthropic,
+        ),
+        (
+            "google_generate_content",
+            Api::GoogleGenerateContent,
+            Protocol::Google,
+        ),
+        (
+            "google_generate_content_stream",
+            Api::GoogleGenerateContentStream,
+            Protocol::Google,
         ),
     ];
 

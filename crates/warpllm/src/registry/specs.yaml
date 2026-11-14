@@ -182,12 +182,13 @@
 #                                          (checked 2026-08-24).
 #   google_generate_content                Google's `generateContent`: one
 #                                          request, one whole reply. NOT
-#                                          implemented yet (#35): the name
-#                                          parses, but no roster line should
-#                                          use it until the transport lands.
+#                                          implemented yet (#35): a roster
+#                                          that lists it is refused at load
+#                                          until the transport lands.
 #   google_generate_content_stream         The same, streamed
 #                                          (`streamGenerateContent`). NOT
-#                                          implemented yet (#35).
+#                                          implemented yet (#35); refused at
+#                                          load, like the one above.
 #
 # Rules EVERY roster is held to
 # -----------------------------

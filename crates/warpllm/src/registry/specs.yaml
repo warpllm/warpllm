@@ -180,6 +180,14 @@
 #                                          `/messages` at all:
 #                                          <https://platform.claude.com/docs/en/api/messages-streaming>
 #                                          (checked 2026-08-24).
+#   google_generate_content                Google's `generateContent`: one
+#                                          request, one whole reply. NOT
+#                                          implemented yet (#35): the name
+#                                          parses, but no roster line should
+#                                          use it until the transport lands.
+#   google_generate_content_stream         The same, streamed
+#                                          (`streamGenerateContent`). NOT
+#                                          implemented yet (#35).
 #
 # Rules EVERY roster is held to
 # -----------------------------

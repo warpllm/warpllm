@@ -226,6 +226,20 @@ fn build_provider(registry: &mut Registry, name: &str, entry: ProviderEntry) -> 
     let credential = credential(name, env_api_key, auth)?;
     for (key, model) in models.unwrap_or_default() {
         let spec = build(&key, name, model).map_err(|e| format!("`{key}`: {e}"))?;
+        // The Google surfaces parse but nothing serves them yet (#35). A roster
+        // listing one would load and then do nothing, so refuse it here.
+        // Remove this check when the transport lands (subtask 6 of #35).
+        for supported in spec.supported_apis() {
+            if matches!(
+                supported.api(),
+                crate::Api::GoogleGenerateContent | crate::Api::GoogleGenerateContentStream
+            ) {
+                return Err(format!(
+                    "`{key}`: `{}` is not implemented yet (#35), so a model cannot list it",
+                    supported.api().as_str()
+                ));
+            }
+        }
         // The provider named `vertex_ai` is Vertex AI, reached through a `vertex:`
         // block or a plain `base_url`, and until Gemini lands (#35) the only
         // protocol warpllm can send there is Anthropic's Messages. A model listing
@@ -539,6 +553,19 @@ mod tests {
         for api in ["anthropic_messages", "anthropic_messages_stream"] {
             load(&vertex_roster("vertex_ai", address, api)).unwrap();
         }
+    }
+
+    /// The Google surfaces parse but are not served yet (#35), so a roster
+    /// listing one is refused instead of loading and doing nothing.
+    #[test]
+    fn unimplemented_google_surfaces_are_refused_at_load() {
+        let address = "    base_url: \"https://example.test/v1\"\n";
+        for api in ["google_generate_content", "google_generate_content_stream"] {
+            let err = load(&vertex_roster("gcp", address, api)).unwrap_err();
+            assert!(err.contains("not implemented yet"), "{api}: {err}");
+            assert!(err.contains(api), "{err}");
+        }
+        load(&vertex_roster("gcp", address, "anthropic_messages")).unwrap();
     }
 
     #[test]

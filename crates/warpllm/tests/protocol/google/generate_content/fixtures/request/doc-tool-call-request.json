@@ -1,0 +1,27 @@
+{
+  "contents": [
+    {"role": "user", "parts": [{"text": "What is the weather in Paris?"}]},
+    {"role": "model", "parts": [{"functionCall": {"id": "call_1", "name": "get_weather", "args": {"city": "Paris"}}}]},
+    {"role": "user", "parts": [{"functionResponse": {"id": "call_1", "name": "get_weather", "response": {"temperature": 20, "unit": "celsius"}}}]}
+  ],
+  "tools": [
+    {"functionDeclarations": [
+      {
+        "name": "get_weather",
+        "description": "Gets the weather for a city.",
+        "parametersJsonSchema": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}},
+          "required": ["city"]
+        }
+      },
+      {
+        "name": "get_time",
+        "description": "Gets the time in a city.",
+        "parameters": {"type": "OBJECT", "properties": {"city": {"type": "STRING"}}}
+      }
+    ]},
+    {"googleSearch": {}}
+  ],
+  "toolConfig": {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["get_weather"]}}
+}

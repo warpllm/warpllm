@@ -1,0 +1,12 @@
+{
+  "contents": [{"role": "user", "parts": [{"text": "List a popular cookie recipe."}]}],
+  "generationConfig": {
+    "responseMimeType": "application/json",
+    "responseJsonSchema": {
+      "type": "object",
+      "properties": {"recipeName": {"type": "string"}, "ingredients": {"type": "array", "items": {"type": "string"}}},
+      "required": ["recipeName"]
+    },
+    "topK": 40
+  }
+}

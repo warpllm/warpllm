@@ -1,0 +1,11 @@
+{
+  "contents": [
+    {"role": "user", "parts": [{"text": "Solve 12 * 17 step by step."}]},
+    {"role": "model", "parts": [
+      {"text": "Let me work this out.", "thought": true},
+      {"text": "12 * 17 = 204", "thoughtSignature": "c2lnbmF0dXJl"}
+    ]},
+    {"role": "user", "parts": [{"text": "Now divide that by 4."}]}
+  ],
+  "generationConfig": {"thinkingConfig": {"includeThoughts": true, "thinkingBudget": -1}}
+}

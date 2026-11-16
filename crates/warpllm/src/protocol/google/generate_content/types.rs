@@ -1,6 +1,10 @@
 //! Google `generateContent` request and response types, tracking
 //! <https://ai.google.dev/api/generate-content>.
 //!
+//! Naming follows Google's own schema names (`Content`, `Part`, `Candidate`,
+//! `UsageMetadata`); the request body, which the reference leaves unnamed,
+//! takes the RPC's `GenerateContentRequest`.
+//!
 //! Wire names are camelCase, which is what Google emits. Every struct captures
 //! fields it does not model in an `unknown_fields` catch-all
 //! ([`UnknownFields`]), so anything Google can put on the wire survives a round
@@ -10,8 +14,8 @@
 //!
 //! Only what a conversion is expected to read or set, the same rule as
 //! [`anthropic::messages::types`](crate::protocol::anthropic::messages::types).
-//! `topK`, `thinkingConfig`, `groundingMetadata` and the rest are untyped until
-//! a conversion needs one.
+//! `groundingMetadata`, `safetyRatings` and the rest are untyped until a
+//! conversion needs one.
 //!
 //! # Optionality
 //!
@@ -145,9 +149,31 @@ pub struct GenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_mime_type: Option<String>,
+    pub top_k: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_schema: Option<Value>,
+    pub thinking_config: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_mime_type: Option<String>,
+    /// Full JSON Schema, from `ChatRequest::response_format`. `responseSchema`,
+    /// the OpenAPI-subset alternative, rides the catch-all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_json_schema: Option<Value>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
+}
+
+/// How much the model thinks, and whether its thoughts come back as parts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThinkingConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_thoughts: Option<bool>,
+    /// int32 on the wire, so signed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<i32>,
+    /// `MINIMAL`, `LOW`, `MEDIUM`, `HIGH` and so on. A string so a new level parses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
     #[serde(flatten)]
     pub unknown_fields: UnknownFields,
 }
@@ -169,10 +195,11 @@ pub struct FunctionDeclaration {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// An OpenAPI-subset schema. `parametersJsonSchema`, the full JSON Schema
-    /// alternative, rides the catch-all.
+    /// Full JSON Schema, which is what `ToolDef::input_schema` already holds,
+    /// so a conversion hands it over unchanged. `parameters`, the OpenAPI-subset
+    /// alternative (mutually exclusive with this), rides the catch-all.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<Value>,
+    pub parameters_json_schema: Option<Value>,
     #[serde(flatten)]
     pub unknown_fields: UnknownFields,
 }
@@ -211,9 +238,20 @@ pub struct GenerateContentResponse {
     pub model_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
-    /// Why a prompt was blocked, if it was. Untyped until a conversion needs it.
+    /// Why a prompt was blocked, if it was.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_feedback: Option<Value>,
+    pub prompt_feedback: Option<PromptFeedback>,
+    #[serde(flatten)]
+    pub unknown_fields: UnknownFields,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptFeedback {
+    /// `SAFETY`, `BLOCKLIST`, `PROHIBITED_CONTENT` and so on. When set there
+    /// are no candidates. A string so a new reason parses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_reason: Option<String>,
     #[serde(flatten)]
     pub unknown_fields: UnknownFields,
 }
@@ -288,7 +326,7 @@ mod tests {
             },
             "tools": [{"functionDeclarations": [
                 {"name": "get_weather", "description": "d",
-                 "parameters": {"type": "OBJECT", "properties": {}}}
+                 "parametersJsonSchema": {"type": "object", "properties": {}}}
             ]}],
             "toolConfig": {"functionCallingConfig": {"mode": "ANY"}}
         }));
@@ -355,9 +393,31 @@ mod tests {
             "promptFeedback": {"blockReason": "SAFETY"}
         }));
         assert!(resp.candidates.is_none());
+        let feedback = resp.prompt_feedback.unwrap();
+        assert_eq!(feedback.block_reason.as_deref(), Some("SAFETY"));
     }
 
     /// A finish reason or mode warpllm has never heard of still parses.
+    /// The generation settings a conversion sets: sampling, schema, thinking.
+    #[test]
+    fn generation_config_carries_sampling_schema_and_thinking() {
+        let cfg: GenerationConfig = round_trip(json!({
+            "topK": 40,
+            "responseMimeType": "application/json",
+            "responseJsonSchema": {"type": "object"},
+            "thinkingConfig": {
+                "includeThoughts": true,
+                "thinkingBudget": -1,
+                "thinkingLevel": "HIGH",
+                "futureField": 1
+            }
+        }));
+        assert_eq!(cfg.top_k, Some(40));
+        let thinking = cfg.thinking_config.unwrap();
+        assert_eq!(thinking.thinking_budget, Some(-1));
+        assert!(thinking.unknown_fields.contains_key("futureField"));
+    }
+
     #[test]
     fn open_string_enums_accept_new_values() {
         let c: Candidate = round_trip(json!({"finishReason": "SOME_NEW_REASON"}));

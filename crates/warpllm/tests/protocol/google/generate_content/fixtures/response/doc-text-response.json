@@ -1,0 +1,17 @@
+{
+  "candidates": [{
+    "content": {"role": "model", "parts": [{"text": "AI learns patterns from data."}]},
+    "finishReason": "STOP",
+    "index": 0,
+    "avgLogprobs": -0.25,
+    "safetyRatings": [{"category": "HARM_CATEGORY_HARASSMENT", "probability": "NEGLIGIBLE"}]
+  }],
+  "usageMetadata": {
+    "promptTokenCount": 9,
+    "candidatesTokenCount": 7,
+    "totalTokenCount": 16,
+    "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 9}]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "resp_abc123"
+}

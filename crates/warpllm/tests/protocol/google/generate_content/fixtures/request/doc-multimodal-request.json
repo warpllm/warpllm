@@ -1,0 +1,11 @@
+{
+  "contents": [{
+    "role": "user",
+    "parts": [
+      {"text": "What is in these two images?"},
+      {"inlineData": {"mimeType": "image/png", "data": "aGVsbG8="}},
+      {"fileData": {"mimeType": "image/jpeg", "fileUri": "https://generativelanguage.googleapis.com/v1beta/files/abc"}}
+    ]
+  }],
+  "generationConfig": {"mediaResolution": "MEDIA_RESOLUTION_LOW"}
+}

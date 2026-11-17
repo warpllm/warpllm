@@ -1,0 +1,15 @@
+{
+  "candidates": [{
+    "content": {"role": "model", "parts": [{"text": "The history of"}]},
+    "finishReason": "MAX_TOKENS",
+    "index": 0,
+    "groundingMetadata": {"webSearchQueries": ["history of computing"]}
+  }],
+  "usageMetadata": {
+    "promptTokenCount": 20,
+    "candidatesTokenCount": 3,
+    "totalTokenCount": 23,
+    "cachedContentTokenCount": 12
+  },
+  "modelVersion": "gemini-2.5-flash"
+}

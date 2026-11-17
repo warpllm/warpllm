@@ -1,0 +1,4 @@
+{
+  "contents": [{"role": "user", "parts": [{"text": "Plan a three-day trip."}]}],
+  "generationConfig": {"thinkingConfig": {"thinkingLevel": "LOW", "futureThinkingField": true}}
+}

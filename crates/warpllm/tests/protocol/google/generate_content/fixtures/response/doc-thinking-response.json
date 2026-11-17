@@ -1,0 +1,17 @@
+{
+  "candidates": [{
+    "content": {"role": "model", "parts": [
+      {"text": "Multiply 12 by 17: 120 + 84.", "thought": true},
+      {"text": "204", "thoughtSignature": "c2lnbmF0dXJl"}
+    ]},
+    "finishReason": "STOP",
+    "index": 0
+  }],
+  "usageMetadata": {
+    "promptTokenCount": 14,
+    "candidatesTokenCount": 3,
+    "thoughtsTokenCount": 86,
+    "totalTokenCount": 103
+  },
+  "modelVersion": "gemini-2.5-pro"
+}

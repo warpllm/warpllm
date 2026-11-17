@@ -26,6 +26,7 @@
 use serde::Deserialize;
 
 pub mod anthropic;
+pub mod google;
 pub mod openai_compat;
 
 /// Catch-all for fields a protocol introduces that this crate does not model

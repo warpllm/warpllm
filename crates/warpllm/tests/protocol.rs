@@ -7,6 +7,8 @@
 
 #[path = "protocol/anthropic/messages/mod.rs"]
 mod anthropic_messages;
+#[path = "protocol/google/generate_content/mod.rs"]
+mod google_generate_content;
 #[path = "protocol/openai_compat/chat_completions/mod.rs"]
 mod openai_compat_chat_completions;
 

@@ -24,5 +24,6 @@
 
 pub(crate) mod anthropic;
 pub(crate) mod error;
+pub(crate) mod google;
 pub(crate) mod openai_compat;
 pub(crate) mod types;

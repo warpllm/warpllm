@@ -7,10 +7,10 @@
 //!
 //! EGRESS ONLY, like Anthropic: warpllm speaks this protocol to a provider and
 //! answers its own callers in theirs, so there is no `ingest_request` and no
-//! retained residue to prefer over the gateway form. The error-body conversion
-//! arrives with the response conversion (subtask 4 of #35).
+//! retained residue to prefer over the gateway form.
 
 pub(crate) mod api;
+pub(crate) mod error;
 
 use serde_json::Value;
 
@@ -40,6 +40,16 @@ pub(crate) fn merged_ext(ext: &ProviderExt, provider: &str) -> UnknownFields {
         }
     }
     merged
+}
+
+/// The inverse of [`merged_ext`] for this protocol's own namespace. An empty
+/// bag is omitted rather than stored as an empty object.
+pub(crate) fn namespaced(fields: UnknownFields) -> ProviderExt {
+    let mut ext = ProviderExt::new();
+    if !fields.is_empty() {
+        ext.insert(Protocol::Google.as_str().into(), Value::Object(fields));
+    }
+    ext
 }
 
 /// Gateway role → Google's two-role vocabulary.

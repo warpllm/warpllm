@@ -238,6 +238,9 @@ pub struct GenerateContentResponse {
     pub model_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
+    /// RFC 3339 time the request was made; the gateway parses it into `created`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_time: Option<String>,
     /// Why a prompt was blocked, if it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_feedback: Option<PromptFeedback>,
@@ -284,6 +287,10 @@ pub struct UsageMetadata {
     pub cached_content_token_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thoughts_token_count: Option<u32>,
+    /// Prompt-side tokens spent by built-in tools. Counted in
+    /// `totalTokenCount`, and folded into the gateway's input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_prompt_token_count: Option<u32>,
     #[serde(flatten)]
     pub unknown_fields: UnknownFields,
 }

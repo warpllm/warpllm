@@ -18,7 +18,7 @@
 //! does not model — `safetySettings`, `cachedContent`, `seed`,
 //! `mediaResolution`, a `fileData` part, a built-in `googleSearch` tool,
 //! `safetyRatings`, `groundingMetadata`, `avgLogprobs`,
-//! `toolUsePromptTokenCount`, `promptTokensDetails` — which are exactly the
+//! `promptTokensDetails`, `trafficType` — which are exactly the
 //! ones a round trip would silently lose.
 
 use warpllm::protocol::google::generate_content::types::{
